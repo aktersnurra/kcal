@@ -127,14 +127,21 @@ let call service user name arguments =
 let response ?(id = `Null) result = `Assoc [ ("jsonrpc", `String "2.0"); ("id", id); ("result", result) ]
 let rpc_error ?(id = `Null) code message = `Assoc [ ("jsonrpc", `String "2.0"); ("id", id); ("error", `Assoc [ ("code", `Int code); ("message", `String message) ]) ]
 
+let protocol_version = "2025-03-26"
+
 let handle ~service ~user request =
   match request with
   | `Assoc fields ->
       let request_id = Option.value (List.assoc_opt "id" fields) ~default:`Null in
+      let valid_request = List.assoc_opt "jsonrpc" fields = Some (`String "2.0") in
       (match List.assoc_opt "method" fields with
-      | Some (`String "initialize") -> response ~id:request_id (`Assoc [ ("protocolVersion", `String "2024-11-05"); ("capabilities", `Assoc [ ("tools", `Assoc []) ]); ("serverInfo", `Assoc [ ("name", `String "kcal"); ("version", `String "dev") ]) ])
-      | Some (`String "tools/list") -> response ~id:request_id (`Assoc [ ("tools", `List tools) ])
-      | Some (`String "tools/call") ->
+      | Some (`String "initialize") when valid_request ->
+          (match List.assoc_opt "params" fields with
+          | Some (`Assoc params) when List.assoc_opt "protocolVersion" params = Some (`String protocol_version) ->
+              response ~id:request_id (`Assoc [ ("protocolVersion", `String protocol_version); ("capabilities", `Assoc [ ("tools", `Assoc []) ]); ("serverInfo", `Assoc [ ("name", `String "kcal"); ("version", `String "dev") ]) ])
+          | _ -> rpc_error ~id:request_id (-32602) "Invalid params")
+      | Some (`String "tools/list") when valid_request -> response ~id:request_id (`Assoc [ ("tools", `List tools) ])
+      | Some (`String "tools/call") when valid_request ->
           (match List.assoc_opt "params" fields with
           | Some (`Assoc params) ->
               (match required_string "name" params, List.assoc_opt "arguments" params with
@@ -144,8 +151,10 @@ let handle ~service ~user request =
                   | Error Error.Not_found -> response ~id:request_id tool_error
                   | Error (Error.Invalid_input _) -> rpc_error ~id:request_id (-32602) "Invalid params"
                   | Error _ -> rpc_error ~id:request_id (-32603) "Internal error")
+              | Ok ("query_meals" | "query_weights" as name), None ->
+                  (match call service user name (`Assoc []) with Ok result -> response ~id:request_id result | Error _ -> rpc_error ~id:request_id (-32603) "Internal error")
               | _ -> rpc_error ~id:request_id (-32602) "Invalid params")
           | _ -> rpc_error ~id:request_id (-32602) "Invalid params")
-      | Some (`String _) -> rpc_error ~id:request_id (-32601) "Method not found"
+      | Some (`String _) when valid_request -> rpc_error ~id:request_id (-32601) "Method not found"
       | _ -> rpc_error ~id:request_id (-32600) "Invalid Request")
-  | _ -> rpc_error (-32600) "Invalid Request"
+  | _ -> rpc_error (-32700) "Parse error"

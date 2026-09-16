@@ -8,8 +8,12 @@ let nullable = function None -> Sqlite3.Data.NULL | Some value -> Sqlite3.Data.T
 let nullable_float = function None -> Sqlite3.Data.NULL | Some value -> Sqlite3.Data.FLOAT value
 
 let with_statement db sql f =
-  let statement = Sqlite3.prepare db sql in
-  Fun.protect ~finally:(fun () -> ignore (Sqlite3.finalize statement)) (fun () -> f statement)
+  try
+    let statement = Sqlite3.prepare db sql in
+    Fun.protect
+      ~finally:(fun () -> try ignore (Sqlite3.finalize statement) with _ -> ())
+      (fun () -> try f statement with _ -> Error (storage_error ()))
+  with _ -> Error (storage_error ())
 
 let bind statement values =
   if Sqlite3.bind_values statement values = Sqlite3.Rc.OK then Ok () else Error (storage_error ())

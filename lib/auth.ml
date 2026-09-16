@@ -1,12 +1,11 @@
 type t = {
-  store : Store_sqlite.t;
+  resolve_user : issuer:string -> subject:string -> (User.t, Error.t) result;
   verifier : Oidc.t;
 }
 
-let make ~store ~verifier = { store; verifier }
+let make ~resolve_user ~verifier = { resolve_user; verifier }
 
 let authenticate_bearer auth token =
   match auth.verifier token with
   | Error () -> Error Error.Unauthorized
-  | Ok claims ->
-      Store_sqlite.resolve_user auth.store ~issuer:claims.issuer ~subject:claims.subject
+  | Ok claims -> auth.resolve_user ~issuer:claims.issuer ~subject:claims.subject

@@ -8,6 +8,7 @@ let response_has_error_code code = function
 let test_record_meal_rejects_user_id () =
   let store, user = Test_support.store_with_user () in
   let request = `Assoc [
+    ("jsonrpc", `String "2.0");
     ("method", `String "tools/call");
     ("params", `Assoc [ ("name", `String "record_meal");
       ("arguments", `Assoc [ ("user_id", `String "other-user");
@@ -18,7 +19,7 @@ let test_record_meal_rejects_user_id () =
 
 let test_tool_list_is_exact () =
   let store, user = Test_support.store_with_user () in
-  let response = Mcp.handle ~service:(Service.make ~store) ~user (`Assoc [ ("method", `String "tools/list") ]) in
+  let response = Mcp.handle ~service:(Service.make ~store) ~user (`Assoc [ ("jsonrpc", `String "2.0"); ("method", `String "tools/list") ]) in
   let names = match response with
     | `Assoc fields -> (match List.assoc_opt "result" fields with Some (`Assoc result) -> (match List.assoc_opt "tools" result with Some (`List tools) -> List.filter_map (function `Assoc tool -> (match List.assoc_opt "name" tool with Some (`String name) -> Some name | _ -> None) | _ -> None) tools | _ -> []) | _ -> [])
     | _ -> [] in

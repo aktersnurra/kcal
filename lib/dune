@@ -1,4 +1,4 @@
 (library
  (name kcal)
  (wrapped false)
- (libraries jose ptime sqlite3 unix uuidm yojson))
+ (libraries jose ptime sqlite3 unix uuidm yojson eio eio_posix httpun httpun-eio))

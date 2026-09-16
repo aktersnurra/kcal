@@ -1,34 +1,40 @@
-(executable
+(test
  (name test_migration)
  (modules test_migration test_support)
- (libraries alcotest sqlite3 kcal))
+ (libraries alcotest sqlite3 kcal)
+ (deps ../migrations/001_ledger.sql))
 
-(executable
+(test
  (name test_domain)
  (modules test_domain)
  (libraries alcotest kcal))
 
-(executable
+(test
  (name test_meal_store)
  (modules test_meal_store test_support)
- (libraries alcotest sqlite3 kcal))
+ (libraries alcotest sqlite3 kcal)
+ (deps ../migrations/001_ledger.sql))
 
-(executable
+(test
  (name test_weigh_in_store)
  (modules test_weigh_in_store test_support)
- (libraries alcotest sqlite3 kcal))
+ (libraries alcotest sqlite3 kcal)
+ (deps ../migrations/001_ledger.sql))
 
-(executable
+(test
  (name test_auth)
  (modules test_auth test_support)
- (libraries alcotest sqlite3 kcal))
+ (libraries alcotest sqlite3 kcal)
+ (deps ../migrations/001_ledger.sql))
 
-(executable
+(test
  (name test_service_isolation)
  (modules test_service_isolation test_support)
- (libraries alcotest sqlite3 kcal))
+ (libraries alcotest sqlite3 kcal)
+ (deps ../migrations/001_ledger.sql))
 
-(executable
+(test
  (name test_mcp)
  (modules test_mcp test_support)
- (libraries alcotest sqlite3 kcal))
+ (libraries alcotest sqlite3 kcal)
+ (deps ../migrations/001_ledger.sql))

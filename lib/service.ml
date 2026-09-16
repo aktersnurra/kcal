@@ -2,6 +2,9 @@ type t = { store : Store_sqlite.t }
 
 let make ~store = { store }
 
+let resolve_user service ~issuer ~subject =
+  Store_sqlite.resolve_user service.store ~issuer ~subject
+
 let record_meal service ~user input =
   Store_sqlite.create_meal service.store ~user input
 
