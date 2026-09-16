@@ -34,6 +34,12 @@
  (deps ../migrations/001_ledger.sql))
 
 (test
+ (name test_http)
+ (modules test_http test_support)
+ (libraries alcotest sqlite3 kcal)
+ (deps ../migrations/001_ledger.sql))
+
+(test
  (name test_mcp)
  (modules test_mcp test_support)
  (libraries alcotest sqlite3 kcal)
