@@ -2,3 +2,8 @@
  (name test_migration)
  (modules test_migration test_support)
  (libraries alcotest sqlite3 kcal))
+
+(executable
+ (name test_domain)
+ (modules test_domain)
+ (libraries alcotest kcal))
