@@ -15,6 +15,17 @@ let test_cannot_read_another_users_meal () =
     | Error Error.Not_found -> true
     | _ -> false)
 
+let test_foreign_meal_operations_are_hidden () =
+  let store, alice, bob = Test_support.store_with_two_users () in
+  let meal = Test_support.create_meal store alice in
+  let hidden result = match result with Error Error.Not_found -> true | _ -> false in
+  Alcotest.(check bool) "foreign get" true (hidden (Store_sqlite.get_meal store ~user:bob meal.id));
+  Alcotest.(check bool) "foreign update" true
+    (hidden (Store_sqlite.update_meal store ~user:bob meal.id Meal.empty_patch));
+  Alcotest.(check bool) "foreign delete" true (hidden (Store_sqlite.delete_meal store ~user:bob meal.id));
+  Alcotest.(check int) "foreign query" 0
+    (List.length (Result.get_ok (Store_sqlite.query_meals store ~user:bob ~from:None ~to_:None ~limit:100)))
+
 let test_meal_crud_and_soft_delete () =
   let store, user = Test_support.store_with_user () in
   let meal = Test_support.create_meal store user in
@@ -54,6 +65,7 @@ let () =
           Alcotest.test_case "user resolution is stable" `Quick test_user_resolution_is_stable;
           Alcotest.test_case "users cannot read each other's meals" `Quick
             test_cannot_read_another_users_meal;
+          Alcotest.test_case "foreign meal operations are hidden" `Quick test_foreign_meal_operations_are_hidden;
           Alcotest.test_case "meal CRUD and soft delete" `Quick test_meal_crud_and_soft_delete;
           Alcotest.test_case "deleted meals are excluded from queries" `Quick
             test_deleted_meal_is_excluded_from_query;

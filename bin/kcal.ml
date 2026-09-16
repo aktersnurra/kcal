@@ -20,10 +20,10 @@ let serve () =
           | Error _ -> prerr_endline "migration failed"; 1
           | Ok () ->
               let store = db in
-              let client = { Oidc.discover = (fun ~issuer:_ -> Error ()); fetch_jwks = (fun ~uri:_ -> Error ()) } in
+              let client = Oidc.https_client env in
               let verifier = Oidc.make ~issuer:config.oidc_issuer ~audience:config.oidc_audience ~client () in
               let auth = Auth.make ~resolve_user:(Store_sqlite.resolve_user store) ~verifier in
-              Http.run env ~config ~auth (Service.make ~store); 0)
+              Http_adapter.run env ~config ~auth (Service.make ~store); 0)
 
 let command =
   let open Cmdliner in

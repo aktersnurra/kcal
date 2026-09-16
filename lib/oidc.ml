@@ -118,6 +118,96 @@ let make ~issuer ~audience ?(clock = unix_clock) ~client () =
             | Error _ -> Error ()
             | Ok jwt -> claims_of_jwt ~issuer ~audience ~now jwt)
 
+let max_age headers =
+  match Cohttp.Header.get headers "cache-control" with
+  | None -> None
+  | Some value ->
+      String.split_on_char ',' value
+      |> List.find_map (fun directive ->
+             match String.split_on_char '=' (String.trim directive) with
+             | [ name; seconds ] when String.lowercase_ascii name = "max-age" ->
+                 (try Some (int_of_string (String.trim seconds)) with Failure _ -> None)
+             | _ -> None)
+
+let https_client env =
+  let certificate_bundle () =
+    let rec read = function
+      | [] -> Error ()
+      | path :: rest ->
+          (try
+             let channel = open_in_bin path in
+             let pem =
+               Fun.protect ~finally:(fun () -> close_in_noerr channel) (fun () ->
+                   really_input_string channel (in_channel_length channel))
+             in
+             match X509.Certificate.decode_pem_multiple pem with
+             | Ok certificates when certificates <> [] -> Ok certificates
+             | _ -> read rest
+           with Sys_error _ -> read rest)
+    in
+    read [ "/etc/ssl/cert.pem"; "/etc/ssl/certs/ca-certificates.crt" ]
+  in
+  let tls =
+    match certificate_bundle () with
+    | Error () -> Error ()
+    | Ok certificates ->
+        let authenticator =
+          X509.Authenticator.chain_of_trust
+            ~time:(fun () -> Ptime.of_float_s (Unix.gettimeofday ())) certificates
+        in
+        (match Tls.Config.client ~authenticator () with Ok config -> Ok config | Error _ -> Error ())
+  in
+  match tls with
+  | Error () -> { discover = (fun ~issuer:_ -> Error ()); fetch_jwks = (fun ~uri:_ -> Error ()) }
+  | Ok tls_config ->
+      Mirage_crypto_rng_unix.use_default ();
+      let https uri flow =
+        match Uri.host uri with
+        | None -> failwith "missing HTTPS host"
+        | Some host ->
+            (match Domain_name.of_string host with
+            | Error _ -> failwith "invalid HTTPS host"
+            | Ok host -> Tls_eio.client_of_flow tls_config ~host:(Domain_name.host_exn host) flow)
+      in
+      let client = Cohttp_eio.Client.make ~https:(Some https) env#net in
+      let get uri =
+        try
+          let uri = Uri.of_string uri in
+          if Uri.scheme uri <> Some "https" then Error ()
+          else
+            Eio.Switch.run @@ fun sw ->
+            let response, body = Cohttp_eio.Client.get client ~sw uri in
+            if Cohttp.Response.status response <> `OK then Error ()
+            else Ok (Eio.Flow.read_all body, Cohttp.Response.headers response)
+        with _ -> Error ()
+      in
+      {
+        discover =
+          (fun ~issuer ->
+            if Uri.scheme (Uri.of_string issuer) <> Some "https" then Error ()
+            else
+              match get (Uri.to_string (Uri.with_path (Uri.of_string issuer) "/.well-known/openid-configuration")) with
+              | Error () -> Error ()
+              | Ok (body, headers) ->
+                  (try
+                     match Yojson.Safe.from_string body with
+                     | `Assoc fields ->
+                         (match List.assoc_opt "issuer" fields, List.assoc_opt "jwks_uri" fields with
+                         | Some (`String discovered_issuer), Some (`String jwks_uri)
+                           when Uri.scheme (Uri.of_string jwks_uri) = Some "https" ->
+                             Ok { issuer = discovered_issuer; jwks_uri; max_age_s = max_age headers }
+                         | _ -> Error ())
+                     | _ -> Error ()
+                   with Yojson.Json_error _ -> Error ()));
+        fetch_jwks =
+          (fun ~uri ->
+            match get uri with
+            | Error () -> Error ()
+            | Ok (body, headers) ->
+                (try Ok { keys = Jose.Jwks.of_string body; max_age_s = max_age headers }
+                 with _ -> Error ()));
+      }
+
 let of_verified_claims ?(issuer = "https://issuer.example")
     ?(audience = "kcal-client") ?(clock = unix_clock) verify token =
   match verify token with

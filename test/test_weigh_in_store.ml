@@ -15,6 +15,17 @@ let test_cannot_update_another_users_weight () =
     | Error Error.Not_found -> true
     | _ -> false)
 
+let test_foreign_weight_operations_are_hidden () =
+  let store, alice, bob = Test_support.store_with_two_users () in
+  let weight = Test_support.create_weight store alice in
+  let hidden result = match result with Error Error.Not_found -> true | _ -> false in
+  Alcotest.(check bool) "foreign get" true (hidden (Store_sqlite.get_weigh_in store ~user:bob weight.id));
+  Alcotest.(check bool) "foreign update" true
+    (hidden (Store_sqlite.update_manual_weigh_in store ~user:bob weight.id Weigh_in.empty_patch));
+  Alcotest.(check bool) "foreign delete" true (hidden (Store_sqlite.delete_weigh_in store ~user:bob weight.id));
+  Alcotest.(check int) "foreign query" 0
+    (List.length (Result.get_ok (Store_sqlite.query_weigh_ins store ~user:bob ~from:None ~to_:None ~limit:100)))
+
 let test_weight_crud_and_delete () =
   let store, user = Test_support.store_with_user () in
   let weight = Test_support.create_weight store user in
@@ -54,6 +65,7 @@ let () =
         [
           Alcotest.test_case "recorded weight is manual" `Quick test_recorded_weight_is_manual;
           Alcotest.test_case "users cannot update each other's weights" `Quick test_cannot_update_another_users_weight;
+          Alcotest.test_case "foreign weight operations are hidden" `Quick test_foreign_weight_operations_are_hidden;
           Alcotest.test_case "weight CRUD and delete" `Quick test_weight_crud_and_delete;
           Alcotest.test_case "weight queries are ordered and bounded" `Quick test_weight_queries_are_ordered_and_bounded;
           Alcotest.test_case "invalid weight update is rejected" `Quick test_rejects_invalid_weight_update;
