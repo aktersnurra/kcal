@@ -24,13 +24,18 @@ internal listener directly.
 install -m 0555 deploy/kcal.rc.d /usr/local/etc/rc.d/kcal
 install -d -o kcal -g kcal /var/db/kcal
 cp .env.example /usr/local/etc/kcal.env
-# edit the environment values, then:
+# edit the environment values, then export them for the migration process:
+set -a
+. /usr/local/etc/kcal.env
+set +a
 kcal migrate
 service kcal onestart
 curl -fsS http://127.0.0.1:8080/health
 ```
 
-`kcal migrate` is safe to run repeatedly; applied versions are not rerun.
+`kcal migrate` is safe to run repeatedly; applied versions are not rerun. Before
+deployment, run the migration and health-check commands in the target FreeBSD
+jail as a required smoke test.
 
 ## Deferred work
 

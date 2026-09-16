@@ -40,6 +40,20 @@ let test_weight_crud_and_delete () =
   Alcotest.(check bool) "deleted hidden" true
     (match Store_sqlite.get_weigh_in store ~user weight.id with Error Error.Not_found -> true | _ -> false)
 
+let test_locked_weight_get_and_update_are_storage_errors () =
+  Test_support.with_exclusive_lock
+    (fun store user -> (Test_support.create_weight store user, Weigh_in.empty_patch))
+    (fun store user (weight, patch) ->
+      let is_storage_error = function
+        | Error (Error.Storage_error "SQLite operation failed") -> true
+        | _ -> false
+      in
+      Alcotest.(check bool) "locked get is sanitized" true
+        (is_storage_error (Store_sqlite.get_weigh_in store ~user weight.id));
+      Alcotest.(check bool) "locked update is sanitized" true
+        (is_storage_error
+           (Store_sqlite.update_manual_weigh_in store ~user weight.id patch)))
+
 let test_weight_queries_are_ordered_and_bounded () =
   let store, user = Test_support.store_with_user () in
   let later = Result.get_ok (Time.parse_offset_datetime "2026-01-02T10:00:00Z") in
@@ -67,6 +81,8 @@ let () =
           Alcotest.test_case "users cannot update each other's weights" `Quick test_cannot_update_another_users_weight;
           Alcotest.test_case "foreign weight operations are hidden" `Quick test_foreign_weight_operations_are_hidden;
           Alcotest.test_case "weight CRUD and delete" `Quick test_weight_crud_and_delete;
+          Alcotest.test_case "locked weight get and update are sanitized" `Quick
+            test_locked_weight_get_and_update_are_storage_errors;
           Alcotest.test_case "weight queries are ordered and bounded" `Quick test_weight_queries_are_ordered_and_bounded;
           Alcotest.test_case "invalid weight update is rejected" `Quick test_rejects_invalid_weight_update;
         ] );

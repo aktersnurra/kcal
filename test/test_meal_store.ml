@@ -47,6 +47,19 @@ let test_deleted_meal_is_excluded_from_query () =
        (Result.get_ok
           (Store_sqlite.query_meals store ~user ~from:None ~to_:None ~limit:100)))
 
+let test_locked_meal_get_and_update_are_storage_errors () =
+  Test_support.with_exclusive_lock
+    (fun store user -> (Test_support.create_meal store user, Meal.empty_patch))
+    (fun store user (meal, patch) ->
+      let is_storage_error = function
+        | Error (Error.Storage_error "SQLite operation failed") -> true
+        | _ -> false
+      in
+      Alcotest.(check bool) "locked get is sanitized" true
+        (is_storage_error (Store_sqlite.get_meal store ~user meal.id));
+      Alcotest.(check bool) "locked update is sanitized" true
+        (is_storage_error (Store_sqlite.update_meal store ~user meal.id patch)))
+
 let test_rejects_invalid_limit () =
   let store, user = Test_support.store_with_user () in
   List.iter
@@ -69,6 +82,8 @@ let () =
           Alcotest.test_case "meal CRUD and soft delete" `Quick test_meal_crud_and_soft_delete;
           Alcotest.test_case "deleted meals are excluded from queries" `Quick
             test_deleted_meal_is_excluded_from_query;
+          Alcotest.test_case "locked meal get and update are sanitized" `Quick
+            test_locked_meal_get_and_update_are_storage_errors;
           Alcotest.test_case "invalid query limits are rejected" `Quick test_rejects_invalid_limit;
         ] );
     ]

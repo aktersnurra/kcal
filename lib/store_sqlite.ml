@@ -34,6 +34,18 @@ let with_statement db sql f =
 let bind statement values =
   if Sqlite3.bind_values statement values = Sqlite3.Rc.OK then Ok () else Error (storage_error ())
 
+let row_or_not_found statement decode =
+  match Sqlite3.step statement with
+  | Sqlite3.Rc.ROW -> (match decode statement with Some value -> Ok value | None -> Error (storage_error ()))
+  | Sqlite3.Rc.DONE -> Error Error.Not_found
+  | _ -> Error (storage_error ())
+
+let tombstone_or_not_found statement =
+  match Sqlite3.step statement with
+  | Sqlite3.Rc.ROW -> Ok ()
+  | Sqlite3.Rc.DONE -> Error Error.Not_found
+  | _ -> Error (storage_error ())
+
 let text statement column = Sqlite3.column_text statement column
 let float statement column = Sqlite3.column_double statement column
 let int statement column = Sqlite3.column_int statement column
@@ -101,7 +113,7 @@ let get_meal db ~user id =
     (fun statement ->
       match bind statement [ Sqlite3.Data.TEXT (Meal_id.to_string id); Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
       | Error _ as error -> error
-      | Ok () -> if Sqlite3.step statement = Sqlite3.Rc.ROW then match meal_of_row statement with Some meal -> Ok meal | None -> Error (storage_error ()) else Error Error.Not_found)
+      | Ok () -> row_or_not_found statement meal_of_row)
 
 let valid_meal_patch (patch : Meal.patch) =
   let nonnegative = function None -> true | Some value -> value >= 0.0 in
@@ -122,7 +134,7 @@ let update_meal db ~user id patch =
                      Sqlite3.Data.TEXT updated_at; Sqlite3.Data.TEXT (Meal_id.to_string id); Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] in
       match bind statement values with
       | Error _ as error -> error
-      | Ok () -> if Sqlite3.step statement = Sqlite3.Rc.ROW then match meal_of_row statement with Some meal -> Ok meal | None -> Error (storage_error ()) else Error Error.Not_found)
+      | Ok () -> row_or_not_found statement meal_of_row)
 
 let valid_query ~from ~to_ ~limit =
   limit >= 1 && limit <= 500 && match from, to_ with Some lower, Some upper -> Ptime.compare lower upper <= 0 | _ -> true
@@ -151,14 +163,16 @@ let delete_meal db ~user id =
       match bind statement [ Sqlite3.Data.TEXT current; Sqlite3.Data.TEXT current; Sqlite3.Data.TEXT (Meal_id.to_string id); Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
       | Error _ as error -> error
       | Ok () ->
-          if Sqlite3.step statement <> Sqlite3.Rc.DONE then Error (storage_error ())
-          else if Sqlite3.changes db = 1 then Ok ()
-          else
-            with_statement db "SELECT 1 FROM meals WHERE id = ? AND user_id = ? AND deleted_at IS NOT NULL"
-              (fun tombstone ->
-                match bind tombstone [ Sqlite3.Data.TEXT (Meal_id.to_string id); Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
-                | Error _ as error -> error
-                | Ok () -> if Sqlite3.step tombstone = Sqlite3.Rc.ROW then Ok () else Error Error.Not_found))
+          (match Sqlite3.step statement with
+          | Sqlite3.Rc.DONE ->
+              if Sqlite3.changes db = 1 then Ok ()
+              else
+                with_statement db "SELECT 1 FROM meals WHERE id = ? AND user_id = ? AND deleted_at IS NOT NULL"
+                  (fun tombstone ->
+                    match bind tombstone [ Sqlite3.Data.TEXT (Meal_id.to_string id); Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
+                    | Error _ as error -> error
+                    | Ok () -> tombstone_or_not_found tombstone)
+          | _ -> Error (storage_error ())))
 
 
 let weigh_in_columns =
@@ -198,7 +212,7 @@ let get_weigh_in db ~user id =
     (fun statement ->
       match bind statement [ Sqlite3.Data.TEXT (Weigh_in_id.to_string id); Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
       | Error _ as error -> error
-      | Ok () -> if Sqlite3.step statement = Sqlite3.Rc.ROW then match weigh_in_of_row statement with Some weight -> Ok weight | None -> Error (storage_error ()) else Error Error.Not_found)
+      | Ok () -> row_or_not_found statement weigh_in_of_row)
 
 let valid_weigh_in_patch (patch : Weigh_in.patch) =
   match patch.weight_kg with None -> true | Some weight -> weight > 0.0
@@ -212,7 +226,7 @@ let update_manual_weigh_in db ~user id patch =
       match bind statement [ nullable (Option.map timestamp patch.measured_at); nullable_float patch.weight_kg; Sqlite3.Data.TEXT current;
                              Sqlite3.Data.TEXT (Weigh_in_id.to_string id); Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
       | Error _ as error -> error
-      | Ok () -> if Sqlite3.step statement = Sqlite3.Rc.ROW then match weigh_in_of_row statement with Some weight -> Ok weight | None -> Error (storage_error ()) else Error Error.Not_found)
+      | Ok () -> row_or_not_found statement weigh_in_of_row)
 
 let query_weigh_ins db ~user ~from ~to_ ~limit =
   if not (valid_query ~from ~to_ ~limit) then Error (invalid_input ()) else
@@ -238,11 +252,13 @@ let delete_weigh_in db ~user id =
       match bind statement [ Sqlite3.Data.TEXT current; Sqlite3.Data.TEXT current; Sqlite3.Data.TEXT (Weigh_in_id.to_string id); Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
       | Error _ as error -> error
       | Ok () ->
-          if Sqlite3.step statement <> Sqlite3.Rc.DONE then Error (storage_error ())
-          else if Sqlite3.changes db = 1 then Ok ()
-          else
-            with_statement db "SELECT 1 FROM weigh_ins WHERE id = ? AND user_id = ? AND deleted_at IS NOT NULL"
-              (fun tombstone ->
-                match bind tombstone [ Sqlite3.Data.TEXT (Weigh_in_id.to_string id); Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
-                | Error _ as error -> error
-                | Ok () -> if Sqlite3.step tombstone = Sqlite3.Rc.ROW then Ok () else Error Error.Not_found))
+          (match Sqlite3.step statement with
+          | Sqlite3.Rc.DONE ->
+              if Sqlite3.changes db = 1 then Ok ()
+              else
+                with_statement db "SELECT 1 FROM weigh_ins WHERE id = ? AND user_id = ? AND deleted_at IS NOT NULL"
+                  (fun tombstone ->
+                    match bind tombstone [ Sqlite3.Data.TEXT (Weigh_in_id.to_string id); Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
+                    | Error _ as error -> error
+                    | Ok () -> tombstone_or_not_found tombstone)
+          | _ -> Error (storage_error ())))

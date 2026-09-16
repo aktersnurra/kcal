@@ -30,6 +30,30 @@ let store_with_two_users () =
   in
   (store, alice, bob)
 
+let with_exclusive_lock setup f =
+  let path = Filename.temp_file "kcal-store" ".sqlite" in
+  let store = Sqlite3.db_open path in
+  Fun.protect
+    ~finally:(fun () ->
+      ignore (Sqlite3.db_close store);
+      Sys.remove path)
+    (fun () ->
+      Result.get_ok (Migration.apply_all store);
+      let user =
+        Result.get_ok
+          (Store_sqlite.resolve_user store ~issuer:"https://issuer.example" ~subject:"alice")
+      in
+      let value = setup store user in
+      let locker = Sqlite3.db_open path in
+      Fun.protect
+        ~finally:(fun () ->
+          ignore (Sqlite3.exec locker "ROLLBACK");
+          ignore (Sqlite3.db_close locker))
+        (fun () ->
+          Alcotest.(check bool) "exclusive lock acquired" true
+            (Sqlite3.exec locker "BEGIN EXCLUSIVE" = Sqlite3.Rc.OK);
+          f store user value))
+
 let meal_input ?eaten_at () =
   Meal.
     {
