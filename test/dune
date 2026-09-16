@@ -17,3 +17,13 @@
  (name test_weigh_in_store)
  (modules test_weigh_in_store test_support)
  (libraries alcotest sqlite3 kcal))
+
+(executable
+ (name test_auth)
+ (modules test_auth test_support)
+ (libraries alcotest sqlite3 kcal))
+
+(executable
+ (name test_service_isolation)
+ (modules test_service_isolation test_support)
+ (libraries alcotest sqlite3 kcal))
