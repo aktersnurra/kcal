@@ -1,0 +1,4 @@
+(library
+ (name kcal)
+ (wrapped false)
+ (libraries sqlite3 ptime uuidm))

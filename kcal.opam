@@ -1,0 +1,22 @@
+opam-version: "2.0"
+name: "kcal"
+version: "dev"
+synopsis: "Portable local calorie ledger"
+depends: [
+  "ocaml" {>= "5.2"}
+  "dune" {>= "3.24"}
+  "eio"
+  "eio_main"
+  "eio_posix"
+  "cohttp-eio"
+  "tls-eio"
+  "httpun-eio"
+  "jose"
+  "sqlite3"
+  "yojson"
+  "ptime"
+  "uuidm"
+  "cmdliner"
+  "alcotest" {with-test}
+]
+build: [ ["dune" "build" "-p" name] ]
