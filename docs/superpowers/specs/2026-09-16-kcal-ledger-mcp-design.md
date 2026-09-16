@@ -8,7 +8,7 @@ The product boundary remains: ChatGPT interprets; `kcal` remembers. The service 
 
 ## Architecture
 
-`kcal` is a single OCaml 5.5.1 executable using Eio and effect handlers. Caddy terminates TLS and proxies a small HTTP surface:
+`kcal` is a single OCaml 5.5.1 executable using Eio and effect handlers. It depends on the portable `eio`, `eio_main`, and `eio_posix` packages, never `eio_linux` or io_uring. Caddy terminates TLS and proxies a small HTTP surface:
 
 - `GET /health` returns a non-sensitive health response.
 - `POST /mcp` implements synchronous Streamable HTTP MCP JSON-RPC.
@@ -50,7 +50,7 @@ Alcotest runs against temporary SQLite databases. Tests cover migration from an 
 
 ## Operational shape
 
-Configuration is environment-based and documented through an example environment file. The initial command set is `kcal serve` and `kcal migrate`. Caddy owns public TLS; SQLite and the internal listening address are not exposed directly.
+The production target is a native FreeBSD jail, not a bhyve Linux VM. The service and Caddy run from FreeBSD packages/opam in the jail and are supervised with `rc.d`, not systemd. The database lives on a local ZFS dataset mounted into the jail; it must not reside on NFS. Configuration is environment-based and documented through an example environment file. The initial command set is `kcal serve` and `kcal migrate`. Caddy owns public TLS; SQLite and the internal listening address are not exposed directly. Target-jail smoke tests cover the Eio HTTP listener and SQLite migration before deployment.
 
 ## Deferred follow-up
 
