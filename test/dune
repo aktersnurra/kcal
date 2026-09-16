@@ -27,3 +27,8 @@
  (name test_service_isolation)
  (modules test_service_isolation test_support)
  (libraries alcotest sqlite3 kcal))
+
+(executable
+ (name test_mcp)
+ (modules test_mcp test_support)
+ (libraries alcotest sqlite3 kcal))
