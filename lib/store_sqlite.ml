@@ -139,3 +139,90 @@ let delete_meal db ~user id =
                 match bind tombstone [ Sqlite3.Data.TEXT (Meal_id.to_string id); Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
                 | Error _ as error -> error
                 | Ok () -> if Sqlite3.step tombstone = Sqlite3.Rc.ROW then Ok () else Error Error.Not_found))
+
+
+let weigh_in_columns =
+  "id, user_id, measured_at, weight_kg, source, external_id, created_at, updated_at, deleted_at"
+
+let weigh_in_of_row statement =
+  match
+    ( Weigh_in_id.of_string (text statement 0), User_id.of_string (text statement 1),
+      parse_time (text statement 2), parse_time (text statement 6), parse_time (text statement 7) )
+  with
+  | Some id, Some user_id, Some measured_at, Some created_at, Some updated_at ->
+      let source = match text statement 4 with "manual" -> Some Weigh_in.Manual | "withings" -> Some Weigh_in.Withings | _ -> None in
+      (match source with
+      | Some source -> Some Weigh_in.{ id; user_id; measured_at; weight_kg = float statement 3; source;
+                                       external_id = optional_text statement 5; created_at; updated_at;
+                                       deleted_at = Option.bind (optional_text statement 8) parse_time }
+      | None -> None)
+  | _ -> None
+
+let create_manual_weigh_in db ~user (input : Weigh_in.manual_create) =
+  match Weigh_in.validate_manual_create input.measured_at input.weight_kg with
+  | Error _ as error -> error
+  | Ok () ->
+      let current_time = now () in
+      let measured_at = timestamp (Option.value input.measured_at ~default:current_time) in
+      let current = timestamp current_time in
+      with_statement db
+        ("INSERT INTO weigh_ins (" ^ weigh_in_columns ^ ") VALUES (?, ?, ?, ?, 'manual', NULL, ?, ?, NULL) RETURNING " ^ weigh_in_columns)
+        (fun statement ->
+          match bind statement [ Sqlite3.Data.TEXT (Weigh_in_id.to_string (Weigh_in_id.fresh ())); Sqlite3.Data.TEXT (User_id.to_string user.User.id);
+                                 Sqlite3.Data.TEXT measured_at; Sqlite3.Data.FLOAT input.weight_kg; Sqlite3.Data.TEXT current; Sqlite3.Data.TEXT current ] with
+          | Error _ as error -> error
+          | Ok () -> if Sqlite3.step statement = Sqlite3.Rc.ROW then match weigh_in_of_row statement with Some weight -> Ok weight | None -> Error (storage_error ()) else Error (storage_error ()))
+
+let get_weigh_in db ~user id =
+  with_statement db ("SELECT " ^ weigh_in_columns ^ " FROM weigh_ins WHERE id = ? AND user_id = ? AND deleted_at IS NULL")
+    (fun statement ->
+      match bind statement [ Sqlite3.Data.TEXT (Weigh_in_id.to_string id); Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
+      | Error _ as error -> error
+      | Ok () -> if Sqlite3.step statement = Sqlite3.Rc.ROW then match weigh_in_of_row statement with Some weight -> Ok weight | None -> Error (storage_error ()) else Error Error.Not_found)
+
+let valid_weigh_in_patch (patch : Weigh_in.patch) =
+  match patch.weight_kg with None -> true | Some weight -> weight > 0.0
+
+let update_manual_weigh_in db ~user id patch =
+  if not (valid_weigh_in_patch patch) then Error (invalid_input ()) else
+  let current = timestamp (now ()) in
+  with_statement db
+    ("UPDATE weigh_ins SET measured_at = COALESCE(?, measured_at), weight_kg = COALESCE(?, weight_kg), updated_at = ? WHERE id = ? AND user_id = ? AND deleted_at IS NULL AND source = 'manual' RETURNING " ^ weigh_in_columns)
+    (fun statement ->
+      match bind statement [ nullable (Option.map timestamp patch.measured_at); nullable_float patch.weight_kg; Sqlite3.Data.TEXT current;
+                             Sqlite3.Data.TEXT (Weigh_in_id.to_string id); Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
+      | Error _ as error -> error
+      | Ok () -> if Sqlite3.step statement = Sqlite3.Rc.ROW then match weigh_in_of_row statement with Some weight -> Ok weight | None -> Error (storage_error ()) else Error Error.Not_found)
+
+let query_weigh_ins db ~user ~from ~to_ ~limit =
+  if not (valid_query ~from ~to_ ~limit) then Error (invalid_input ()) else
+  with_statement db
+    ("SELECT " ^ weigh_in_columns ^ " FROM weigh_ins WHERE user_id = ? AND deleted_at IS NULL AND (? IS NULL OR measured_at >= ?) AND (? IS NULL OR measured_at <= ?) ORDER BY measured_at ASC LIMIT ?")
+    (fun statement ->
+      let from_value = nullable (Option.map timestamp from) and to_value = nullable (Option.map timestamp to_) in
+      match bind statement [ Sqlite3.Data.TEXT (User_id.to_string user.User.id); from_value; from_value; to_value; to_value; Sqlite3.Data.INT (Int64.of_int limit) ] with
+      | Error _ as error -> error
+      | Ok () ->
+          let rec rows values =
+            match Sqlite3.step statement with
+            | Sqlite3.Rc.ROW -> (match weigh_in_of_row statement with Some weight -> rows (weight :: values) | None -> Error (storage_error ()))
+            | Sqlite3.Rc.DONE -> Ok (List.rev values)
+            | _ -> Error (storage_error ())
+          in rows [])
+
+let delete_weigh_in db ~user id =
+  let current = timestamp (now ()) in
+  with_statement db
+    "UPDATE weigh_ins SET deleted_at = COALESCE(deleted_at, ?), updated_at = ? WHERE id = ? AND user_id = ? AND deleted_at IS NULL"
+    (fun statement ->
+      match bind statement [ Sqlite3.Data.TEXT current; Sqlite3.Data.TEXT current; Sqlite3.Data.TEXT (Weigh_in_id.to_string id); Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
+      | Error _ as error -> error
+      | Ok () ->
+          if Sqlite3.step statement <> Sqlite3.Rc.DONE then Error (storage_error ())
+          else if Sqlite3.changes db = 1 then Ok ()
+          else
+            with_statement db "SELECT 1 FROM weigh_ins WHERE id = ? AND user_id = ? AND deleted_at IS NOT NULL"
+              (fun tombstone ->
+                match bind tombstone [ Sqlite3.Data.TEXT (Weigh_in_id.to_string id); Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
+                | Error _ as error -> error
+                | Ok () -> if Sqlite3.step tombstone = Sqlite3.Rc.ROW then Ok () else Error Error.Not_found))

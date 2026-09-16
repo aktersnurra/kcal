@@ -43,3 +43,8 @@ let meal_input ?eaten_at () =
 
 let create_meal store user =
   Result.get_ok (Store_sqlite.create_meal store ~user (meal_input ()))
+
+let create_weight store user =
+  Result.get_ok
+    (Store_sqlite.create_manual_weigh_in store ~user
+       Weigh_in.{ measured_at = None; weight_kg = 79.6 })
