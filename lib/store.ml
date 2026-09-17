@@ -43,4 +43,16 @@ module type S = sig
 
   val get_withings_status :
     t -> user:User.t -> (Withings_connection.status, Error.t) result
+
+  val save_withings_credentials :
+    t -> user:User.t -> key:bytes -> Withings.credentials -> (Withings_connection.t, Error.t) result
+
+  val withings_credentials :
+    t -> user:User.t -> connection:Withings_connection.t -> key:bytes -> (Withings.credentials, Error.t) result
+
+  val mark_withings_reauthorization :
+    t -> user:User.t -> connection:Withings_connection.t -> (unit, Error.t) result
+
+  val persist_withings_import :
+    t -> user:User.t -> connection:Withings_connection.t -> rows:Weigh_in.import list -> cursor:int64 option -> (unit, Error.t) result
 end

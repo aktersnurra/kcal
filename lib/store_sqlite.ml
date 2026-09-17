@@ -332,6 +332,83 @@ let get_withings_status db ~user =
           | Ok connection -> Ok (Withings_connection.status connection)
           | Error _ as error -> error)
 
+let save_withings_credentials db ~user ~key credentials =
+  match Secret.encrypt ~key credentials.Withings.access_token, Secret.encrypt ~key credentials.refresh_token with
+  | Ok access_token_encrypted, Ok refresh_token_encrypted ->
+      let current = timestamp (now ()) in
+      with_statement db
+        "UPDATE withings_connections SET withings_user_id = ?, access_token_encrypted = ?, refresh_token_encrypted = ?, token_expires_at = ?, requires_reauthorization = 0, updated_at = ? WHERE user_id = ? RETURNING id, user_id, withings_user_id, token_expires_at, sync_cursor, requires_reauthorization"
+        (fun statement ->
+          match bind statement [ Sqlite3.Data.TEXT credentials.withings_user_id; Sqlite3.Data.TEXT access_token_encrypted;
+                                 Sqlite3.Data.TEXT refresh_token_encrypted; Sqlite3.Data.TEXT (timestamp credentials.expires_at);
+                                 Sqlite3.Data.TEXT current; Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
+          | Error _ as error -> error
+          | Ok () -> row_or_not_found statement withings_connection_of_row)
+  | (Error _ as error), _ -> error
+  | _, (Error _ as error) -> error
+
+let withings_credentials db ~user ~connection ~key =
+  with_statement db
+    "SELECT access_token_encrypted, refresh_token_encrypted, token_expires_at, withings_user_id FROM withings_connections WHERE id = ? AND user_id = ? AND requires_reauthorization = 0"
+    (fun statement ->
+      match bind statement [ Sqlite3.Data.TEXT connection.Withings_connection.id; Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
+      | Error _ as error -> error
+      | Ok () ->
+          match Sqlite3.step statement with
+          | Sqlite3.Rc.ROW ->
+              (match optional_text statement 0, optional_text statement 1, Option.bind (optional_text statement 2) parse_time, optional_text statement 3 with
+              | Some encrypted_access, Some encrypted_refresh, Some expires_at, Some withings_user_id ->
+                  (match Secret.decrypt ~key encrypted_access, Secret.decrypt ~key encrypted_refresh with
+                  | Ok access_token, Ok refresh_token -> Ok Withings.{ access_token; refresh_token; expires_at; withings_user_id }
+                  | (Error _ as error), _ -> error
+                  | _, (Error _ as error) -> error)
+              | _ -> Error Error.Not_found)
+          | Sqlite3.Rc.DONE -> Error Error.Not_found
+          | _ -> Error (storage_error ()))
+
+let mark_withings_reauthorization db ~user ~connection =
+  with_statement db
+    "UPDATE withings_connections SET requires_reauthorization = 1, updated_at = ? WHERE id = ? AND user_id = ?"
+    (fun statement ->
+      match bind statement [ Sqlite3.Data.TEXT (timestamp (now ())); Sqlite3.Data.TEXT connection.Withings_connection.id;
+                             Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
+      | Error _ as error -> error
+      | Ok () -> if Sqlite3.step statement = Sqlite3.Rc.DONE && Sqlite3.changes db = 1 then Ok () else Error Error.Not_found)
+
+let persist_withings_import db ~user ~connection ~rows ~cursor =
+  if List.exists (fun row -> Result.is_error (Weigh_in.validate_import row)) rows then Error (invalid_input ())
+  else if Sqlite3.exec db "BEGIN IMMEDIATE" <> Sqlite3.Rc.OK then Error (storage_error ())
+  else
+    let rollback () = ignore (Sqlite3.exec db "ROLLBACK") in
+    let result =
+      try
+        let current = timestamp (now ()) in
+        let persist (row : Weigh_in.import) =
+          with_statement db
+            "INSERT INTO weigh_ins (id, user_id, measured_at, weight_kg, source, external_id, created_at, updated_at, deleted_at, withings_connection_id) VALUES (?, ?, ?, ?, 'withings', ?, ?, ?, NULL, ?) ON CONFLICT(source, external_id) DO UPDATE SET weight_kg = excluded.weight_kg, updated_at = excluded.updated_at WHERE weigh_ins.deleted_at IS NULL AND weigh_ins.user_id = excluded.user_id AND weigh_ins.withings_connection_id = excluded.withings_connection_id"
+            (fun statement ->
+              match bind statement [ Sqlite3.Data.TEXT (Weigh_in_id.to_string (Weigh_in_id.fresh ())); Sqlite3.Data.TEXT (User_id.to_string user.User.id);
+                                     Sqlite3.Data.TEXT (timestamp row.Weigh_in.measured_at); Sqlite3.Data.FLOAT row.weight_kg;
+                                     Sqlite3.Data.TEXT row.external_id; Sqlite3.Data.TEXT current; Sqlite3.Data.TEXT current;
+                                     Sqlite3.Data.TEXT connection.Withings_connection.id ] with
+              | Error _ as error -> error
+              | Ok () -> if Sqlite3.step statement = Sqlite3.Rc.DONE then Ok () else Error (storage_error ()))
+        in
+        match List.fold_left (fun result row -> Result.bind result (fun () -> persist row)) (Ok ()) rows with
+        | Error _ as error -> error
+        | Ok () ->
+            with_statement db "UPDATE withings_connections SET sync_cursor = ?, updated_at = ? WHERE id = ? AND user_id = ?"
+              (fun statement ->
+                let cursor = match cursor with None -> Sqlite3.Data.NULL | Some value -> Sqlite3.Data.INT value in
+                match bind statement [ cursor; Sqlite3.Data.TEXT current; Sqlite3.Data.TEXT connection.Withings_connection.id; Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
+                | Error _ as error -> error
+                | Ok () -> if Sqlite3.step statement = Sqlite3.Rc.DONE && Sqlite3.changes db = 1 then Ok () else Error Error.Not_found)
+      with _ -> Error (storage_error ())
+    in
+    match result with
+    | Ok () -> if Sqlite3.exec db "COMMIT" = Sqlite3.Rc.OK then Ok () else (rollback (); Error (storage_error ()))
+    | Error _ as error -> rollback (); error
+
 let delete_weigh_in db ~user id =
   let current = timestamp (now ()) in
   with_statement db

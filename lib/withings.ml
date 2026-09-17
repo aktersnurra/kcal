@@ -1,0 +1,92 @@
+type credentials = {
+  access_token : string;
+  refresh_token : string;
+  expires_at : Ptime.t;
+  withings_user_id : string;
+}
+
+type measurement = {
+  group_id : string;
+  measured_at : int64;
+  measure_type : int;
+  value : int64;
+  unit_ : int;
+}
+
+type measurement_batch = { measurements : measurement list; lastupdate : int64 option }
+
+module type S = sig
+  val exchange_code : code:string -> (credentials, Error.t) result
+  val refresh : refresh_token:string -> (credentials, Error.t) result
+  val get_measurements : access_token:string -> lastupdate:int64 option -> (measurement_batch, Error.t) result
+  val subscribe : access_token:string -> callback_url:string -> (unit, Error.t) result
+end
+
+type request =
+  { post_form : uri:string -> fields:(string * string) list -> (string, Error.t) result }
+
+type config = { client_id : string; client_secret : string }
+
+let oauth_url = "https://wbsapi.withings.net/v2/oauth2"
+let measure_url = "https://wbsapi.withings.net/measure"
+let upstream_error () = Error.Invalid_input "Withings request failed"
+let int64_member json name = Yojson.Safe.Util.member name json |> Yojson.Safe.Util.to_string |> Int64.of_string
+let string_member json name = Yojson.Safe.Util.member name json |> Yojson.Safe.Util.to_string
+let int_member json name = Yojson.Safe.Util.member name json |> Yojson.Safe.Util.to_int
+
+let credentials_of_response body =
+  try
+    let json = Yojson.Safe.from_string body in
+    if Yojson.Safe.Util.member "status" json |> Yojson.Safe.Util.to_int <> 0 then Error (upstream_error ())
+    else
+      let body = Yojson.Safe.Util.member "body" json in
+      let expires_in = int_member body "expires_in" in
+      if expires_in <= 0 then Error (upstream_error ())
+      else
+        let expires_at = Ptime.add_span (Option.get (Ptime.of_float_s (Unix.gettimeofday ()))) (Ptime.Span.of_int_s expires_in) in
+        match expires_at with
+        | None -> Error (upstream_error ())
+        | Some expires_at ->
+            Ok { access_token = string_member body "access_token"; refresh_token = string_member body "refresh_token";
+                 expires_at; withings_user_id = string_member body "userid" }
+  with _ -> Error (upstream_error ())
+
+let measurements_of_response body =
+  try
+    let json = Yojson.Safe.from_string body in
+    if Yojson.Safe.Util.member "status" json |> Yojson.Safe.Util.to_int <> 0 then Error (upstream_error ())
+    else
+      let body = Yojson.Safe.Util.member "body" json in
+      let measurements =
+        Yojson.Safe.Util.member "measuregrps" body |> Yojson.Safe.Util.to_list
+        |> List.concat_map (fun group ->
+          let group_id = string_member group "grpid" and measured_at = int64_member group "date" in
+          Yojson.Safe.Util.member "measures" group |> Yojson.Safe.Util.to_list
+          |> List.map (fun measure -> { group_id; measured_at; measure_type = int_member measure "type";
+                                         value = int64_member measure "value"; unit_ = int_member measure "unit" }))
+      in
+      let lastupdate =
+        match Yojson.Safe.Util.member "lastupdate" body with
+        | `Null -> None | value -> Some (Yojson.Safe.Util.to_string value |> Int64.of_string)
+      in
+      Ok { measurements; lastupdate }
+  with _ -> Error (upstream_error ())
+
+let make ~request ~config : (module S) =
+  let module Client = struct
+    let token fields =
+      match request.post_form ~uri:oauth_url ~fields:(fields @ [ ("client_id", config.client_id); ("client_secret", config.client_secret) ]) with
+      | Error _ -> Error (upstream_error ()) | Ok body -> credentials_of_response body
+    let exchange_code ~code = token [ ("action", "requesttoken"); ("grant_type", "authorization_code"); ("code", code) ]
+    let refresh ~refresh_token = token [ ("action", "requesttoken"); ("grant_type", "refresh_token"); ("refresh_token", refresh_token) ]
+    let get_measurements ~access_token ~lastupdate =
+      let fields = [ ("action", "getmeas"); ("category", "1"); ("access_token", access_token) ] in
+      let fields = match lastupdate with None -> fields | Some value -> ("lastupdate", Int64.to_string value) :: fields in
+      match request.post_form ~uri:measure_url ~fields with Error _ -> Error (upstream_error ()) | Ok body -> measurements_of_response body
+    let subscribe ~access_token ~callback_url =
+      match request.post_form ~uri:measure_url ~fields:[ ("action", "subscribe"); ("callbackurl", callback_url); ("appli", "1"); ("access_token", access_token) ] with
+      | Error _ -> Error (upstream_error ())
+      | Ok body ->
+          (try if Yojson.Safe.Util.(member "status" (Yojson.Safe.from_string body) |> to_int) = 0 then Ok () else Error (upstream_error ()) with _ -> Error (upstream_error ()))
+  end in
+  (module Client : S)

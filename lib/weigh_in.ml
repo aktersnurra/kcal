@@ -10,6 +10,17 @@ type patch = {
   weight_kg : float option;
 }
 
+(* Imported observations are constructed only by Withings_sync. *)
+type import = {
+  external_id : string;
+  measured_at : Ptime.t;
+  weight_kg : float;
+}
+
+let validate_import input =
+  if input.external_id <> "" && input.weight_kg > 0.0 then Ok ()
+  else Error (Error.Invalid_input "invalid imported weight")
+
 type t = {
   id : Weigh_in_id.t;
   user_id : User_id.t;
