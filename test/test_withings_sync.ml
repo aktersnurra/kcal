@@ -61,11 +61,21 @@ let test_failed_transaction_retains_cursor () =
       ~rows:[ Weigh_in.{ external_id = "upstream-alice:one"; measured_at = now; weight_kg = 80.0 } ] ~cursor:(Some 99L)));
   Alcotest.(check (option int64)) "cursor retained" None (sync_cursor store)
 
+let test_stale_batch_cannot_regress_value_or_cursor () =
+  let store, user, connection, _ = setup [] in
+  let current = Weigh_in.{ external_id = "upstream-alice:one"; measured_at = now; weight_kg = 80.0 } in
+  Result.get_ok (Store_sqlite.persist_withings_import store ~user ~connection ~rows:[ current ] ~cursor:(Some 100L));
+  let stale = Weigh_in.{ current with weight_kg = 70.0 } in
+  Result.get_ok (Store_sqlite.persist_withings_import store ~user ~connection ~rows:[ stale ] ~cursor:(Some 99L));
+  let weight = List.hd (Result.get_ok (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None ~limit:10)) in
+  Alcotest.(check (float 0.0001)) "value is not regressed" 80.0 weight.weight_kg;
+  Alcotest.(check (option int64)) "cursor is not regressed" (Some 100L) (sync_cursor store)
+
 let test_refresh_failure_requires_reauthorization () =
   let store, user, connection, client = setup [ measurement "one" ] in
   let module Fake = struct
     include (val client : Withings.S)
-    let refresh ~refresh_token:_ = Error (Error.Invalid_input "upstream rejected request")
+    let refresh ~refresh_token:_ = Error (Error.Invalid_input "Withings authorization failure")
   end in
   ignore (Withings_sync.sync (Withings_sync.make ~store ~client:(module Fake) ~token_key:key ~now:(fun () -> Ptime.add_span now (Ptime.Span.of_int_s 7200) |> Option.get)) ~user ~connection);
   let Withings_connection.Connected status = Result.get_ok (Store_sqlite.get_withings_status store ~user) in
@@ -75,4 +85,5 @@ let () = Alcotest.run "withings sync"
   [ ("sync", [ Alcotest.test_case "normalization, duplicate and cursor" `Quick test_normalizes_deduplicates_and_advances_cursor;
                 Alcotest.test_case "update and tombstone" `Quick test_upstream_change_preserves_timestamp_and_tombstone;
                 Alcotest.test_case "failed transaction retains cursor" `Quick test_failed_transaction_retains_cursor;
+                Alcotest.test_case "stale batch cannot regress" `Quick test_stale_batch_cannot_regress_value_or_cursor;
                 Alcotest.test_case "refresh failure" `Quick test_refresh_failure_requires_reauthorization ]) ]

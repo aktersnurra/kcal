@@ -5,10 +5,10 @@ let oauth store now = Withings_oauth.make ~store ~now:(fun () -> now)
 
 let test_states_are_unique_and_metrics_only () =
   let store, user = Test_support.store_with_user () in
-  let state_one, url_one = Result.get_ok (Withings_oauth.begin_authorization (oauth store fixed_now) ~user) in
+  let state_one, url_one = Result.get_ok (Withings_oauth.begin_authorization ~client_id:"exact-client" ~redirect_uri:"https://kcal.example/withings/callback" (oauth store fixed_now) ~user) in
   let state_two, _ = Result.get_ok (Withings_oauth.begin_authorization (oauth store fixed_now) ~user) in
   Alcotest.(check bool) "states differ" true (state_one <> state_two);
-  Alcotest.(check bool) "requests only metrics" true (String.contains url_one 'm' && String.ends_with ~suffix:"scope=user.metrics" url_one)
+  Alcotest.(check bool) "complete configured URL" true (String.contains url_one 'm' && String.contains url_one 'c' && String.contains url_one 'r' && String.contains url_one 's' && String.contains url_one '=' && Uri.query (Uri.of_string url_one) = [ ("response_type", ["code"]); ("client_id", ["exact-client"]); ("redirect_uri", ["https://kcal.example/withings/callback"]); ("scope", ["user.metrics"]); ("state", [state_one]) ])
 
 let test_state_is_owned_single_use_and_expires () =
   let store, alice, bob = Test_support.store_with_two_users () in

@@ -307,6 +307,21 @@ let consume_withings_oauth_state db ~user ~state_hash ~now:current_time =
           if Sqlite3.step statement = Sqlite3.Rc.DONE && Sqlite3.changes db = 1 then Ok ()
           else Error Error.Not_found)
 
+let consume_withings_oauth_state_for_callback db ~state_hash ~now:current_time =
+  with_statement db
+    "UPDATE withings_oauth_states SET consumed_at = ? WHERE state_hash = ? AND consumed_at IS NULL AND expires_at > ? RETURNING user_id"
+    (fun statement ->
+      match bind statement [ Sqlite3.Data.TEXT (timestamp current_time); Sqlite3.Data.TEXT state_hash; Sqlite3.Data.TEXT (timestamp current_time) ] with
+      | Error _ as error -> error
+      | Ok () ->
+          match Sqlite3.step statement with
+          | Sqlite3.Rc.ROW ->
+              let user_id = text statement 0 in
+              with_statement db "SELECT id, oidc_issuer, oidc_subject, created_at FROM users WHERE id = ?"
+                (fun user -> match bind user [ Sqlite3.Data.TEXT user_id ] with Error _ as error -> error | Ok () -> row_or_not_found user user_of_row)
+          | Sqlite3.Rc.DONE -> Error Error.Not_found
+          | _ -> Error (storage_error ()))
+
 let create_withings_connection db ~user ~withings_user_id =
   let current = timestamp (now ()) in
   let columns = "id, user_id, withings_user_id, access_token_encrypted, refresh_token_encrypted, token_expires_at, sync_cursor, requires_reauthorization, created_at, updated_at" in
@@ -427,6 +442,18 @@ let persist_withings_import db ~user ~connection ~rows ~cursor =
     let rollback () = ignore (Sqlite3.exec db "ROLLBACK") in
     let result =
       try
+        let stale =
+          match cursor with
+          | None -> Ok false
+          | Some received ->
+              with_statement db "SELECT sync_cursor FROM withings_connections WHERE id = ? AND user_id = ?"
+                (fun statement ->
+                  match bind statement [ Sqlite3.Data.TEXT connection.Withings_connection.id; Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
+                  | Error _ as error -> error
+                  | Ok () -> match Sqlite3.step statement with
+                    | Sqlite3.Rc.ROW -> Ok (not (Sqlite3.column_is_null statement 0) && Int64.compare received (Sqlite3.column_int64 statement 0) < 0)
+                    | Sqlite3.Rc.DONE -> Error Error.Not_found | _ -> Error (storage_error ()))
+        in
         let current = timestamp (now ()) in
         let persist (row : Weigh_in.import) =
           with_statement db
@@ -439,13 +466,16 @@ let persist_withings_import db ~user ~connection ~rows ~cursor =
               | Error _ as error -> error
               | Ok () -> if Sqlite3.step statement = Sqlite3.Rc.DONE then Ok () else Error (storage_error ()))
         in
-        match List.fold_left (fun result row -> Result.bind result (fun () -> persist row)) (Ok ()) rows with
+        match stale with
+        | Error _ as error -> error
+        | Ok true -> Ok ()
+        | Ok false -> match List.fold_left (fun result row -> Result.bind result (fun () -> persist row)) (Ok ()) rows with
         | Error _ as error -> error
         | Ok () ->
-            with_statement db "UPDATE withings_connections SET sync_cursor = ?, updated_at = ? WHERE id = ? AND user_id = ?"
+            with_statement db "UPDATE withings_connections SET sync_cursor = CASE WHEN sync_cursor IS NULL OR ? >= sync_cursor THEN ? ELSE sync_cursor END, updated_at = ? WHERE id = ? AND user_id = ?"
               (fun statement ->
                 let cursor = match cursor with None -> Sqlite3.Data.NULL | Some value -> Sqlite3.Data.INT value in
-                match bind statement [ cursor; Sqlite3.Data.TEXT current; Sqlite3.Data.TEXT connection.Withings_connection.id; Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
+                match bind statement [ cursor; cursor; Sqlite3.Data.TEXT current; Sqlite3.Data.TEXT connection.Withings_connection.id; Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
                 | Error _ as error -> error
                 | Ok () -> if Sqlite3.step statement = Sqlite3.Rc.DONE && Sqlite3.changes db = 1 then Ok () else Error Error.Not_found)
       with _ -> Error (storage_error ())

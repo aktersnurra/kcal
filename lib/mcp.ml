@@ -60,7 +60,7 @@ let meal_json (meal : Meal.t) =
 let weight_json (weight : Weigh_in.t) =
   `Assoc [
     ("id", `String (Weigh_in_id.to_string weight.id)); ("measured_at", `String (Time.to_utc_string weight.measured_at));
-    ("weight_kg", `Float weight.weight_kg); ("source", `String "manual");
+    ("weight_kg", `Float weight.weight_kg); ("source", `String (Weigh_in.source_to_string weight.source));
     ("created_at", `String (Time.to_utc_string weight.created_at)); ("updated_at", `String (Time.to_utc_string weight.updated_at)) ]
 
 let text_result value =

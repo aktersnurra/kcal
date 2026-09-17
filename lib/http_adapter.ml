@@ -21,6 +21,8 @@ type withings_config = {
   token_key : bytes;
   sync : User.t -> Withings_connection.t -> (unit, Error.t) result;
   callback_url : string;
+  client_id : string;
+  redirect_uri : string;
 }
 
 let query path =
@@ -38,12 +40,12 @@ let authenticated auth headers f =
       | Error Error.Unauthorized -> plain 401 "Unauthorized"
       | Error _ -> plain 500 "Internal Server Error")
 
-let withings_callback withings user query =
+let withings_callback withings query =
   match query_value "state" query, query_value "code" query with
   | Some state, Some code ->
-      (match Withings_oauth.consume_state withings.oauth ~user ~state with
+      (match Withings_oauth.consume_callback_state withings.oauth ~state with
       | Error _ -> plain 400 "Invalid OAuth state"
-      | Ok () ->
+      | Ok user ->
           let module Client = (val withings.client : Withings.S) in
           (match Client.exchange_code ~code with
           | Error _ -> plain 502 "Withings authorization failed"
@@ -64,17 +66,19 @@ let withings_callback withings user query =
 
 let webhook withings headers body =
   match List.assoc_opt "content-type" (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) headers) with
-  | Some content_type when json_media_type content_type ->
+  | Some content_type when String.trim (String.lowercase_ascii content_type) = "application/x-www-form-urlencoded" && String.length body <= 8192 ->
       (try
-         match Yojson.Safe.Util.member "userid" (Yojson.Safe.from_string body) with
-         | `String identity ->
+         let fields = Uri.query (Uri.of_string ("?" ^ body)) in
+         match query_value "userid" fields, query_value "appli" fields with
+         | Some identity, Some "1" when String.length identity <= 128 ->
              (match Store_sqlite.withings_connection_for_identity withings.oauth.store ~withings_user_id:identity with
              | Ok (user, connection) -> ignore (withings.sync user connection); plain 200 "OK"
              | Error Error.Not_found -> plain 404 "Not Found"
              | Error _ -> plain 500 "Internal Server Error")
          | _ -> plain 400 "Malformed webhook"
        with _ -> plain 400 "Malformed webhook")
-  | _ -> plain 415 "Unsupported Media Type"
+  | Some _ -> plain 415 "Unsupported Media Type"
+  | None -> plain 415 "Unsupported Media Type"
 
 let mcp_handle (withings : withings_config option) ~service ~user request =
   match withings with
@@ -87,10 +91,10 @@ let handle_withings ~withings ~auth ~service ~method_ ~path ~headers ~body =
   | `GET, "/health" -> json 200 "{\"status\":\"ok\"}"
   | `GET, "/withings/connect" ->
       (match withings with
-      | Some withings -> authenticated auth headers (fun user -> match Withings_oauth.begin_authorization withings.oauth ~user with Ok (_, url) -> { status = 302; headers = [ ("location", url) ]; body = "" } | Error _ -> plain 500 "Internal Server Error")
+      | Some withings -> authenticated auth headers (fun user -> match Withings_oauth.begin_authorization ~client_id:withings.client_id ~redirect_uri:withings.redirect_uri withings.oauth ~user with Ok (_, url) -> { status = 302; headers = [ ("location", url) ]; body = "" } | Error _ -> plain 500 "Internal Server Error")
       | None -> plain 404 "Not Found")
   | `GET, "/withings/callback" ->
-      (match withings with Some withings -> authenticated auth headers (fun user -> withings_callback withings user query) | None -> plain 404 "Not Found")
+      (match withings with Some withings -> withings_callback withings query | None -> plain 404 "Not Found")
   | `HEAD, "/withings/webhook" -> plain 200 ""
   | `POST, "/withings/webhook" -> (match withings with Some withings -> webhook withings headers body | None -> plain 404 "Not Found")
   | `POST, "/mcp" ->
