@@ -77,6 +77,9 @@ let float statement column = Sqlite3.column_double statement column
 let int statement column = Sqlite3.column_int statement column
 let optional_text statement column = if Sqlite3.column_is_null statement column then None else Some (text statement column)
 let optional_float statement column = if Sqlite3.column_is_null statement column then None else Some (float statement column)
+let optional_int64 statement column = if Sqlite3.column_is_null statement column then None else Some (Sqlite3.column_int64 statement column)
+
+module Withings_connection_id = Id.Make ()
 
 let parse_time value =
   match Time.parse_offset_datetime value with Ok time -> Some time | Error _ -> None
@@ -269,6 +272,65 @@ let query_weigh_ins db ~user ~from ~to_ ~limit =
             | Sqlite3.Rc.DONE -> Ok (List.rev values)
             | _ -> Error (storage_error ())
           in rows [])
+
+let withings_connection_of_row statement =
+  match User_id.of_string (text statement 1) with
+  | None -> None
+  | Some user_id ->
+      Some
+        Withings_connection.
+          {
+            id = text statement 0;
+            user_id;
+            withings_user_id = optional_text statement 2;
+            token_expires_at = Option.bind (optional_text statement 3) parse_time;
+            sync_cursor = optional_int64 statement 4;
+            requires_reauthorization = int statement 5 <> 0;
+          }
+
+let create_withings_oauth_state db ~user ~state_hash ~expires_at =
+  let created_at = timestamp (now ()) in
+  with_statement db
+    "INSERT INTO withings_oauth_states (state_hash, user_id, expires_at, consumed_at, created_at) VALUES (?, ?, ?, NULL, ?)"
+    (fun statement ->
+      match bind statement [ Sqlite3.Data.TEXT state_hash; Sqlite3.Data.TEXT (User_id.to_string user.User.id); Sqlite3.Data.TEXT (timestamp expires_at); Sqlite3.Data.TEXT created_at ] with
+      | Error _ as error -> error
+      | Ok () -> if Sqlite3.step statement = Sqlite3.Rc.DONE then Ok () else Error (storage_error ()))
+
+let consume_withings_oauth_state db ~user ~state_hash ~now:current_time =
+  with_statement db
+    "UPDATE withings_oauth_states SET consumed_at = ? WHERE state_hash = ? AND user_id = ? AND consumed_at IS NULL AND expires_at > ?"
+    (fun statement ->
+      match bind statement [ Sqlite3.Data.TEXT (timestamp current_time); Sqlite3.Data.TEXT state_hash; Sqlite3.Data.TEXT (User_id.to_string user.User.id); Sqlite3.Data.TEXT (timestamp current_time) ] with
+      | Error _ as error -> error
+      | Ok () ->
+          if Sqlite3.step statement = Sqlite3.Rc.DONE && Sqlite3.changes db = 1 then Ok ()
+          else Error Error.Not_found)
+
+let create_withings_connection db ~user ~withings_user_id =
+  let current = timestamp (now ()) in
+  let columns = "id, user_id, withings_user_id, access_token_encrypted, refresh_token_encrypted, token_expires_at, sync_cursor, requires_reauthorization, created_at, updated_at" in
+  let returned = "id, user_id, withings_user_id, token_expires_at, sync_cursor, requires_reauthorization" in
+  with_statement db
+    ("INSERT INTO withings_connections (" ^ columns ^ ") VALUES (?, ?, ?, NULL, NULL, NULL, NULL, 0, ?, ?) RETURNING " ^ returned)
+    (fun statement ->
+      match bind statement [ Sqlite3.Data.TEXT (Withings_connection_id.to_string (Withings_connection_id.fresh ())); Sqlite3.Data.TEXT (User_id.to_string user.User.id); Sqlite3.Data.TEXT withings_user_id; Sqlite3.Data.TEXT current; Sqlite3.Data.TEXT current ] with
+      | Error _ as error -> error
+      | Ok () ->
+          if Sqlite3.step statement = Sqlite3.Rc.ROW then
+            match withings_connection_of_row statement with Some connection -> Ok connection | None -> Error (storage_error ())
+          else Error (storage_error ()))
+
+let get_withings_status db ~user =
+  with_statement db
+    "SELECT id, user_id, withings_user_id, token_expires_at, sync_cursor, requires_reauthorization FROM withings_connections WHERE user_id = ?"
+    (fun statement ->
+      match bind statement [ Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
+      | Error _ as error -> error
+      | Ok () ->
+          match row_or_not_found statement withings_connection_of_row with
+          | Ok connection -> Ok (Withings_connection.status connection)
+          | Error _ as error -> error)
 
 let delete_weigh_in db ~user id =
   let current = timestamp (now ()) in

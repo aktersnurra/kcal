@@ -1,6 +1,8 @@
-type t = { store : Store_sqlite.t }
+type t = { store : Store_sqlite.t; withings_oauth : Withings_oauth.t }
 
-let make ~store = { store }
+let make ~store =
+  let now () = Option.get (Ptime.of_float_s (Unix.gettimeofday ())) in
+  { store; withings_oauth = Withings_oauth.make ~store ~now }
 
 let resolve_user service ~issuer ~subject =
   Store_sqlite.resolve_user service.store ~issuer ~subject
@@ -31,3 +33,12 @@ let update_manual_weigh_in service ~user id patch =
 
 let delete_weigh_in service ~user id =
   Store_sqlite.delete_weigh_in service.store ~user id
+
+let begin_withings_authorization service ~user =
+  Withings_oauth.begin_authorization service.withings_oauth ~user
+
+let consume_withings_authorization_state service ~user ~state =
+  Withings_oauth.consume_state service.withings_oauth ~user ~state
+
+let get_withings_status service ~user =
+  Store_sqlite.get_withings_status service.store ~user

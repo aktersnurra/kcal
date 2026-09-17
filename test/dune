@@ -10,6 +10,12 @@
  (libraries alcotest kcal))
 
 (test
+ (name test_withings_oauth)
+ (modules test_withings_oauth test_support)
+ (libraries alcotest sqlite3 kcal)
+ (deps ../migrations/001_ledger.sql ../migrations/002_withings.sql))
+
+(test
  (name test_domain)
  (modules test_domain)
  (libraries alcotest kcal))
