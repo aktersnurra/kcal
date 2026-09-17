@@ -1,44 +1,17 @@
 # kcal
 
-`kcal` is an authenticated MCP nutrition ledger. It records meals and manual
-weigh-ins; it does not provide nutritional analysis or recommendations.
+`kcal` is an authenticated MCP nutrition ledger for meals, manual weigh-ins, and optional imported Withings weight measurements.
 
-## FreeBSD jail deployment
+## Withings
 
-Run it in a native FreeBSD jail, not a bhyve Linux VM. Create a local ZFS
-dataset for `/var/db/kcal` and mount it into the jail. SQLite must remain on
-that local dataset: do **not** use NFS. Create an unprivileged `kcal` user and
-install the executable, `deploy/kcal.rc.d`, and an environment file based on
-`.env.example`. Keep the environment file readable only by that service user.
+Set `WITHINGS_CLIENT_ID`, `WITHINGS_CLIENT_SECRET`, and `KCAL_TOKEN_ENCRYPTION_KEY` before `kcal serve` or `kcal sync-withings`. The encryption key is exactly 64 hexadecimal characters (32 bytes); keep it secret and stable, since it encrypts access and refresh tokens at rest.
 
-Configure Pocket ID with a client whose redirect/origin configuration matches
-`KCAL_PUBLIC_BASE_URL`; set its HTTPS issuer URL and client ID as
-`KCAL_OIDC_ISSUER` and `KCAL_OIDC_AUDIENCE`. The service fetches OIDC discovery
-and JWKS only over HTTPS.
+Configure the Withings callback URL as `$KCAL_PUBLIC_BASE_URL/withings/callback` and webhook URL as `$KCAL_PUBLIC_BASE_URL/withings/webhook`. OAuth requests only `user.metrics`. Credentials are never returned in MCP or HTTP responses.
 
-Caddy is the only public TLS listener. Bind kcal to `127.0.0.1:8080` and use
-`deploy/Caddyfile` (with your public hostname). Never expose SQLite or the
-internal listener directly.
+Give `nuc-setup` the same environment variables and invoke this command periodically:
 
 ```sh
-install -m 0555 deploy/kcal.rc.d /usr/local/etc/rc.d/kcal
-install -d -o kcal -g kcal /var/db/kcal
-cp .env.example /usr/local/etc/kcal.env
-# edit the environment values, then export them for the migration process:
-set -a
-. /usr/local/etc/kcal.env
-set +a
-kcal migrate
-service kcal onestart
-curl -fsS http://127.0.0.1:8080/health
+kcal sync-withings
 ```
 
-`kcal migrate` is safe to run repeatedly; applied versions are not rerun. Before
-deployment, run the migration and health-check commands in the target FreeBSD
-jail as a required smoke test.
-
-## Deferred work
-
-Withings OAuth, credential storage, webhooks, synchronization, reconciliation,
-and all related imports are intentionally deferred. No Withings integration is
-present in this release.
+The command uses the same synchronization path as callback and webhook flows; it imports only weights and preserves provenance, external identity, and tombstones.
