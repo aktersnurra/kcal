@@ -15,9 +15,84 @@ let bearer headers =
   | Some value when String.starts_with ~prefix:"Bearer " value && String.length value > 7 -> Some (String.sub value 7 (String.length value - 7))
   | _ -> None
 
-let handle ~auth ~service ~method_ ~path ~headers ~body =
-  match method_, path with
+type withings_config = {
+  oauth : Withings_oauth.t;
+  client : (module Withings.S);
+  token_key : bytes;
+  sync : User.t -> Withings_connection.t -> (unit, Error.t) result;
+  callback_url : string;
+}
+
+let query path =
+  let uri = Uri.of_string path in
+  (Uri.path uri, Uri.query uri)
+
+let query_value name query = match List.assoc_opt name query with Some [ value ] when value <> "" -> Some value | _ -> None
+
+let authenticated auth headers f =
+  match bearer headers with
+  | None -> plain 401 "Unauthorized"
+  | Some token ->
+      (match Auth.authenticate_bearer auth token with
+      | Ok user -> f user
+      | Error Error.Unauthorized -> plain 401 "Unauthorized"
+      | Error _ -> plain 500 "Internal Server Error")
+
+let withings_callback withings user query =
+  match query_value "state" query, query_value "code" query with
+  | Some state, Some code ->
+      (match Withings_oauth.consume_state withings.oauth ~user ~state with
+      | Error _ -> plain 400 "Invalid OAuth state"
+      | Ok () ->
+          let module Client = (val withings.client : Withings.S) in
+          (match Client.exchange_code ~code with
+          | Error _ -> plain 502 "Withings authorization failed"
+          | Ok credentials ->
+              (match Store_sqlite.ensure_withings_connection withings.oauth.store ~user ~withings_user_id:credentials.withings_user_id with
+              | Error _ -> plain 500 "Internal Server Error"
+              | Ok connection ->
+                  (match Store_sqlite.save_withings_credentials withings.oauth.store ~user ~key:withings.token_key credentials with
+                  | Error _ -> plain 500 "Internal Server Error"
+                  | Ok connection ->
+                      (match withings.sync user connection with
+                      | Error _ -> plain 502 "Withings synchronization failed"
+                      | Ok () ->
+                          (match Client.subscribe ~access_token:credentials.access_token ~callback_url:withings.callback_url with
+                          | Ok () -> plain 200 "Withings connected"
+                          | Error _ -> plain 502 "Withings subscription failed"))))))
+  | _ -> plain 400 "Invalid OAuth callback"
+
+let webhook withings headers body =
+  match List.assoc_opt "content-type" (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) headers) with
+  | Some content_type when json_media_type content_type ->
+      (try
+         match Yojson.Safe.Util.member "userid" (Yojson.Safe.from_string body) with
+         | `String identity ->
+             (match Store_sqlite.withings_connection_for_identity withings.oauth.store ~withings_user_id:identity with
+             | Ok (user, connection) -> ignore (withings.sync user connection); plain 200 "OK"
+             | Error Error.Not_found -> plain 404 "Not Found"
+             | Error _ -> plain 500 "Internal Server Error")
+         | _ -> plain 400 "Malformed webhook"
+       with _ -> plain 400 "Malformed webhook")
+  | _ -> plain 415 "Unsupported Media Type"
+
+let mcp_handle (withings : withings_config option) ~service ~user request =
+  match withings with
+  | None -> Mcp.handle ~service ~user request
+  | Some withings -> Mcp.handle ~withings:Mcp.{ oauth = withings.oauth } ~service ~user request
+
+let handle_withings ~withings ~auth ~service ~method_ ~path ~headers ~body =
+  let route, query = query path in
+  match method_, route with
   | `GET, "/health" -> json 200 "{\"status\":\"ok\"}"
+  | `GET, "/withings/connect" ->
+      (match withings with
+      | Some withings -> authenticated auth headers (fun user -> match Withings_oauth.begin_authorization withings.oauth ~user with Ok (_, url) -> { status = 302; headers = [ ("location", url) ]; body = "" } | Error _ -> plain 500 "Internal Server Error")
+      | None -> plain 404 "Not Found")
+  | `GET, "/withings/callback" ->
+      (match withings with Some withings -> authenticated auth headers (fun user -> withings_callback withings user query) | None -> plain 404 "Not Found")
+  | `HEAD, "/withings/webhook" -> plain 200 ""
+  | `POST, "/withings/webhook" -> (match withings with Some withings -> webhook withings headers body | None -> plain 404 "Not Found")
   | `POST, "/mcp" ->
       (match List.assoc_opt "content-type" (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) headers), bearer headers with
       | Some content_type, Some token when json_media_type content_type ->
@@ -25,12 +100,15 @@ let handle ~auth ~service ~method_ ~path ~headers ~body =
           | Error Error.Unauthorized -> plain 401 "Unauthorized"
           | Error _ -> plain 500 "Internal Server Error"
           | Ok user ->
-              (try json 200 (Yojson.Safe.to_string (Mcp.handle ~service ~user (Yojson.Safe.from_string body)))
+              (try json 200 (Yojson.Safe.to_string (mcp_handle withings ~service ~user (Yojson.Safe.from_string body)))
                with Yojson.Json_error _ ->
                  json 400 (Yojson.Safe.to_string (Mcp.rpc_error (-32700) "Parse error"))))
       | _, None -> plain 401 "Unauthorized"
       | _ -> plain 415 "Unsupported Media Type")
   | _ -> plain 404 "Not Found"
+
+let handle ~auth ~service ~method_ ~path ~headers ~body =
+  handle_withings ~withings:None ~auth ~service ~method_ ~path ~headers ~body
 
 let split_address value =
   match String.rindex_opt value ':' with
@@ -41,16 +119,16 @@ let split_address value =
 let status = function
   | 200 -> `OK | 400 -> `Bad_request
   | 401 -> `Unauthorized | 404 -> `Not_found | 413 -> `Payload_too_large
-  | 415 -> `Unsupported_media_type | _ -> `Internal_server_error
+  | 415 -> `Unsupported_media_type | 302 -> `Found | _ -> `Internal_server_error
 
-let serve_request ~auth ~service reqd =
+let serve_request ~withings ~auth ~service reqd =
   let request = Httpun.Reqd.request reqd in
-  let method_ = match request.meth with `GET -> `GET | `POST -> `POST | _ -> `OTHER in
+  let method_ = match request.meth with `GET -> `GET | `POST -> `POST | `HEAD -> `HEAD | _ -> `OTHER in
   let respond body =
     let response =
       match method_ with
       | `OTHER -> plain 404 "Not Found"
-      | (`GET | `POST) -> handle ~auth ~service ~method_ ~path:request.target
+      | (`GET | `POST | `HEAD) -> handle_withings ~withings ~auth ~service ~method_ ~path:request.target
           ~headers:(Httpun.Headers.to_list request.headers) ~body
     in
     let headers = List.fold_left (fun headers (key, value) -> Httpun.Headers.add headers key value) Httpun.Headers.empty response.headers in
@@ -70,12 +148,12 @@ let serve_request ~auth ~service reqd =
   in
   read ()
 
-let run env ~config ~auth service : unit =
+let run ~withings env ~config ~auth service : unit =
   let host, port = split_address config.Config.listen_address in
   Eio.Switch.run @@ fun sw ->
   let address = List.hd (Eio.Net.getaddrinfo_stream ~service:port env#net host) in
   let listener = Eio.Net.listen ~sw ~reuse_addr:true ~backlog:128 env#net address in
   let handler = Httpun_eio.Server.create_connection_handler ~sw
-    ~request_handler:(fun _ reqd -> serve_request ~auth ~service reqd.Gluten.Reqd.reqd)
+    ~request_handler:(fun _ reqd -> serve_request ~withings ~auth ~service reqd.Gluten.Reqd.reqd)
     ~error_handler:(fun _ ?request:_ _ _ -> ()) in
   Eio.Net.run_server ~on_error:(fun _ -> ()) listener (fun socket address -> handler address socket)

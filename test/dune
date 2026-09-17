@@ -28,6 +28,18 @@
  (deps ../migrations/001_ledger.sql ../migrations/002_withings.sql))
 
 (test
+ (name test_withings_reconciliation)
+ (modules test_withings_reconciliation test_support)
+ (libraries alcotest sqlite3 kcal)
+ (deps ../migrations/001_ledger.sql ../migrations/002_withings.sql))
+
+(test
+ (name test_withings_http)
+ (modules test_withings_http test_support)
+ (libraries alcotest sqlite3 kcal)
+ (deps ../migrations/001_ledger.sql ../migrations/002_withings.sql))
+
+(test
  (name test_domain)
  (modules test_domain)
  (libraries alcotest kcal))

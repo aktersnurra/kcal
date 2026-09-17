@@ -32,6 +32,6 @@ let test_tool_list_is_exact () =
     | `Assoc fields -> (match List.assoc_opt "result" fields with Some (`Assoc result) -> (match List.assoc_opt "tools" result with Some (`List tools) -> List.filter_map (function `Assoc tool -> (match List.assoc_opt "name" tool with Some (`String name) -> Some name | _ -> None) | _ -> None) tools | _ -> []) | _ -> [])
     | _ -> [] in
   Alcotest.(check (list string)) "approved tools"
-    [ "record_meal"; "get_meal"; "query_meals"; "update_meal"; "delete_meal"; "record_weight"; "get_weight"; "query_weights"; "update_weight"; "delete_weight" ] names
+    [ "record_meal"; "get_meal"; "query_meals"; "update_meal"; "delete_meal"; "record_weight"; "get_weight"; "query_weights"; "update_weight"; "delete_weight"; "begin_withings_connection"; "get_withings_status"; "disconnect_withings" ] names
 
 let () = Alcotest.run "mcp" [ ("boundary", [ Alcotest.test_case "rejects user id" `Quick test_record_meal_rejects_user_id; Alcotest.test_case "rejects bad JSON-RPC and provenance" `Quick test_mcp_rejects_bad_jsonrpc_and_provenance_fields; Alcotest.test_case "lists approved tools" `Quick test_tool_list_is_exact ]) ]

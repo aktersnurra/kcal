@@ -80,6 +80,10 @@ let id_properties = [ ("id", string) ]
 let query_properties = [ ("from", string); ("to", string); ("limit", integer) ]
 
 let tool name input_schema = `Assoc [ ("name", `String name); ("inputSchema", input_schema) ]
+let withings_tools = [
+  tool "begin_withings_connection" (schema [] []);
+  tool "get_withings_status" (schema [] []);
+  tool "disconnect_withings" (schema [] []) ]
 let tools = [
   tool "record_meal" (schema meal_properties [ "description"; "calories_kcal"; "protein_g" ]);
   tool "get_meal" (schema id_properties [ "id" ]);
@@ -90,7 +94,7 @@ let tools = [
   tool "get_weight" (schema id_properties [ "id" ]);
   tool "query_weights" (schema query_properties []);
   tool "update_weight" (schema (id_properties @ weight_properties) [ "id" ]);
-  tool "delete_weight" (schema id_properties [ "id" ]) ]
+  tool "delete_weight" (schema id_properties [ "id" ]) ] @ withings_tools
 
 let meal_create fields : (Meal.create, Error.t) result =
   let* fields = only_fields (List.map fst meal_properties) (`Assoc fields) in
@@ -107,10 +111,29 @@ let query fields =
   let* from = optional_time "from" fields in let* to_ = optional_time "to" fields in let* limit = optional_int "limit" fields in
   Ok (from, to_, Option.value limit ~default:100)
 
-let call service user name arguments =
+type withings = { oauth : Withings_oauth.t }
+
+let withings_status_json = function
+  | Withings_connection.Connected status ->
+      `Assoc [ ("connected", `Bool true); ("requires_reauthorization", `Bool status.requires_reauthorization);
+               ("token_expires_at", json_option (fun value -> `String (Time.to_utc_string value)) status.token_expires_at) ]
+
+let call ?withings service user name arguments =
   match arguments with
   | `Assoc fields ->
       (match name with
+      | "begin_withings_connection" ->
+          (match withings with
+          | Some withings -> Result.map (fun (_, url) -> text_result (`Assoc [ ("authorization_url", `String url) ])) (Withings_oauth.begin_authorization withings.oauth ~user)
+          | None -> Error (Error.Storage_error "Withings unavailable"))
+      | "get_withings_status" ->
+          (match withings with
+          | Some withings -> Result.map (fun status -> text_result (withings_status_json status)) (Store_sqlite.get_withings_status withings.oauth.store ~user)
+          | None -> Error (Error.Storage_error "Withings unavailable"))
+      | "disconnect_withings" ->
+          (match withings with
+          | Some withings -> Result.map (fun () -> text_result (`Assoc [ ("disconnected", `Bool true) ])) (Store_sqlite.delete_withings_connection withings.oauth.store ~user)
+          | None -> Error (Error.Storage_error "Withings unavailable"))
       | "record_meal" -> Result.map (fun record -> text_result (meal_json record)) (Result.bind (meal_create fields) (Service.record_meal service ~user))
       | "get_meal" -> let* fields = only_fields [ "id" ] (`Assoc fields) in let* value = required_string "id" fields in let* record = id value Meal_id.of_string in Result.map (fun x -> text_result (meal_json x)) (Service.get_meal service ~user record)
       | "query_meals" -> let* from, to_, limit = query fields in Result.map (fun records -> text_result (`Assoc [ ("meals", `List (List.map meal_json records)) ])) (Service.query_meals service ~user ~from ~to_ ~limit)
@@ -129,7 +152,7 @@ let rpc_error ?(id = `Null) code message = `Assoc [ ("jsonrpc", `String "2.0"); 
 
 let protocol_version = "2025-03-26"
 
-let handle ~service ~user request =
+let handle ?withings ~service ~user request =
   match request with
   | `Assoc fields ->
       let request_id = Option.value (List.assoc_opt "id" fields) ~default:`Null in
@@ -146,13 +169,13 @@ let handle ~service ~user request =
           | Some (`Assoc params) ->
               (match required_string "name" params, List.assoc_opt "arguments" params with
               | Ok name, Some arguments ->
-                  (match call service user name arguments with
+                  (match call ?withings service user name arguments with
                   | Ok result -> response ~id:request_id result
                   | Error Error.Not_found -> response ~id:request_id tool_error
                   | Error (Error.Invalid_input _) -> rpc_error ~id:request_id (-32602) "Invalid params"
                   | Error _ -> rpc_error ~id:request_id (-32603) "Internal error")
               | Ok ("query_meals" | "query_weights" as name), None ->
-                  (match call service user name (`Assoc []) with Ok result -> response ~id:request_id result | Error _ -> rpc_error ~id:request_id (-32603) "Internal error")
+                  (match call ?withings service user name (`Assoc []) with Ok result -> response ~id:request_id result | Error _ -> rpc_error ~id:request_id (-32603) "Internal error")
               | _ -> rpc_error ~id:request_id (-32602) "Invalid params")
           | _ -> rpc_error ~id:request_id (-32602) "Invalid params")
       | Some (`String _) when valid_request -> rpc_error ~id:request_id (-32601) "Method not found"
