@@ -1,7 +1,8 @@
 let test_creates_ledger_tables () =
   let db = Test_support.open_temporary_database () in
   Alcotest.(check bool) "migration succeeds" true (Result.is_ok (Migration.apply_all db));
-  List.iter (Test_support.table_exists db) [ "users"; "meals"; "weigh_ins" ]
+  List.iter (Test_support.table_exists db)
+    [ "users"; "meals"; "weigh_ins"; "withings_connections"; "withings_oauth_states" ]
 
 let test_repeat_is_a_no_op () =
   let db = Test_support.open_temporary_database () in

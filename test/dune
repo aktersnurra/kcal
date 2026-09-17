@@ -5,6 +5,11 @@
  (deps ../migrations/001_ledger.sql))
 
 (test
+ (name test_secret)
+ (modules test_secret)
+ (libraries alcotest kcal))
+
+(test
  (name test_domain)
  (modules test_domain)
  (libraries alcotest kcal))
