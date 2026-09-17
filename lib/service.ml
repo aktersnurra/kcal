@@ -34,8 +34,8 @@ let update_manual_weigh_in service ~user id patch =
 let delete_weigh_in service ~user id =
   Store_sqlite.delete_weigh_in service.store ~user id
 
-let begin_withings_authorization service ~user =
-  Withings_oauth.begin_authorization service.withings_oauth ~user
+let begin_withings_authorization ~client_id ~redirect_uri service ~user =
+  Withings_oauth.begin_authorization ~client_id ~redirect_uri service.withings_oauth ~user
 
 let consume_withings_authorization_state service ~user ~state =
   Withings_oauth.consume_state service.withings_oauth ~user ~state

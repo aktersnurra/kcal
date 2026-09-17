@@ -8,6 +8,8 @@ let migrate () =
         (fun () -> match Migration.apply_all db with Ok () -> 0 | Error _ -> prerr_endline "migration failed"; 1)
 
 let withings_client env config =
+  (* Reconciliation constructs this transport without visiting the OAuth flow. *)
+  Mirage_crypto_rng_unix.use_default ();
   let certificates =
     try
       let channel = open_in_bin "/etc/ssl/cert.pem" in

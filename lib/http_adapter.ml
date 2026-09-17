@@ -64,7 +64,7 @@ let withings_callback withings query =
                           | Error _ -> plain 502 "Withings subscription failed"))))))
   | _ -> plain 400 "Invalid OAuth callback"
 
-let webhook withings headers body =
+let webhook ~schedule_sync withings headers body =
   match List.assoc_opt "content-type" (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) headers) with
   | Some content_type when String.trim (String.lowercase_ascii content_type) = "application/x-www-form-urlencoded" && String.length body <= 8192 ->
       (try
@@ -72,7 +72,9 @@ let webhook withings headers body =
          match query_value "userid" fields, query_value "appli" fields with
          | Some identity, Some "1" when String.length identity <= 128 ->
              (match Store_sqlite.withings_connection_for_identity withings.oauth.store ~withings_user_id:identity with
-             | Ok (user, connection) -> ignore (withings.sync user connection); plain 200 "OK"
+             | Ok (user, connection) ->
+                 schedule_sync (fun () -> ignore (withings.sync user connection));
+                 plain 200 "OK"
              | Error Error.Not_found -> plain 404 "Not Found"
              | Error _ -> plain 500 "Internal Server Error")
          | _ -> plain 400 "Malformed webhook"
@@ -83,9 +85,11 @@ let webhook withings headers body =
 let mcp_handle (withings : withings_config option) ~service ~user request =
   match withings with
   | None -> Mcp.handle ~service ~user request
-  | Some withings -> Mcp.handle ~withings:Mcp.{ oauth = withings.oauth } ~service ~user request
+  | Some withings ->
+      Mcp.handle ~withings:Mcp.{ oauth = withings.oauth; client_id = withings.client_id;
+                                 redirect_uri = withings.redirect_uri } ~service ~user request
 
-let handle_withings ~withings ~auth ~service ~method_ ~path ~headers ~body =
+let handle_withings ~schedule_sync ~withings ~auth ~service ~method_ ~path ~headers ~body =
   let route, query = query path in
   match method_, route with
   | `GET, "/health" -> json 200 "{\"status\":\"ok\"}"
@@ -96,7 +100,7 @@ let handle_withings ~withings ~auth ~service ~method_ ~path ~headers ~body =
   | `GET, "/withings/callback" ->
       (match withings with Some withings -> withings_callback withings query | None -> plain 404 "Not Found")
   | `HEAD, "/withings/webhook" -> plain 200 ""
-  | `POST, "/withings/webhook" -> (match withings with Some withings -> webhook withings headers body | None -> plain 404 "Not Found")
+  | `POST, "/withings/webhook" -> (match withings with Some withings -> webhook ~schedule_sync withings headers body | None -> plain 404 "Not Found")
   | `POST, "/mcp" ->
       (match List.assoc_opt "content-type" (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) headers), bearer headers with
       | Some content_type, Some token when json_media_type content_type ->
@@ -112,7 +116,7 @@ let handle_withings ~withings ~auth ~service ~method_ ~path ~headers ~body =
   | _ -> plain 404 "Not Found"
 
 let handle ~auth ~service ~method_ ~path ~headers ~body =
-  handle_withings ~withings:None ~auth ~service ~method_ ~path ~headers ~body
+  handle_withings ~schedule_sync:(fun sync -> sync ()) ~withings:None ~auth ~service ~method_ ~path ~headers ~body
 
 let split_address value =
   match String.rindex_opt value ':' with
@@ -125,15 +129,18 @@ let status = function
   | 401 -> `Unauthorized | 404 -> `Not_found | 413 -> `Payload_too_large
   | 415 -> `Unsupported_media_type | 302 -> `Found | _ -> `Internal_server_error
 
-let serve_request ~withings ~auth ~service reqd =
+let serve_request ~sw ~withings ~auth ~service reqd =
   let request = Httpun.Reqd.request reqd in
   let method_ = match request.meth with `GET -> `GET | `POST -> `POST | `HEAD -> `HEAD | _ -> `OTHER in
   let respond body =
     let response =
       match method_ with
       | `OTHER -> plain 404 "Not Found"
-      | (`GET | `POST | `HEAD) -> handle_withings ~withings ~auth ~service ~method_ ~path:request.target
-          ~headers:(Httpun.Headers.to_list request.headers) ~body
+      | (`GET | `POST | `HEAD) ->
+          handle_withings
+            ~schedule_sync:(fun sync -> Eio.Fiber.fork ~sw sync)
+            ~withings ~auth ~service ~method_ ~path:request.target
+            ~headers:(Httpun.Headers.to_list request.headers) ~body
     in
     let headers = List.fold_left (fun headers (key, value) -> Httpun.Headers.add headers key value) Httpun.Headers.empty response.headers in
     Httpun.Reqd.respond_with_string reqd (Httpun.Response.create ~headers (status response.status)) response.body
@@ -158,6 +165,6 @@ let run ~withings env ~config ~auth service : unit =
   let address = List.hd (Eio.Net.getaddrinfo_stream ~service:port env#net host) in
   let listener = Eio.Net.listen ~sw ~reuse_addr:true ~backlog:128 env#net address in
   let handler = Httpun_eio.Server.create_connection_handler ~sw
-    ~request_handler:(fun _ reqd -> serve_request ~withings ~auth ~service reqd.Gluten.Reqd.reqd)
+    ~request_handler:(fun _ reqd -> serve_request ~sw ~withings ~auth ~service reqd.Gluten.Reqd.reqd)
     ~error_handler:(fun _ ?request:_ _ _ -> ()) in
   Eio.Net.run_server ~on_error:(fun _ -> ()) listener (fun socket address -> handler address socket)

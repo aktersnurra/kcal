@@ -111,7 +111,11 @@ let query fields =
   let* from = optional_time "from" fields in let* to_ = optional_time "to" fields in let* limit = optional_int "limit" fields in
   Ok (from, to_, Option.value limit ~default:100)
 
-type withings = { oauth : Withings_oauth.t }
+type withings = {
+  oauth : Withings_oauth.t;
+  client_id : string;
+  redirect_uri : string;
+}
 
 let withings_status_json = function
   | Withings_connection.Connected status ->
@@ -124,7 +128,7 @@ let call ?withings service user name arguments =
       (match name with
       | "begin_withings_connection" ->
           (match withings with
-          | Some withings -> Result.map (fun (_, url) -> text_result (`Assoc [ ("authorization_url", `String url) ])) (Withings_oauth.begin_authorization withings.oauth ~user)
+          | Some withings -> Result.map (fun (_, url) -> text_result (`Assoc [ ("authorization_url", `String url) ])) (Withings_oauth.begin_authorization ~client_id:withings.client_id ~redirect_uri:withings.redirect_uri withings.oauth ~user)
           | None -> Error (Error.Storage_error "Withings unavailable"))
       | "get_withings_status" ->
           (match withings with

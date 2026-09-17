@@ -1,4 +1,4 @@
 (library
  (name kcal)
  (wrapped false)
- (libraries jose ptime sqlite3 unix uuidm yojson base64 mirage-crypto mirage-crypto-rng.unix eio eio_posix httpun httpun-eio cohttp-eio tls-eio))
+ (libraries jose ptime sqlite3 unix uuidm yojson base64 digestif mirage-crypto mirage-crypto-rng.unix eio eio_posix httpun httpun-eio cohttp-eio tls-eio))

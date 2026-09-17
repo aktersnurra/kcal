@@ -25,6 +25,21 @@ let test_mcp_rejects_bad_jsonrpc_and_provenance_fields () =
   Alcotest.(check bool) "version" true (response_has_error_code (-32600) (Mcp.handle ~service ~user bad_version));
   Alcotest.(check bool) "provenance" true (response_has_error_code (-32602) (Mcp.handle ~service ~user source_argument))
 
+let test_withings_mcp_uses_configured_oauth_url () =
+  let store, user = Test_support.store_with_user () in
+  let oauth = Withings_oauth.make ~store ~now:(fun () -> Option.get (Ptime.of_float_s 1_800_000_000.)) in
+  let request = `Assoc [ ("jsonrpc", `String "2.0"); ("method", `String "tools/call");
+    ("params", `Assoc [ ("name", `String "begin_withings_connection"); ("arguments", `Assoc []) ]) ] in
+  let response = Mcp.handle ~withings:Mcp.{ oauth; client_id = "mcp-client"; redirect_uri = "https://kcal.example/mcp-callback" }
+    ~service:(Service.make ~store) ~user request in
+  let url = match response with
+    | `Assoc [ (_, `String "2.0"); (_, `Null); (_, `Assoc [ (_, `List [ `Assoc [ (_, `String "text"); (_, `String body) ] ]); _ ]) ] ->
+        (match Yojson.Safe.from_string body with `Assoc [ (_, `String url) ] -> url | _ -> Alcotest.fail "missing authorization URL")
+    | _ -> Alcotest.fail "missing MCP result" in
+  Alcotest.(check (list (pair string (list string)))) "configured OAuth query"
+    [ ("response_type", ["code"]); ("client_id", ["mcp-client"]); ("redirect_uri", ["https://kcal.example/mcp-callback"]); ("scope", ["user.metrics"]); ("state", [List.assoc "state" (Uri.query (Uri.of_string url)) |> List.hd]) ]
+    (Uri.query (Uri.of_string url))
+
 let test_tool_list_is_exact () =
   let store, user = Test_support.store_with_user () in
   let response = Mcp.handle ~service:(Service.make ~store) ~user (`Assoc [ ("jsonrpc", `String "2.0"); ("method", `String "tools/list") ]) in
@@ -34,4 +49,4 @@ let test_tool_list_is_exact () =
   Alcotest.(check (list string)) "approved tools"
     [ "record_meal"; "get_meal"; "query_meals"; "update_meal"; "delete_meal"; "record_weight"; "get_weight"; "query_weights"; "update_weight"; "delete_weight"; "begin_withings_connection"; "get_withings_status"; "disconnect_withings" ] names
 
-let () = Alcotest.run "mcp" [ ("boundary", [ Alcotest.test_case "rejects user id" `Quick test_record_meal_rejects_user_id; Alcotest.test_case "rejects bad JSON-RPC and provenance" `Quick test_mcp_rejects_bad_jsonrpc_and_provenance_fields; Alcotest.test_case "lists approved tools" `Quick test_tool_list_is_exact ]) ]
+let () = Alcotest.run "mcp" [ ("boundary", [ Alcotest.test_case "rejects user id" `Quick test_record_meal_rejects_user_id; Alcotest.test_case "rejects bad JSON-RPC and provenance" `Quick test_mcp_rejects_bad_jsonrpc_and_provenance_fields; Alcotest.test_case "configured Withings OAuth URL" `Quick test_withings_mcp_uses_configured_oauth_url; Alcotest.test_case "lists approved tools" `Quick test_tool_list_is_exact ]) ]

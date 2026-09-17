@@ -15,7 +15,7 @@ let authorization_url ~client_id ~redirect_uri state =
                          ("state", [ state ]) ]
   |> fun query -> "https://account.withings.com/oauth2_user/authorize?" ^ query
 
-let begin_authorization ?(client_id = "") ?(redirect_uri = "") oauth ~user =
+let begin_authorization ~client_id ~redirect_uri oauth ~user =
   try
     Lazy.force rng_initialized;
     let state = base64url (Mirage_crypto_rng.generate 32) in

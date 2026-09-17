@@ -16,4 +16,16 @@ let test_reconciles_each_connected_user () =
   Alcotest.(check bool) "first connection" true (List.mem (User_id.to_string first.User.id, first_connection.id) !seen);
   Alcotest.(check bool) "second connection" true (List.mem (User_id.to_string second.User.id, second_connection.id) !seen)
 
-let () = Alcotest.run "withings reconciliation" [ ("sync", [ Alcotest.test_case "connected users" `Quick test_reconciles_each_connected_user ]) ]
+let test_continues_after_first_sync_failure () =
+  let store, first = Test_support.store_with_user () in
+  let second = Result.get_ok (Store_sqlite.resolve_user store ~issuer:"issuer" ~subject:"second") in
+  ignore (connected store first "upstream-first");
+  ignore (connected store second "upstream-second");
+  let attempted = ref [] in
+  let result = Withings_reconciliation.sync_all ~store ~sync:(fun ~user ~connection:_ ->
+    attempted := User_id.to_string user.User.id :: !attempted;
+    if user.User.id = first.User.id then Error (Error.Invalid_input "first failed") else Ok ()) in
+  Alcotest.(check bool) "reports first failure" true (Result.is_error result);
+  Alcotest.(check int) "continues with later connections" 2 (List.length !attempted)
+
+let () = Alcotest.run "withings reconciliation" [ ("sync", [ Alcotest.test_case "connected users" `Quick test_reconciles_each_connected_user; Alcotest.test_case "continues after failure" `Quick test_continues_after_first_sync_failure ]) ]

@@ -30,6 +30,8 @@ let test_normalizes_deduplicates_and_advances_cursor () =
   let rows = Result.get_ok (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None ~limit:10) in
   Alcotest.(check int) "deduplicated" 2 (List.length rows);
   Alcotest.(check (float 0.0001)) "kg normalization" 80.0 (List.hd rows).weight_kg;
+  Alcotest.(check string) "imported provenance" "withings"
+    (Weigh_in.source_to_string (List.hd rows).source);
   Alcotest.(check (option int64)) "cursor advanced" (Some 77L) (sync_cursor store)
 
 let test_upstream_change_preserves_timestamp_and_tombstone () =
@@ -81,9 +83,22 @@ let test_refresh_failure_requires_reauthorization () =
   let Withings_connection.Connected status = Result.get_ok (Store_sqlite.get_withings_status store ~user) in
   Alcotest.(check bool) "reauthorization" true status.requires_reauthorization
 
+let test_transient_refresh_failure_does_not_require_reauthorization () =
+  let store, user, connection, client = setup [ measurement "one" ] in
+  let module Fake = struct
+    include (val client : Withings.S)
+    let refresh ~refresh_token:_ = Error (Error.Invalid_input "Withings request failed")
+  end in
+  Alcotest.(check bool) "transient refresh fails" true
+    (Result.is_error (Withings_sync.sync (Withings_sync.make ~store ~client:(module Fake) ~token_key:key
+      ~now:(fun () -> Ptime.add_span now (Ptime.Span.of_int_s 7200) |> Option.get)) ~user ~connection));
+  let Withings_connection.Connected status = Result.get_ok (Store_sqlite.get_withings_status store ~user) in
+  Alcotest.(check bool) "transient failure retains authorization" false status.requires_reauthorization
+
 let () = Alcotest.run "withings sync"
   [ ("sync", [ Alcotest.test_case "normalization, duplicate and cursor" `Quick test_normalizes_deduplicates_and_advances_cursor;
                 Alcotest.test_case "update and tombstone" `Quick test_upstream_change_preserves_timestamp_and_tombstone;
                 Alcotest.test_case "failed transaction retains cursor" `Quick test_failed_transaction_retains_cursor;
                 Alcotest.test_case "stale batch cannot regress" `Quick test_stale_batch_cannot_regress_value_or_cursor;
-                Alcotest.test_case "refresh failure" `Quick test_refresh_failure_requires_reauthorization ]) ]
+                Alcotest.test_case "permanent refresh failure" `Quick test_refresh_failure_requires_reauthorization;
+                Alcotest.test_case "transient refresh failure" `Quick test_transient_refresh_failure_does_not_require_reauthorization ]) ]
