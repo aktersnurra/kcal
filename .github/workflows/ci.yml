@@ -14,5 +14,5 @@ jobs:
       - uses: ocaml/setup-ocaml@v3
         with:
           ocaml-compiler: 5.2.0
-      - run: opam install . --deps-only --with-test
+      - run: opam install --yes . --deps-only --with-test
       - run: opam exec -- dune runtest
