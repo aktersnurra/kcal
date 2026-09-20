@@ -26,3 +26,8 @@ let load_from_environment () =
   | Ok database_path, Ok listen_address, Ok public_base_url, Ok oidc_issuer, Ok oidc_audience, Ok withings_client_id, Ok withings_client_secret, Ok token_encryption_key ->
       Ok { database_path; listen_address; public_base_url; oidc_issuer; oidc_audience; withings_client_id; withings_client_secret; token_encryption_key }
   | _ -> Error (Error.Invalid_input "missing required configuration")
+
+let protected_resource_metadata_url ~audience =
+  let uri = Uri.of_string audience in
+  let path = match Uri.path uri with "" | "/" -> "" | path -> path in
+  Uri.to_string (Uri.with_path uri ("/.well-known/oauth-protected-resource" ^ path))

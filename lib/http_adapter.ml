@@ -3,6 +3,7 @@ type response = { status : int; headers : (string * string) list; body : string 
 type protected_resource = {
   resource : string;
   authorization_server : string;
+  metadata_url : string;
 }
 
 let protected_resource_metadata ~resource ~authorization_server =
@@ -19,6 +20,15 @@ let protected_resource_metadata ~resource ~authorization_server =
 let json status body = { status; headers = [ ("content-type", "application/json") ]; body }
 let plain status body = { status; headers = []; body }
 let forbidden = plain 403 "Forbidden"
+
+let unauthorized protected_resource =
+  let headers =
+    match protected_resource with
+    | Some { metadata_url; _ } ->
+        [ ("www-authenticate", Printf.sprintf {|Bearer resource_metadata="%s"|} metadata_url) ]
+    | None -> []
+  in
+  { status = 401; headers; body = "Unauthorized" }
 
 let json_media_type value =
   match String.split_on_char ';' (String.lowercase_ascii value) with
@@ -48,12 +58,12 @@ let query path =
 
 let query_value name query = match List.assoc_opt name query with Some [ value ] when value <> "" -> Some value | _ -> None
 
-let authenticated auth headers ?scope f =
+let authenticated ?protected_resource auth headers ?scope f =
   match bearer headers with
-  | None -> plain 401 "Unauthorized"
+  | None -> unauthorized protected_resource
   | Some token ->
       (match Auth.authenticate_bearer auth token with
-      | Error Error.Unauthorized -> plain 401 "Unauthorized"
+      | Error Error.Unauthorized -> unauthorized protected_resource
       | Error _ -> plain 500 "Internal Server Error"
       | Ok identity ->
           (match scope with
@@ -102,6 +112,14 @@ let webhook ~schedule_sync withings headers body =
   | Some _ -> plain 415 "Unsupported Media Type"
   | None -> plain 415 "Unsupported Media Type"
 
+let metadata_alias = "/.well-known/oauth-protected-resource"
+
+let metadata_route protected_resource route =
+  route = metadata_alias
+  || (match protected_resource with
+     | Some { metadata_url; _ } -> route = Uri.path (Uri.of_string metadata_url)
+     | None -> false)
+
 let mcp_handle (withings : withings_config option) ~service ~identity request =
   match withings with
   | None -> Mcp.handle ~service ~identity request
@@ -112,22 +130,22 @@ let mcp_handle (withings : withings_config option) ~service ~identity request =
 let handle_withings ~protected_resource ~schedule_sync ~withings ~auth ~service ~method_ ~path ~headers ~body =
   let route, query = query path in
   match method_, route with
-  | `GET, "/.well-known/oauth-protected-resource" ->
+  | `GET, route when metadata_route protected_resource route ->
       (match protected_resource with
-      | Some { resource; authorization_server } ->
+      | Some { resource; authorization_server; _ } ->
           json 200 (Yojson.Safe.to_string (protected_resource_metadata ~resource ~authorization_server))
       | None -> plain 404 "Not Found")
   | `GET, "/health" -> json 200 "{\"status\":\"ok\"}"
   | `GET, "/withings/connect" ->
       (match withings with
-      | Some withings -> authenticated auth headers ~scope:"withings:manage" (fun identity -> match Withings_oauth.begin_authorization ~client_id:withings.client_id ~redirect_uri:withings.redirect_uri withings.oauth ~user:identity.user with Ok (_, url) -> { status = 302; headers = [ ("location", url) ]; body = "" } | Error _ -> plain 500 "Internal Server Error")
+      | Some withings -> authenticated ?protected_resource auth headers ~scope:"withings:manage" (fun identity -> match Withings_oauth.begin_authorization ~client_id:withings.client_id ~redirect_uri:withings.redirect_uri withings.oauth ~user:identity.user with Ok (_, url) -> { status = 302; headers = [ ("location", url) ]; body = "" } | Error _ -> plain 500 "Internal Server Error")
       | None -> plain 404 "Not Found")
   | `GET, "/withings/callback" ->
       (match withings with Some withings -> withings_callback withings query | None -> plain 404 "Not Found")
   | `HEAD, "/withings/webhook" -> plain 200 ""
   | `POST, "/withings/webhook" -> (match withings with Some withings -> webhook ~schedule_sync withings headers body | None -> plain 404 "Not Found")
   | `POST, "/mcp" ->
-      authenticated auth headers (fun identity ->
+      authenticated ?protected_resource auth headers (fun identity ->
         match List.assoc_opt "content-type" (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) headers) with
         | Some content_type when json_media_type content_type ->
             (try
@@ -198,7 +216,10 @@ let serve_request ~sw ~protected_resource ~withings ~auth ~service reqd =
   read ()
 
 let run ~withings env ~config ~auth service : unit =
-  let protected_resource = Some { resource = config.Config.public_base_url; authorization_server = config.oidc_issuer } in
+  let protected_resource =
+    Some { resource = config.Config.oidc_audience; authorization_server = config.oidc_issuer;
+           metadata_url = Config.protected_resource_metadata_url ~audience:config.Config.oidc_audience }
+  in
   let host, port = split_address config.Config.listen_address in
   Eio.Switch.run @@ fun sw ->
   let address = List.hd (Eio.Net.getaddrinfo_stream ~service:port env#net host) in

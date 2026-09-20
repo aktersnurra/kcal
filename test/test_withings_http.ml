@@ -40,6 +40,25 @@ let test_connect_requires_authentication () =
   let store, _ = Test_support.store_with_user () in
   Alcotest.(check int) "connect auth" 401 (request store `GET "/withings/connect" "").status
 
+let test_connect_unauthorized_carries_challenge () =
+  let store, _ = Test_support.store_with_user () in
+  let protected_resource =
+    Http_adapter.{ resource = "https://kcal.example.com/mcp";
+                   authorization_server = "https://id.example.com";
+                   metadata_url = "https://kcal.example.com/.well-known/oauth-protected-resource/mcp" }
+  in
+  let response =
+    Http_adapter.handle_withings ~protected_resource:(Some protected_resource)
+      ~schedule_sync:(fun sync -> sync ()) ~withings:(Some (integration store))
+      ~auth:(auth store []) ~service:(Service.make ~store) ~method_:`GET
+      ~path:"/withings/connect" ~headers:[] ~body:""
+  in
+  Alcotest.(check int) "status" 401 response.status;
+  Alcotest.(check (option string)) "challenge"
+    (Some {|Bearer resource_metadata="https://kcal.example.com/.well-known/oauth-protected-resource/mcp"|})
+    (List.assoc_opt "www-authenticate"
+       (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) response.Http_adapter.headers))
+
 let test_connect_requires_withings_manage_scope () =
   let store, _ = Test_support.store_with_user () in
   let headers = [ ("authorization", "Bearer token") ] in
@@ -48,4 +67,4 @@ let test_connect_requires_withings_manage_scope () =
   Alcotest.(check int) "withings manage is accepted" 302
     (request ~scopes:[ "withings:manage" ] store ~headers `GET "/withings/connect" "").status
 
-let () = Alcotest.run "withings http" [ ("routes", [ Alcotest.test_case "webhook boundaries" `Quick test_webhook_boundaries; Alcotest.test_case "known webhook schedules sync" `Quick test_known_webhook_schedules_sync_after_validation; Alcotest.test_case "connect authentication" `Quick test_connect_requires_authentication; Alcotest.test_case "connect requires Withings manage scope" `Quick test_connect_requires_withings_manage_scope ]) ]
+let () = Alcotest.run "withings http" [ ("routes", [ Alcotest.test_case "webhook boundaries" `Quick test_webhook_boundaries; Alcotest.test_case "known webhook schedules sync" `Quick test_known_webhook_schedules_sync_after_validation; Alcotest.test_case "connect authentication" `Quick test_connect_requires_authentication; Alcotest.test_case "connect unauthorized carries challenge" `Quick test_connect_unauthorized_carries_challenge; Alcotest.test_case "connect requires Withings manage scope" `Quick test_connect_requires_withings_manage_scope ]) ]
