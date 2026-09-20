@@ -1,5 +1,5 @@
 let auth store =
-  let claims = Oidc.{ issuer = "https://issuer.example"; subject = "alice"; audience = [ "kcal-client" ]; expires_at = Option.get (Ptime.of_float_s 2_000_000_000.) } in
+  let claims = Oidc.{ issuer = "https://issuer.example"; subject = "alice"; audience = [ "kcal-client" ]; expires_at = Option.get (Ptime.of_float_s 2_000_000_000.); scopes = [] } in
   Auth.make ~resolve_user:(Store_sqlite.resolve_user store) ~verifier:(Oidc.of_verified_claims (fun _ -> Ok claims))
 
 let integration ?(sync = fun _ _ -> Ok ()) store =

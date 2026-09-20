@@ -36,7 +36,7 @@ let authenticated auth headers f =
   | None -> plain 401 "Unauthorized"
   | Some token ->
       (match Auth.authenticate_bearer auth token with
-      | Ok user -> f user
+      | Ok identity -> f identity.user
       | Error Error.Unauthorized -> plain 401 "Unauthorized"
       | Error _ -> plain 500 "Internal Server Error")
 
@@ -107,8 +107,8 @@ let handle_withings ~schedule_sync ~withings ~auth ~service ~method_ ~path ~head
           (match Auth.authenticate_bearer auth token with
           | Error Error.Unauthorized -> plain 401 "Unauthorized"
           | Error _ -> plain 500 "Internal Server Error"
-          | Ok user ->
-              (try json 200 (Yojson.Safe.to_string (mcp_handle withings ~service ~user (Yojson.Safe.from_string body)))
+          | Ok identity ->
+              (try json 200 (Yojson.Safe.to_string (mcp_handle withings ~service ~user:identity.user (Yojson.Safe.from_string body)))
                with Yojson.Json_error _ ->
                  json 400 (Yojson.Safe.to_string (Mcp.rpc_error (-32700) "Parse error"))))
       | _, None -> plain 401 "Unauthorized"

@@ -3,6 +3,7 @@ type claims = {
   subject : string;
   audience : string list;
   expires_at : Ptime.t;
+  scopes : string list;
 }
 
 type clock = unit -> Ptime.t
@@ -50,6 +51,15 @@ let audience_of_payload = function
       | _ -> None)
   | _ -> None
 
+let scopes_of_payload = function
+  | `Assoc fields ->
+      (match List.assoc_opt "scope" fields with
+      | Some (`String scopes) ->
+          String.split_on_char ' ' scopes
+          |> List.filter (fun scope -> scope <> "")
+      | _ -> [])
+  | _ -> []
+
 let expiration_of_payload = function
   | `Assoc fields ->
       (match List.assoc_opt "exp" fields with
@@ -72,7 +82,14 @@ let claims_of_jwt ~issuer ~audience ~now jwt =
          && subject <> ""
          && List.mem audience token_audience
          && Ptime.compare expires_at now > 0 ->
-      Ok { issuer = token_issuer; subject; audience = token_audience; expires_at }
+      Ok
+        {
+          issuer = token_issuer;
+          subject;
+          audience = token_audience;
+          expires_at;
+          scopes = scopes_of_payload jwt.Jose.Jwt.payload;
+        }
   | _ -> Error ()
 
 let key_for_token keys token =
