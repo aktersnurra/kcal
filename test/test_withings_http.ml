@@ -1,5 +1,5 @@
-let auth store =
-  let claims = Oidc.{ issuer = "https://issuer.example"; subject = "alice"; audience = [ "kcal-client" ]; expires_at = Option.get (Ptime.of_float_s 2_000_000_000.); scopes = [] } in
+let auth store scopes =
+  let claims = Oidc.{ issuer = "https://issuer.example"; subject = "alice"; audience = [ "kcal-client" ]; expires_at = Option.get (Ptime.of_float_s 2_000_000_000.); scopes } in
   Auth.make ~resolve_user:(Store_sqlite.resolve_user store) ~verifier:(Oidc.of_verified_claims (fun _ -> Ok claims))
 
 let integration ?(sync = fun _ _ -> Ok ()) store =
@@ -11,8 +11,8 @@ let integration ?(sync = fun _ _ -> Ok ()) store =
   end in
   Http_adapter.{ oauth = Withings_oauth.make ~store ~now:(fun () -> Option.get (Ptime.of_float_s 1_800_000_000.)); client = (module Client); token_key = Bytes.make 32 'k'; sync; callback_url = "https://kcal.example.com/withings/webhook"; client_id = "client"; redirect_uri = "https://kcal.example.com/withings/callback" }
 
-let request store ?(headers = []) method_ path body =
-  Http_adapter.handle_withings ~schedule_sync:(fun sync -> sync ()) ~withings:(Some (integration store)) ~auth:(auth store) ~service:(Service.make ~store) ~method_ ~path ~headers ~body
+let request store ?(scopes = []) ?(headers = []) method_ path body =
+  Http_adapter.handle_withings ~schedule_sync:(fun sync -> sync ()) ~withings:(Some (integration store)) ~auth:(auth store scopes) ~service:(Service.make ~store) ~method_ ~path ~headers ~body
 
 let test_webhook_boundaries () =
   let store, _ = Test_support.store_with_user () in
@@ -28,7 +28,7 @@ let test_known_webhook_schedules_sync_after_validation () =
   let scheduled = ref None in
   let withings = integration ~sync:(fun _ _ -> incr sync_calls; Ok ()) store in
   let response = Http_adapter.handle_withings ~schedule_sync:(fun sync -> scheduled := Some sync)
-    ~withings:(Some withings) ~auth:(auth store) ~service:(Service.make ~store)
+    ~withings:(Some withings) ~auth:(auth store []) ~service:(Service.make ~store)
     ~method_:`POST ~path:"/withings/webhook" ~headers:[ ("content-type", "application/x-www-form-urlencoded") ] ~body:"userid=known&appli=1" in
   Alcotest.(check int) "acknowledged" 200 response.status;
   Alcotest.(check int) "not in response path" 0 !sync_calls;
@@ -40,4 +40,12 @@ let test_connect_requires_authentication () =
   let store, _ = Test_support.store_with_user () in
   Alcotest.(check int) "connect auth" 401 (request store `GET "/withings/connect" "").status
 
-let () = Alcotest.run "withings http" [ ("routes", [ Alcotest.test_case "webhook boundaries" `Quick test_webhook_boundaries; Alcotest.test_case "known webhook schedules sync" `Quick test_known_webhook_schedules_sync_after_validation; Alcotest.test_case "connect authentication" `Quick test_connect_requires_authentication ]) ]
+let test_connect_requires_withings_manage_scope () =
+  let store, _ = Test_support.store_with_user () in
+  let headers = [ ("authorization", "Bearer token") ] in
+  Alcotest.(check int) "ledger read is insufficient" 403
+    (request ~scopes:[ "ledger:read" ] store ~headers `GET "/withings/connect" "").status;
+  Alcotest.(check int) "withings manage is accepted" 302
+    (request ~scopes:[ "withings:manage" ] store ~headers `GET "/withings/connect" "").status
+
+let () = Alcotest.run "withings http" [ ("routes", [ Alcotest.test_case "webhook boundaries" `Quick test_webhook_boundaries; Alcotest.test_case "known webhook schedules sync" `Quick test_known_webhook_schedules_sync_after_validation; Alcotest.test_case "connect authentication" `Quick test_connect_requires_authentication; Alcotest.test_case "connect requires Withings manage scope" `Quick test_connect_requires_withings_manage_scope ]) ]

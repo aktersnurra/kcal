@@ -1,0 +1,2 @@
+RED: dune exec test/test_http.exe && dune exec test/test_withings_http.exe
+exit=1

@@ -2,6 +2,7 @@ type response = { status : int; headers : (string * string) list; body : string 
 
 let json status body = { status; headers = [ ("content-type", "application/json") ]; body }
 let plain status body = { status; headers = []; body }
+let forbidden = plain 403 "Forbidden"
 
 let json_media_type value =
   match String.split_on_char ';' (String.lowercase_ascii value) with
@@ -31,14 +32,17 @@ let query path =
 
 let query_value name query = match List.assoc_opt name query with Some [ value ] when value <> "" -> Some value | _ -> None
 
-let authenticated auth headers f =
+let authenticated auth headers ?scope f =
   match bearer headers with
   | None -> plain 401 "Unauthorized"
   | Some token ->
       (match Auth.authenticate_bearer auth token with
-      | Ok identity -> f identity.user
       | Error Error.Unauthorized -> plain 401 "Unauthorized"
-      | Error _ -> plain 500 "Internal Server Error")
+      | Error _ -> plain 500 "Internal Server Error"
+      | Ok identity ->
+          (match scope with
+          | Some scope when not (Auth.has_scope identity scope) -> forbidden
+          | None | Some _ -> f identity))
 
 let withings_callback withings query =
   match query_value "state" query, query_value "code" query with
@@ -95,27 +99,23 @@ let handle_withings ~schedule_sync ~withings ~auth ~service ~method_ ~path ~head
   | `GET, "/health" -> json 200 "{\"status\":\"ok\"}"
   | `GET, "/withings/connect" ->
       (match withings with
-      | Some withings -> authenticated auth headers (fun user -> match Withings_oauth.begin_authorization ~client_id:withings.client_id ~redirect_uri:withings.redirect_uri withings.oauth ~user with Ok (_, url) -> { status = 302; headers = [ ("location", url) ]; body = "" } | Error _ -> plain 500 "Internal Server Error")
+      | Some withings -> authenticated auth headers ~scope:"withings:manage" (fun identity -> match Withings_oauth.begin_authorization ~client_id:withings.client_id ~redirect_uri:withings.redirect_uri withings.oauth ~user:identity.user with Ok (_, url) -> { status = 302; headers = [ ("location", url) ]; body = "" } | Error _ -> plain 500 "Internal Server Error")
       | None -> plain 404 "Not Found")
   | `GET, "/withings/callback" ->
       (match withings with Some withings -> withings_callback withings query | None -> plain 404 "Not Found")
   | `HEAD, "/withings/webhook" -> plain 200 ""
   | `POST, "/withings/webhook" -> (match withings with Some withings -> webhook ~schedule_sync withings headers body | None -> plain 404 "Not Found")
   | `POST, "/mcp" ->
-      (match List.assoc_opt "content-type" (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) headers), bearer headers with
-      | Some content_type, Some token when json_media_type content_type ->
-          (match Auth.authenticate_bearer auth token with
-          | Error Error.Unauthorized -> plain 401 "Unauthorized"
-          | Error _ -> plain 500 "Internal Server Error"
-          | Ok identity ->
-              (try
-                 match mcp_handle withings ~service ~identity (Yojson.Safe.from_string body) with
-                 | Ok response -> json 200 (Yojson.Safe.to_string response)
-                 | Error `Forbidden -> plain 403 "Forbidden"
-               with Yojson.Json_error _ ->
-                 json 400 (Yojson.Safe.to_string (Mcp.rpc_error (-32700) "Parse error"))))
-      | _, None -> plain 401 "Unauthorized"
-      | _ -> plain 415 "Unsupported Media Type")
+      authenticated auth headers (fun identity ->
+        match List.assoc_opt "content-type" (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) headers) with
+        | Some content_type when json_media_type content_type ->
+            (try
+               match mcp_handle withings ~service ~identity (Yojson.Safe.from_string body) with
+               | Ok response -> json 200 (Yojson.Safe.to_string response)
+               | Error `Forbidden -> forbidden
+             with Yojson.Json_error _ ->
+               json 400 (Yojson.Safe.to_string (Mcp.rpc_error (-32700) "Parse error")))
+        | _ -> plain 415 "Unsupported Media Type")
   | _ -> plain 404 "Not Found"
 
 let handle ~auth ~service ~method_ ~path ~headers ~body =
@@ -129,7 +129,7 @@ let split_address value =
 
 let status = function
   | 200 -> `OK | 400 -> `Bad_request
-  | 401 -> `Unauthorized | 404 -> `Not_found | 413 -> `Payload_too_large
+  | 401 -> `Unauthorized | 403 -> `Forbidden | 404 -> `Not_found | 413 -> `Payload_too_large
   | 415 -> `Unsupported_media_type | 302 -> `Found | _ -> `Internal_server_error
 
 let serve_request ~sw ~withings ~auth ~service reqd =
