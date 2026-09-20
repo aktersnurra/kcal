@@ -1,5 +1,21 @@
 type response = { status : int; headers : (string * string) list; body : string }
 
+type protected_resource = {
+  resource : string;
+  authorization_server : string;
+}
+
+let protected_resource_metadata ~resource ~authorization_server =
+  `Assoc [
+    ("resource", `String resource);
+    ("authorization_servers", `List [ `String authorization_server ]);
+    ("scopes_supported", `List [
+      `String "ledger:read";
+      `String "ledger:write";
+      `String "withings:manage";
+    ]);
+  ]
+
 let json status body = { status; headers = [ ("content-type", "application/json") ]; body }
 let plain status body = { status; headers = []; body }
 let forbidden = plain 403 "Forbidden"
@@ -93,9 +109,14 @@ let mcp_handle (withings : withings_config option) ~service ~identity request =
       Mcp.handle ~withings:Mcp.{ oauth = withings.oauth; client_id = withings.client_id;
                                  redirect_uri = withings.redirect_uri } ~service ~identity request
 
-let handle_withings ~schedule_sync ~withings ~auth ~service ~method_ ~path ~headers ~body =
+let handle_withings ~protected_resource ~schedule_sync ~withings ~auth ~service ~method_ ~path ~headers ~body =
   let route, query = query path in
   match method_, route with
+  | `GET, "/.well-known/oauth-protected-resource" ->
+      (match protected_resource with
+      | Some { resource; authorization_server } ->
+          json 200 (Yojson.Safe.to_string (protected_resource_metadata ~resource ~authorization_server))
+      | None -> plain 404 "Not Found")
   | `GET, "/health" -> json 200 "{\"status\":\"ok\"}"
   | `GET, "/withings/connect" ->
       (match withings with
@@ -118,8 +139,8 @@ let handle_withings ~schedule_sync ~withings ~auth ~service ~method_ ~path ~head
         | _ -> plain 415 "Unsupported Media Type")
   | _ -> plain 404 "Not Found"
 
-let handle ~auth ~service ~method_ ~path ~headers ~body =
-  handle_withings ~schedule_sync:(fun sync -> sync ()) ~withings:None ~auth ~service ~method_ ~path ~headers ~body
+let[@warning "-16"] handle ?protected_resource ~auth ~service ~method_ ~path ~headers ~body =
+  handle_withings ~protected_resource ~schedule_sync:(fun sync -> sync ()) ~withings:None ~auth ~service ~method_ ~path ~headers ~body
 
 let split_address value =
   match String.rindex_opt value ':' with
@@ -132,7 +153,7 @@ let status = function
   | 401 -> `Unauthorized | 403 -> `Forbidden | 404 -> `Not_found | 413 -> `Payload_too_large
   | 415 -> `Unsupported_media_type | 302 -> `Found | _ -> `Internal_server_error
 
-let serve_request ~sw ~withings ~auth ~service reqd =
+let serve_request ~sw ~protected_resource ~withings ~auth ~service reqd =
   let request = Httpun.Reqd.request reqd in
   let method_ = match request.meth with `GET -> `GET | `POST -> `POST | `HEAD -> `HEAD | _ -> `OTHER in
   let respond body =
@@ -141,7 +162,7 @@ let serve_request ~sw ~withings ~auth ~service reqd =
       | `OTHER -> plain 404 "Not Found"
       | (`GET | `POST | `HEAD) ->
           handle_withings
-            ~schedule_sync:(fun sync -> Eio.Fiber.fork ~sw sync)
+            ~protected_resource ~schedule_sync:(fun sync -> Eio.Fiber.fork ~sw sync)
             ~withings ~auth ~service ~method_ ~path:request.target
             ~headers:(Httpun.Headers.to_list request.headers) ~body
     in
@@ -163,11 +184,12 @@ let serve_request ~sw ~withings ~auth ~service reqd =
   read ()
 
 let run ~withings env ~config ~auth service : unit =
+  let protected_resource = Some { resource = config.Config.public_base_url; authorization_server = config.oidc_issuer } in
   let host, port = split_address config.Config.listen_address in
   Eio.Switch.run @@ fun sw ->
   let address = List.hd (Eio.Net.getaddrinfo_stream ~service:port env#net host) in
   let listener = Eio.Net.listen ~sw ~reuse_addr:true ~backlog:128 env#net address in
   let handler = Httpun_eio.Server.create_connection_handler ~sw
-    ~request_handler:(fun _ reqd -> serve_request ~sw ~withings ~auth ~service reqd.Gluten.Reqd.reqd)
+    ~request_handler:(fun _ reqd -> serve_request ~sw ~protected_resource ~withings ~auth ~service reqd.Gluten.Reqd.reqd)
     ~error_handler:(fun _ ?request:_ _ _ -> ()) in
   Eio.Net.run_server ~on_error:(fun _ -> ()) listener (fun socket address -> handler address socket)

@@ -12,7 +12,7 @@ let integration ?(sync = fun _ _ -> Ok ()) store =
   Http_adapter.{ oauth = Withings_oauth.make ~store ~now:(fun () -> Option.get (Ptime.of_float_s 1_800_000_000.)); client = (module Client); token_key = Bytes.make 32 'k'; sync; callback_url = "https://kcal.example.com/withings/webhook"; client_id = "client"; redirect_uri = "https://kcal.example.com/withings/callback" }
 
 let request store ?(scopes = []) ?(headers = []) method_ path body =
-  Http_adapter.handle_withings ~schedule_sync:(fun sync -> sync ()) ~withings:(Some (integration store)) ~auth:(auth store scopes) ~service:(Service.make ~store) ~method_ ~path ~headers ~body
+  Http_adapter.handle_withings ~protected_resource:None ~schedule_sync:(fun sync -> sync ()) ~withings:(Some (integration store)) ~auth:(auth store scopes) ~service:(Service.make ~store) ~method_ ~path ~headers ~body
 
 let test_webhook_boundaries () =
   let store, _ = Test_support.store_with_user () in
@@ -27,7 +27,7 @@ let test_known_webhook_schedules_sync_after_validation () =
   let sync_calls = ref 0 in
   let scheduled = ref None in
   let withings = integration ~sync:(fun _ _ -> incr sync_calls; Ok ()) store in
-  let response = Http_adapter.handle_withings ~schedule_sync:(fun sync -> scheduled := Some sync)
+  let response = Http_adapter.handle_withings ~protected_resource:None ~schedule_sync:(fun sync -> scheduled := Some sync)
     ~withings:(Some withings) ~auth:(auth store []) ~service:(Service.make ~store)
     ~method_:`POST ~path:"/withings/webhook" ~headers:[ ("content-type", "application/x-www-form-urlencoded") ] ~body:"userid=known&appli=1" in
   Alcotest.(check int) "acknowledged" 200 response.status;

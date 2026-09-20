@@ -4,7 +4,22 @@ let auth store scopes =
     ~verifier:(Oidc.of_verified_claims (fun _ -> Ok claims))
 
 let request store ?(scopes = []) ?(headers = []) method_ path body =
-  Http_adapter.handle ~auth:(auth store scopes) ~service:(Service.make ~store) ~method_ ~path ~headers ~body
+  Http_adapter.handle ?protected_resource:None ~auth:(auth store scopes) ~service:(Service.make ~store) ~method_ ~path ~headers ~body
+
+let test_protected_resource_metadata () =
+  let store, _ = Test_support.store_with_user () in
+  let response =
+    Http_adapter.handle
+      ~protected_resource:{ resource = "https://kcal.example.com";
+                            authorization_server = "https://id.example.com" }
+      ~auth:(auth store []) ~service:(Service.make ~store)
+      ~method_:`GET ~path:"/.well-known/oauth-protected-resource"
+      ~headers:[] ~body:""
+  in
+  Alcotest.(check int) "status" 200 response.status;
+  Alcotest.(check string) "metadata"
+    {|{"resource":"https://kcal.example.com","authorization_servers":["https://id.example.com"],"scopes_supported":["ledger:read","ledger:write","withings:manage"]}|}
+    response.body
 
 let test_health_and_unauthenticated_mcp () =
   let store, _ = Test_support.store_with_user () in
@@ -35,4 +50,4 @@ let test_mcp_scope_failures_are_forbidden () =
 
 let () =
   Alcotest.run "http"
-    [ ("boundary", [ Alcotest.test_case "health and bearer" `Quick test_health_and_unauthenticated_mcp; Alcotest.test_case "media type and parse error" `Quick test_media_type_and_parse_error; Alcotest.test_case "scope failures are forbidden" `Quick test_mcp_scope_failures_are_forbidden ]) ]
+    [ ("boundary", [ Alcotest.test_case "protected resource metadata" `Quick test_protected_resource_metadata; Alcotest.test_case "health and bearer" `Quick test_health_and_unauthenticated_mcp; Alcotest.test_case "media type and parse error" `Quick test_media_type_and_parse_error; Alcotest.test_case "scope failures are forbidden" `Quick test_mcp_scope_failures_are_forbidden ]) ]

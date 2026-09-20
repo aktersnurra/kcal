@@ -1,0 +1,10 @@
+Testing `withings http'.
+This run has ID `Y2RBUMV4'.
+
+  [OK]          routes          0   webhook boundaries.
+  [OK]          routes          1   known webhook schedules sync.
+  [OK]          routes          2   connect authentication.
+  [OK]          routes          3   connect requires Withings manage scope.
+
+Full test results in `~/projects/vibe/kcal.workspaces/scope-authorization/_build/.sandbox/928b3155c84de1c6f7ffc24958913176/default/test/_build/_tests/withings http'.
+Test Successful in 0.004s. 4 tests run.

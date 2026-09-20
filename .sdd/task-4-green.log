@@ -1,0 +1,10 @@
+Testing `[1mhttp[0m'.
+[2mThis run has ID `QL338HP3'.
+
+[0m  [32m[OK][0m          [36mboundary[0m          0   protected resource metadata.
+  [32m[OK][0m          [36mboundary[0m          1   health and bearer.
+  [32m[OK][0m          [36mboundary[0m          2   media type and parse error.
+  [32m[OK][0m          [36mboundary[0m          3   scope failures are forbidden.
+
+Full test results in `[36m~/projects/vibe/kcal.workspaces/scope-authorization/_build/_tests/http[0m'.
+[32mTest Successful[0m in 0.004s. 4 tests run.
