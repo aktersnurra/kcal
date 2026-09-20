@@ -1,5 +1,14 @@
+let identity user scopes = Auth.{ user; scopes }
+
+let call name arguments =
+  `Assoc [
+    ("jsonrpc", `String "2.0");
+    ("method", `String "tools/call");
+    ("params", `Assoc [ ("name", `String name); ("arguments", arguments) ]);
+  ]
+
 let response_has_error_code code = function
-  | `Assoc fields ->
+  | Ok (`Assoc fields) ->
       (match List.assoc_opt "error" fields with
       | Some (`Assoc error) -> List.assoc_opt "code" error = Some (`Int code)
       | _ -> false)
@@ -7,33 +16,96 @@ let response_has_error_code code = function
 
 let test_record_meal_rejects_user_id () =
   let store, user = Test_support.store_with_user () in
-  let request = `Assoc [
-    ("jsonrpc", `String "2.0");
-    ("method", `String "tools/call");
-    ("params", `Assoc [ ("name", `String "record_meal");
-      ("arguments", `Assoc [ ("user_id", `String "other-user");
-        ("description", `String "Soup"); ("calories_kcal", `Int 250);
-        ("protein_g", `Float 12.) ]) ]) ] in
+  let request = call "record_meal"
+    (`Assoc [ ("user_id", `String "other-user");
+      ("description", `String "Soup"); ("calories_kcal", `Int 250);
+      ("protein_g", `Float 12.) ]) in
   Alcotest.(check bool) "invalid parameters" true
-    (response_has_error_code (-32602) (Mcp.handle ~service:(Service.make ~store) ~user request))
+    (response_has_error_code (-32602)
+      (Mcp.handle ~service:(Service.make ~store)
+        ~identity:(identity user [ "ledger:write" ]) request))
 
 let test_mcp_rejects_bad_jsonrpc_and_provenance_fields () =
   let store, user = Test_support.store_with_user () in
   let service = Service.make ~store in
   let bad_version = `Assoc [ ("jsonrpc", `String "1.0"); ("method", `String "tools/list") ] in
-  let source_argument = `Assoc [ ("jsonrpc", `String "2.0"); ("method", `String "tools/call"); ("params", `Assoc [ ("name", `String "record_weight"); ("arguments", `Assoc [ ("weight_kg", `Float 70.); ("source", `String "withings") ]) ]) ] in
-  Alcotest.(check bool) "version" true (response_has_error_code (-32600) (Mcp.handle ~service ~user bad_version));
-  Alcotest.(check bool) "provenance" true (response_has_error_code (-32602) (Mcp.handle ~service ~user source_argument))
+  let source_argument = call "record_weight"
+    (`Assoc [ ("weight_kg", `Float 70.); ("source", `String "withings") ]) in
+  Alcotest.(check bool) "version" true
+    (response_has_error_code (-32600)
+      (Mcp.handle ~service ~identity:(identity user []) bad_version));
+  Alcotest.(check bool) "provenance" true
+    (response_has_error_code (-32602)
+      (Mcp.handle ~service ~identity:(identity user [ "ledger:write" ]) source_argument))
+
+let test_read_scope_allows_reads_only () =
+  let store, user = Test_support.store_with_user () in
+  let service = Service.make ~store in
+  Alcotest.(check bool) "read allowed" true
+    (Result.is_ok (Mcp.handle ~service ~identity:(identity user [ "ledger:read" ])
+      (call "query_meals" (`Assoc []))));
+  Alcotest.(check bool) "write forbidden" true
+    (match Mcp.handle ~service ~identity:(identity user [ "ledger:read" ])
+      (call "record_weight" (`Assoc [ ("weight_kg", `Float 70.) ])) with
+    | Error `Forbidden -> true | _ -> false)
+
+let test_write_scope_allows_writes_only () =
+  let store, user = Test_support.store_with_user () in
+  let service = Service.make ~store in
+  Alcotest.(check bool) "write allowed" true
+    (Result.is_ok (Mcp.handle ~service ~identity:(identity user [ "ledger:write" ])
+      (call "record_weight" (`Assoc [ ("weight_kg", `Float 70.) ]))));
+  Alcotest.(check bool) "read forbidden" true
+    (match Mcp.handle ~service ~identity:(identity user [ "ledger:write" ])
+      (call "query_weights" (`Assoc [])) with
+    | Error `Forbidden -> true | _ -> false)
+
+let withings store =
+  let oauth = Withings_oauth.make ~store
+    ~now:(fun () -> Option.get (Ptime.of_float_s 1_800_000_000.)) in
+  Mcp.{ oauth; client_id = "mcp-client";
+        redirect_uri = "https://kcal.example/mcp-callback" }
+
+let test_withings_scope_allows_withings_tools () =
+  let store, user = Test_support.store_with_user () in
+  let service = Service.make ~store in
+  let withings = withings store in
+  List.iter (fun name ->
+    Alcotest.(check bool) (name ^ " allowed") true
+      (Result.is_ok (Mcp.handle ~withings ~service
+        ~identity:(identity user [ "withings:manage" ]) (call name (`Assoc [])))))
+    [ "begin_withings_connection"; "get_withings_status"; "disconnect_withings" ]
+
+let test_combined_scopes_allow_their_union () =
+  let store, user = Test_support.store_with_user () in
+  let service = Service.make ~store in
+  let scopes = [ "ledger:read"; "ledger:write" ] in
+  Alcotest.(check bool) "read allowed" true
+    (Result.is_ok (Mcp.handle ~service ~identity:(identity user scopes)
+      (call "query_weights" (`Assoc []))));
+  Alcotest.(check bool) "write allowed" true
+    (Result.is_ok (Mcp.handle ~service ~identity:(identity user scopes)
+      (call "record_weight" (`Assoc [ ("weight_kg", `Float 70.) ]))))
+
+let test_all_scopes_allow_each_tool_class () =
+  let store, user = Test_support.store_with_user () in
+  let service = Service.make ~store in
+  let scopes = [ "ledger:read"; "ledger:write"; "withings:manage" ] in
+  List.iter (fun (name, arguments) ->
+    Alcotest.(check bool) (name ^ " allowed") true
+      (Result.is_ok (Mcp.handle ~withings:(withings store) ~service
+        ~identity:(identity user scopes) (call name arguments))))
+    [ ("query_meals", `Assoc []);
+      ("record_weight", `Assoc [ ("weight_kg", `Float 70.) ]);
+      ("get_withings_status", `Assoc []) ]
 
 let test_withings_mcp_uses_configured_oauth_url () =
   let store, user = Test_support.store_with_user () in
-  let oauth = Withings_oauth.make ~store ~now:(fun () -> Option.get (Ptime.of_float_s 1_800_000_000.)) in
-  let request = `Assoc [ ("jsonrpc", `String "2.0"); ("method", `String "tools/call");
-    ("params", `Assoc [ ("name", `String "begin_withings_connection"); ("arguments", `Assoc []) ]) ] in
-  let response = Mcp.handle ~withings:Mcp.{ oauth; client_id = "mcp-client"; redirect_uri = "https://kcal.example/mcp-callback" }
-    ~service:(Service.make ~store) ~user request in
+  let response = Mcp.handle ~withings:(withings store)
+    ~service:(Service.make ~store) ~identity:(identity user [ "withings:manage" ])
+    (call "begin_withings_connection" (`Assoc [])) in
   let url = match response with
-    | `Assoc [ (_, `String "2.0"); (_, `Null); (_, `Assoc [ (_, `List [ `Assoc [ (_, `String "text"); (_, `String body) ] ]); _ ]) ] ->
+    | Ok (`Assoc [ (_, `String "2.0"); (_, `Null); (_, `Assoc [ (_, `List [ `Assoc [ (_, `String "text"); (_, `String body) ] ]); _ ]) ]) ->
         (match Yojson.Safe.from_string body with `Assoc [ (_, `String url) ] -> url | _ -> Alcotest.fail "missing authorization URL")
     | _ -> Alcotest.fail "missing MCP result" in
   Alcotest.(check (list (pair string (list string)))) "configured OAuth query"
@@ -42,11 +114,23 @@ let test_withings_mcp_uses_configured_oauth_url () =
 
 let test_tool_list_is_exact () =
   let store, user = Test_support.store_with_user () in
-  let response = Mcp.handle ~service:(Service.make ~store) ~user (`Assoc [ ("jsonrpc", `String "2.0"); ("method", `String "tools/list") ]) in
+  let response = Mcp.handle ~service:(Service.make ~store) ~identity:(identity user [])
+    (`Assoc [ ("jsonrpc", `String "2.0"); ("method", `String "tools/list") ]) in
   let names = match response with
-    | `Assoc fields -> (match List.assoc_opt "result" fields with Some (`Assoc result) -> (match List.assoc_opt "tools" result with Some (`List tools) -> List.filter_map (function `Assoc tool -> (match List.assoc_opt "name" tool with Some (`String name) -> Some name | _ -> None) | _ -> None) tools | _ -> []) | _ -> [])
-    | _ -> [] in
+    | Ok (`Assoc fields) -> (match List.assoc_opt "result" fields with Some (`Assoc result) -> (match List.assoc_opt "tools" result with Some (`List tools) -> List.filter_map (function `Assoc tool -> (match List.assoc_opt "name" tool with Some (`String name) -> Some name | _ -> None) | _ -> None) tools | _ -> []) | _ -> [])
+    | Error `Forbidden -> [] in
   Alcotest.(check (list string)) "approved tools"
     [ "record_meal"; "get_meal"; "query_meals"; "update_meal"; "delete_meal"; "record_weight"; "get_weight"; "query_weights"; "update_weight"; "delete_weight"; "begin_withings_connection"; "get_withings_status"; "disconnect_withings" ] names
 
-let () = Alcotest.run "mcp" [ ("boundary", [ Alcotest.test_case "rejects user id" `Quick test_record_meal_rejects_user_id; Alcotest.test_case "rejects bad JSON-RPC and provenance" `Quick test_mcp_rejects_bad_jsonrpc_and_provenance_fields; Alcotest.test_case "configured Withings OAuth URL" `Quick test_withings_mcp_uses_configured_oauth_url; Alcotest.test_case "lists approved tools" `Quick test_tool_list_is_exact ]) ]
+let () = Alcotest.run "mcp" [
+  ("boundary", [
+    Alcotest.test_case "rejects user id" `Quick test_record_meal_rejects_user_id;
+    Alcotest.test_case "rejects bad JSON-RPC and provenance" `Quick test_mcp_rejects_bad_jsonrpc_and_provenance_fields;
+    Alcotest.test_case "read scope permits reads only" `Quick test_read_scope_allows_reads_only;
+    Alcotest.test_case "write scope permits writes only" `Quick test_write_scope_allows_writes_only;
+    Alcotest.test_case "Withings scope permits Withings tools" `Quick test_withings_scope_allows_withings_tools;
+    Alcotest.test_case "combined scopes permit union" `Quick test_combined_scopes_allow_their_union;
+    Alcotest.test_case "all scopes permit each tool class" `Quick test_all_scopes_allow_each_tool_class;
+    Alcotest.test_case "configured Withings OAuth URL" `Quick test_withings_mcp_uses_configured_oauth_url;
+    Alcotest.test_case "lists approved tools" `Quick test_tool_list_is_exact;
+  ]) ]

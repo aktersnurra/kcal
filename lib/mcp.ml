@@ -122,7 +122,18 @@ let withings_status_json = function
       `Assoc [ ("connected", `Bool true); ("requires_reauthorization", `Bool status.requires_reauthorization);
                ("token_expires_at", json_option (fun value -> `String (Time.to_utc_string value)) status.token_expires_at) ]
 
-let call ?withings service user name arguments =
+let required_scope = function
+  | "get_meal" | "query_meals" | "get_weight" | "query_weights" ->
+      Some "ledger:read"
+  | "record_meal" | "update_meal" | "delete_meal"
+  | "record_weight" | "update_weight" | "delete_weight" ->
+      Some "ledger:write"
+  | "begin_withings_connection" | "get_withings_status"
+  | "disconnect_withings" -> Some "withings:manage"
+  | _ -> None
+
+let call ?withings service (identity : Auth.identity) name arguments =
+  let user = identity.user in
   match arguments with
   | `Assoc fields ->
       (match name with
@@ -156,7 +167,7 @@ let rpc_error ?(id = `Null) code message = `Assoc [ ("jsonrpc", `String "2.0"); 
 
 let protocol_version = "2025-03-26"
 
-let handle ?withings ~service ~user request =
+let handle ?withings ~service ~identity request =
   match request with
   | `Assoc fields ->
       let request_id = Option.value (List.assoc_opt "id" fields) ~default:`Null in
@@ -165,23 +176,34 @@ let handle ?withings ~service ~user request =
       | Some (`String "initialize") when valid_request ->
           (match List.assoc_opt "params" fields with
           | Some (`Assoc params) when List.assoc_opt "protocolVersion" params = Some (`String protocol_version) ->
-              response ~id:request_id (`Assoc [ ("protocolVersion", `String protocol_version); ("capabilities", `Assoc [ ("tools", `Assoc []) ]); ("serverInfo", `Assoc [ ("name", `String "kcal"); ("version", `String "dev") ]) ])
-          | _ -> rpc_error ~id:request_id (-32602) "Invalid params")
-      | Some (`String "tools/list") when valid_request -> response ~id:request_id (`Assoc [ ("tools", `List tools) ])
+              Ok (response ~id:request_id (`Assoc [ ("protocolVersion", `String protocol_version); ("capabilities", `Assoc [ ("tools", `Assoc []) ]); ("serverInfo", `Assoc [ ("name", `String "kcal"); ("version", `String "dev") ]) ]))
+          | _ -> Ok (rpc_error ~id:request_id (-32602) "Invalid params"))
+      | Some (`String "tools/list") when valid_request ->
+          Ok (response ~id:request_id (`Assoc [ ("tools", `List tools) ]))
       | Some (`String "tools/call") when valid_request ->
           (match List.assoc_opt "params" fields with
           | Some (`Assoc params) ->
               (match required_string "name" params, List.assoc_opt "arguments" params with
               | Ok name, Some arguments ->
-                  (match call ?withings service user name arguments with
-                  | Ok result -> response ~id:request_id result
-                  | Error Error.Not_found -> response ~id:request_id tool_error
-                  | Error (Error.Invalid_input _) -> rpc_error ~id:request_id (-32602) "Invalid params"
-                  | Error _ -> rpc_error ~id:request_id (-32603) "Internal error")
+                  (match required_scope name with
+                  | Some scope when not (Auth.has_scope identity scope) -> Error `Forbidden
+                  | _ ->
+                      (match call ?withings service identity name arguments with
+                      | Ok result -> Ok (response ~id:request_id result)
+                      | Error Error.Not_found -> Ok (response ~id:request_id tool_error)
+                      | Error (Error.Invalid_input _) -> Ok (rpc_error ~id:request_id (-32602) "Invalid params")
+                      | Error _ -> Ok (rpc_error ~id:request_id (-32603) "Internal error")))
               | Ok ("query_meals" | "query_weights" as name), None ->
-                  (match call ?withings service user name (`Assoc []) with Ok result -> response ~id:request_id result | Error _ -> rpc_error ~id:request_id (-32603) "Internal error")
-              | _ -> rpc_error ~id:request_id (-32602) "Invalid params")
-          | _ -> rpc_error ~id:request_id (-32602) "Invalid params")
-      | Some (`String _) when valid_request -> rpc_error ~id:request_id (-32601) "Method not found"
-      | _ -> rpc_error ~id:request_id (-32600) "Invalid Request")
-  | _ -> rpc_error (-32700) "Parse error"
+                  (match required_scope name with
+                  | Some scope when not (Auth.has_scope identity scope) -> Error `Forbidden
+                  | _ ->
+                      (match call ?withings service identity name (`Assoc []) with
+                      | Ok result -> Ok (response ~id:request_id result)
+                      | Error Error.Not_found -> Ok (response ~id:request_id tool_error)
+                      | Error (Error.Invalid_input _) -> Ok (rpc_error ~id:request_id (-32602) "Invalid params")
+                      | Error _ -> Ok (rpc_error ~id:request_id (-32603) "Internal error")))
+              | _ -> Ok (rpc_error ~id:request_id (-32602) "Invalid params"))
+          | _ -> Ok (rpc_error ~id:request_id (-32602) "Invalid params"))
+      | Some (`String _) when valid_request -> Ok (rpc_error ~id:request_id (-32601) "Method not found")
+      | _ -> Ok (rpc_error ~id:request_id (-32600) "Invalid Request"))
+  | _ -> Ok (rpc_error (-32700) "Parse error")

@@ -82,12 +82,12 @@ let webhook ~schedule_sync withings headers body =
   | Some _ -> plain 415 "Unsupported Media Type"
   | None -> plain 415 "Unsupported Media Type"
 
-let mcp_handle (withings : withings_config option) ~service ~user request =
+let mcp_handle (withings : withings_config option) ~service ~identity request =
   match withings with
-  | None -> Mcp.handle ~service ~user request
+  | None -> Mcp.handle ~service ~identity request
   | Some withings ->
       Mcp.handle ~withings:Mcp.{ oauth = withings.oauth; client_id = withings.client_id;
-                                 redirect_uri = withings.redirect_uri } ~service ~user request
+                                 redirect_uri = withings.redirect_uri } ~service ~identity request
 
 let handle_withings ~schedule_sync ~withings ~auth ~service ~method_ ~path ~headers ~body =
   let route, query = query path in
@@ -108,7 +108,10 @@ let handle_withings ~schedule_sync ~withings ~auth ~service ~method_ ~path ~head
           | Error Error.Unauthorized -> plain 401 "Unauthorized"
           | Error _ -> plain 500 "Internal Server Error"
           | Ok identity ->
-              (try json 200 (Yojson.Safe.to_string (mcp_handle withings ~service ~user:identity.user (Yojson.Safe.from_string body)))
+              (try
+                 match mcp_handle withings ~service ~identity (Yojson.Safe.from_string body) with
+                 | Ok response -> json 200 (Yojson.Safe.to_string response)
+                 | Error `Forbidden -> plain 403 "Forbidden"
                with Yojson.Json_error _ ->
                  json 400 (Yojson.Safe.to_string (Mcp.rpc_error (-32700) "Parse error"))))
       | _, None -> plain 401 "Unauthorized"
