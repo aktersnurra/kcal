@@ -14,6 +14,12 @@ let response_has_error_code code = function
       | _ -> false)
   | _ -> false
 
+let response_has_result = function
+  | Ok (`Assoc fields) -> Option.is_some (List.assoc_opt "result" fields)
+  | Error `Forbidden -> false
+
+let is_forbidden = function Error `Forbidden -> true | Ok _ -> false
+
 let test_record_meal_rejects_user_id () =
   let store, user = Test_support.store_with_user () in
   let request = call "record_meal"
@@ -66,15 +72,31 @@ let withings store =
   Mcp.{ oauth; client_id = "mcp-client";
         redirect_uri = "https://kcal.example/mcp-callback" }
 
-let test_withings_scope_allows_withings_tools () =
+let test_withings_scope_isolated_and_requires_configuration () =
   let store, user = Test_support.store_with_user () in
   let service = Service.make ~store in
   let withings = withings store in
+  let managed = identity user [ "withings:manage" ] in
   List.iter (fun name ->
-    Alcotest.(check bool) (name ^ " allowed") true
-      (Result.is_ok (Mcp.handle ~withings ~service
-        ~identity:(identity user [ "withings:manage" ]) (call name (`Assoc [])))))
-    [ "begin_withings_connection"; "get_withings_status"; "disconnect_withings" ]
+    Alcotest.(check bool) (name ^ " unavailable without configuration") true
+      (response_has_error_code (-32603)
+        (Mcp.handle ~service ~identity:managed (call name (`Assoc []))));
+    Alcotest.(check bool) (name ^ " configured result") true
+      (response_has_result
+        (Mcp.handle ~withings ~service ~identity:managed (call name (`Assoc [])))))
+    [ "begin_withings_connection"; "get_withings_status"; "disconnect_withings" ];
+  List.iter (fun (name, arguments) ->
+    Alcotest.(check bool) (name ^ " forbidden to Withings-only identity") true
+      (is_forbidden
+        (Mcp.handle ~service ~identity:managed (call name arguments))))
+    [ ("query_meals", `Assoc []);
+      ("record_weight", `Assoc [ ("weight_kg", `Float 70.) ]) ];
+  List.iter (fun scopes ->
+    Alcotest.(check bool) "Withings forbidden to ledger identity" true
+      (is_forbidden
+        (Mcp.handle ~withings ~service ~identity:(identity user scopes)
+          (call "get_withings_status" (`Assoc [])))))
+    [ [ "ledger:read" ]; [ "ledger:write" ] ]
 
 let test_combined_scopes_allow_their_union () =
   let store, user = Test_support.store_with_user () in
@@ -85,7 +107,11 @@ let test_combined_scopes_allow_their_union () =
       (call "query_weights" (`Assoc []))));
   Alcotest.(check bool) "write allowed" true
     (Result.is_ok (Mcp.handle ~service ~identity:(identity user scopes)
-      (call "record_weight" (`Assoc [ ("weight_kg", `Float 70.) ]))))
+      (call "record_weight" (`Assoc [ ("weight_kg", `Float 70.) ]))));
+  Alcotest.(check bool) "Withings forbidden" true
+    (is_forbidden
+      (Mcp.handle ~withings:(withings store) ~service ~identity:(identity user scopes)
+        (call "get_withings_status" (`Assoc []))))
 
 let test_all_scopes_allow_each_tool_class () =
   let store, user = Test_support.store_with_user () in
@@ -128,7 +154,7 @@ let () = Alcotest.run "mcp" [
     Alcotest.test_case "rejects bad JSON-RPC and provenance" `Quick test_mcp_rejects_bad_jsonrpc_and_provenance_fields;
     Alcotest.test_case "read scope permits reads only" `Quick test_read_scope_allows_reads_only;
     Alcotest.test_case "write scope permits writes only" `Quick test_write_scope_allows_writes_only;
-    Alcotest.test_case "Withings scope permits Withings tools" `Quick test_withings_scope_allows_withings_tools;
+    Alcotest.test_case "Withings scope is isolated and requires configuration" `Quick test_withings_scope_isolated_and_requires_configuration;
     Alcotest.test_case "combined scopes permit union" `Quick test_combined_scopes_allow_their_union;
     Alcotest.test_case "all scopes permit each tool class" `Quick test_all_scopes_allow_each_tool_class;
     Alcotest.test_case "configured Withings OAuth URL" `Quick test_withings_mcp_uses_configured_oauth_url;

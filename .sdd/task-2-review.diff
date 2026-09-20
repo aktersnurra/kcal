@@ -1,0 +1,688 @@
+# Review package: fc7b8133a3108a499892cc0defbf4e49d9655e29..3afe007dd99363d73e220a0747ff7dc32246a6f8
+
+## Commits
+3afe007d feat(mcp): require scoped tool permissions
+
+## Files changed
+ .sdd/task-1-report.md   |  41 ++++++++++
+ .sdd/task-1-review.diff | 212 ++++++++++++++++++++++++++++++++++++++++++++++++
+ .sdd/task-2-base.txt    |   3 +
+ .sdd/task-2-green.log   |  17 ++++
+ .sdd/task-2-red.log     |  15 ++++
+ lib/http_adapter.ml     |  11 ++-
+ lib/mcp.ml              |  54 ++++++++----
+ test/test_http.ml       |   9 +-
+ test/test_mcp.ml        | 128 ++++++++++++++++++++++++-----
+ 9 files changed, 447 insertions(+), 43 deletions(-)
+
+## Diff
+diff --git a/.sdd/task-1-report.md b/.sdd/task-1-report.md
+new file mode 100644
+index 00000000..e05b3758
+--- /dev/null
++++ b/.sdd/task-1-report.md
+@@ -0,0 +1,41 @@
++# Task 1 Review Evidence
++
++base=4fad4ad738e913fa2d77f51331c07046c1217359
++head=fc7b8133a3108a499892cc0defbf4e49d9655e29
++
++## Focused test
++
++Command:
++
++```sh
++eval "$(opam env)"
++dune exec test/test_auth.exe
++```
++
++Result: passed — 8 authentication tests run successfully, including `OIDC preserves validated scopes` and `user and scopes`.
++
++## Changed files (`base..head`)
++
++- `lib/auth.ml`
++- `lib/http_adapter.ml`
++- `lib/oidc.ml`
++- `test/test_auth.ml`
++- `test/test_http.ml`
++- `test/test_withings_http.ml`
++
++## Review-1 disposition
++
++Reviewer `review-1` found no Critical or Important issues and returned an OK merge verdict. No source or test changes were needed; the validated scope set and existing 401/403 behavior remain unchanged.
++
++### GREEN verification
++
++```sh
++eval "$(opam env)"
++dune exec test/test_auth.exe
++```
++
++Result: passed — 8 authentication tests, including validated-scope preservation and identity scope checks.
++
++### TDD disposition
++
++No RED/GREEN implementation cycle was required for this review response because the review identified no defect. The focused suite above is the independent GREEN re-verification; no tests were added or altered.
+diff --git a/.sdd/task-1-review.diff b/.sdd/task-1-review.diff
+new file mode 100644
+index 00000000..c0cab75c
+--- /dev/null
++++ b/.sdd/task-1-review.diff
+@@ -0,0 +1,212 @@
++# Review package: 4fad4ad738e913fa2d77f51331c07046c1217359..fc7b8133a3108a499892cc0defbf4e49d9655e29
++
++## Commits
++fc7b8133a310 feat(auth): preserve validated token scopes
++
++## Files changed
++lib/auth.ml                |  9 ++++++++-
++lib/http_adapter.ml        |  6 +++---
++lib/oidc.ml                | 19 ++++++++++++++++++-
++test/test_auth.ml          | 41 +++++++++++++++++++++++++++++++++++------
++test/test_http.ml          |  2 +-
++test/test_withings_http.ml |  2 +-
++6 files changed, 66 insertions(+), 13 deletions(-)
++
++## Diff
++diff --git a/lib/auth.ml b/lib/auth.ml
++index b8a56b21b9..47d9bfcb5d 100644
++--- a/lib/auth.ml
+++++ b/lib/auth.ml
++@@ -1,3 +1,7 @@
+++type identity = { user : User.t; scopes : string list }
+++
+++let has_scope identity scope = List.mem scope identity.scopes
+++
++ type t = {
++   resolve_user : issuer:string -> subject:string -> (User.t, Error.t) result;
++   verifier : Oidc.t;
++@@ -8,4 +12,7 @@
++ let authenticate_bearer auth token =
++   match auth.verifier token with
++   | Error () -> Error Error.Unauthorized
++-  | Ok claims -> auth.resolve_user ~issuer:claims.issuer ~subject:claims.subject
+++  | Ok claims ->
+++      Result.map
+++        (fun user -> { user; scopes = claims.scopes })
+++        (auth.resolve_user ~issuer:claims.issuer ~subject:claims.subject)
++diff --git a/lib/http_adapter.ml b/lib/http_adapter.ml
++index 679a7f761f..f2a1f7fddb 100644
++--- a/lib/http_adapter.ml
+++++ b/lib/http_adapter.ml
++@@ -36,7 +36,7 @@
++   | None -> plain 401 "Unauthorized"
++   | Some token ->
++       (match Auth.authenticate_bearer auth token with
++-      | Ok user -> f user
+++      | Ok identity -> f identity.user
++       | Error Error.Unauthorized -> plain 401 "Unauthorized"
++       | Error _ -> plain 500 "Internal Server Error")
++ 
++@@ -107,8 +107,8 @@
++           (match Auth.authenticate_bearer auth token with
++           | Error Error.Unauthorized -> plain 401 "Unauthorized"
++           | Error _ -> plain 500 "Internal Server Error"
++-          | Ok user ->
++-              (try json 200 (Yojson.Safe.to_string (mcp_handle withings ~service ~user (Yojson.Safe.from_string body)))
+++          | Ok identity ->
+++              (try json 200 (Yojson.Safe.to_string (mcp_handle withings ~service ~user:identity.user (Yojson.Safe.from_string body)))
++                with Yojson.Json_error _ ->
++                  json 400 (Yojson.Safe.to_string (Mcp.rpc_error (-32700) "Parse error"))))
++       | _, None -> plain 401 "Unauthorized"
++diff --git a/lib/oidc.ml b/lib/oidc.ml
++index 78a65ad176..af883dfa4a 100644
++--- a/lib/oidc.ml
+++++ b/lib/oidc.ml
++@@ -3,6 +3,7 @@
++   subject : string;
++   audience : string list;
++   expires_at : Ptime.t;
+++  scopes : string list;
++ }
++ 
++ type clock = unit -> Ptime.t
++@@ -50,6 +51,15 @@
++       | _ -> None)
++   | _ -> None
++ 
+++let scopes_of_payload = function
+++  | `Assoc fields ->
+++      (match List.assoc_opt "scope" fields with
+++      | Some (`String scopes) ->
+++          String.split_on_char ' ' scopes
+++          |> List.filter (fun scope -> scope <> "")
+++      | _ -> [])
+++  | _ -> []
+++
++ let expiration_of_payload = function
++   | `Assoc fields ->
++       (match List.assoc_opt "exp" fields with
++@@ -72,7 +82,14 @@
++          && subject <> ""
++          && List.mem audience token_audience
++          && Ptime.compare expires_at now > 0 ->
++-      Ok { issuer = token_issuer; subject; audience = token_audience; expires_at }
+++      Ok
+++        {
+++          issuer = token_issuer;
+++          subject;
+++          audience = token_audience;
+++          expires_at;
+++          scopes = scopes_of_payload jwt.Jose.Jwt.payload;
+++        }
++   | _ -> Error ()
++ 
++ let key_for_token keys token =
++diff --git a/test/test_auth.ml b/test/test_auth.ml
++index 9066919b7a..90c809568b 100644
++--- a/test/test_auth.ml
+++++ b/test/test_auth.ml
++@@ -1,15 +1,19 @@
++ let time seconds = Option.get (Ptime.of_float_s seconds)
++ 
++ let claims ?(issuer = "https://issuer.example") ?(subject = "alice")
++-    ?(audience = [ "kcal-client" ]) ?(expires_at = time 2_000_000_000.) () =
++-  Oidc.{ issuer; subject; audience; expires_at }
+++    ?(audience = [ "kcal-client" ]) ?(expires_at = time 2_000_000_000.) ?(scopes = []) () =
+++  Oidc.{ issuer; subject; audience; expires_at; scopes }
++ 
++ let verifier results = Oidc.of_verified_claims (fun _ -> results)
++ 
++-let signed_token ?(issuer = "https://issuer.example") ?(audience = "kcal-client") ?(expires_at = 2_000_000_000) () =
+++let signed_token ?(issuer = "https://issuer.example") ?(audience = "kcal-client")
+++    ?(expires_at = 2_000_000_000) ?(scopes = "") () =
++   let key = Result.get_ok (Jose.Jwk.of_priv_json_string {|{"kty":"oct","k":"c2VjcmV0","kid":"test","alg":"HS256"}|}) in
++   let header = Jose.Header.make_header key in
++-  let payload = Printf.sprintf {|{"iss":"%s","sub":"alice","aud":"%s","exp":%d}|} issuer audience expires_at in
+++  let payload =
+++    Printf.sprintf {|{"iss":"%s","sub":"alice","aud":"%s","exp":%d,"scope":"%s"}|}
+++      issuer audience expires_at scopes
+++  in
++   Jose.Jws.sign ~header ~payload key |> Result.get_ok |> Jose.Jws.to_string
++ 
++ let oidc ?(max_age_s = Some 60) ~clock () =
++@@ -28,6 +32,15 @@
++   ignore (verifier (signed_token ()));
++   Alcotest.(check int) "expired cache refetched" 2 !fetches
++ 
+++let test_oidc_preserves_validated_scopes () =
+++  let verifier, _ = oidc ~clock:(fun () -> time 1_000.) () in
+++  let token = signed_token ~scopes:"ledger:read withings:manage" () in
+++  match verifier token with
+++  | Ok claims ->
+++      Alcotest.(check (list string)) "scopes"
+++        [ "ledger:read"; "withings:manage" ] claims.scopes
+++  | Error () -> Alcotest.fail "valid token rejected"
+++
++ let test_oidc_rejects_bad_tokens_and_claims () =
++   let verifier, _ = oidc ~clock:(fun () -> time 1_000.) () in
++   List.iter (fun token -> Alcotest.(check bool) "rejected" true (Result.is_error (verifier token)))
++@@ -35,6 +48,20 @@
++   let token = signed_token () in
++   Alcotest.(check bool) "tampered" true (Result.is_error (verifier (token ^ "x")))
++ 
+++let test_auth_returns_user_and_scopes () =
+++  let store, _ = Test_support.store_with_user () in
+++  let auth =
+++    Auth.make ~resolve_user:(Store_sqlite.resolve_user store)
+++      ~verifier:(verifier (Ok (claims ~scopes:[ "ledger:read" ] ())))
+++  in
+++  match Auth.authenticate_bearer auth "valid-token" with
+++  | Ok identity ->
+++      Alcotest.(check bool) "read scope" true
+++        (Auth.has_scope identity "ledger:read");
+++      Alcotest.(check bool) "write scope" false
+++        (Auth.has_scope identity "ledger:write")
+++  | Error _ -> Alcotest.fail "valid token rejected"
+++
++ let test_rejects_expired_token () =
++   let store, _ = Test_support.store_with_user () in
++   let auth =
++@@ -51,8 +78,8 @@
++   let auth = Auth.make ~resolve_user:(Store_sqlite.resolve_user store) ~verifier:(verifier (Ok (claims ()))) in
++   let first = Result.get_ok (Auth.authenticate_bearer auth "valid-token") in
++   let second = Result.get_ok (Auth.authenticate_bearer auth "valid-token") in
++-  Alcotest.(check string) "stable user" (User_id.to_string first.id)
++-    (User_id.to_string second.id)
+++  Alcotest.(check string) "stable user" (User_id.to_string first.user.id)
+++    (User_id.to_string second.user.id)
++ 
++ let test_rejects_unverified_token () =
++   let store, _ = Test_support.store_with_user () in
++@@ -85,7 +112,9 @@
++     [
++       ( "authentication",
++         [ Alcotest.test_case "OIDC signed JWT and cache" `Quick test_oidc_verifies_signed_jwt_and_cache;
+++          Alcotest.test_case "OIDC preserves validated scopes" `Quick test_oidc_preserves_validated_scopes;
++           Alcotest.test_case "OIDC rejects malformed and bad claims" `Quick test_oidc_rejects_bad_tokens_and_claims;
+++          Alcotest.test_case "user and scopes" `Quick test_auth_returns_user_and_scopes;
++           Alcotest.test_case "expired token" `Quick test_rejects_expired_token;
++           Alcotest.test_case "stable verified identity" `Quick test_resolves_verified_identity_stably;
++           Alcotest.test_case "unverified token" `Quick test_rejects_unverified_token;
++diff --git a/test/test_http.ml b/test/test_http.ml
++index 6c8ba29835..dbba73a1cd 100644
++--- a/test/test_http.ml
+++++ b/test/test_http.ml
++@@ -1,5 +1,5 @@
++ let auth store =
++-  let claims = Oidc.{ issuer = "https://issuer.example"; subject = "alice"; audience = [ "kcal-client"; ]; expires_at = Option.get (Ptime.of_float_s 2_000_000_000.) } in
+++  let claims = Oidc.{ issuer = "https://issuer.example"; subject = "alice"; audience = [ "kcal-client"; ]; expires_at = Option.get (Ptime.of_float_s 2_000_000_000.); scopes = [] } in
++   Auth.make ~resolve_user:(Store_sqlite.resolve_user store)
++     ~verifier:(Oidc.of_verified_claims (fun _ -> Ok claims))
++ 
++diff --git a/test/test_withings_http.ml b/test/test_withings_http.ml
++index ec91789a14..2e4acb8811 100644
++--- a/test/test_withings_http.ml
+++++ b/test/test_withings_http.ml
++@@ -1,5 +1,5 @@
++ let auth store =
++-  let claims = Oidc.{ issuer = "https://issuer.example"; subject = "alice"; audience = [ "kcal-client" ]; expires_at = Option.get (Ptime.of_float_s 2_000_000_000.) } in
+++  let claims = Oidc.{ issuer = "https://issuer.example"; subject = "alice"; audience = [ "kcal-client" ]; expires_at = Option.get (Ptime.of_float_s 2_000_000_000.); scopes = [] } in
++   Auth.make ~resolve_user:(Store_sqlite.resolve_user store) ~verifier:(Oidc.of_verified_claims (fun _ -> Ok claims))
++ 
++ let integration ?(sync = fun _ _ -> Ok ()) store =
+diff --git a/.sdd/task-2-base.txt b/.sdd/task-2-base.txt
+new file mode 100644
+index 00000000..50c3258c
+--- /dev/null
++++ b/.sdd/task-2-base.txt
+@@ -0,0 +1,3 @@
++○  fc7b8133a3108a499892cc0defbf4e49d9655e29
++│
++~
+diff --git a/.sdd/task-2-green.log b/.sdd/task-2-green.log
+new file mode 100644
+index 00000000..bdd5fc33
+--- /dev/null
++++ b/.sdd/task-2-green.log
+@@ -0,0 +1,17 @@
++Testing `[1mmcp[0m'.
++[2mThis run has ID `O1CAPIM7'.
++
++[0m  [32m[OK][0m          [36mboundary[0m          0   rejects user id.
++  [32m[OK][0m          [36mboundary[0m          1   rejects bad JSON-RPC and provenance.
++  [32m[OK][0m          [36mboundary[0m          2   read scope permits reads only.
++  [32m[OK][0m          [36mboundary[0m          3   write scope permits writes only.
++  [32m[OK][0m          [36mboundary[0m          4   Withings scope permits Withings tools.
++  [32m[OK][0m          [36mboundary[0m          5   combined scopes permit union.
++  [32m[OK][0m          [36mboundary[0m          6   all scopes permit each tool class.
++  [32m[OK][0m          [36mboundary[0m          7   configured Withings OAuth URL.
++  [32m[OK][0m          [36mboundary[0m          8   lists approved tools.
++
++Full test results in `[36m~/projects/vibe/kcal.workspaces/scope-authorization/_build/_tests/mcp[0m'.
++[32mTest Successful[0m in 0.008s. 9 tests run.
++
++exit=0
+diff --git a/.sdd/task-2-red.log b/.sdd/task-2-red.log
+new file mode 100644
+index 00000000..22a89b23
+--- /dev/null
++++ b/.sdd/task-2-red.log
+@@ -0,0 +1,15 @@
++File "test/test_mcp.ml", line 26, characters 18-52:
++26 |         ~identity:(identity user [ "ledger:write" ]) request))
++                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
++Error: The function applied to this argument has type
++         ?withings:Mcp.withings ->
++         user:User.t ->
++         [> `Assoc of
++              (string *
++               [> `Assoc of (string * Yojson.Safe.t) list
++                | `Null
++                | `String of string ])
++              list ]
++This argument cannot be applied with label "~identity"
++
++exit=1
+diff --git a/lib/http_adapter.ml b/lib/http_adapter.ml
+index f2a1f7fd..b4366983 100644
+--- a/lib/http_adapter.ml
++++ b/lib/http_adapter.ml
+@@ -75,47 +75,50 @@ let webhook ~schedule_sync withings headers body =
+              | Ok (user, connection) ->
+                  schedule_sync (fun () -> ignore (withings.sync user connection));
+                  plain 200 "OK"
+              | Error Error.Not_found -> plain 404 "Not Found"
+              | Error _ -> plain 500 "Internal Server Error")
+          | _ -> plain 400 "Malformed webhook"
+        with _ -> plain 400 "Malformed webhook")
+   | Some _ -> plain 415 "Unsupported Media Type"
+   | None -> plain 415 "Unsupported Media Type"
+ 
+-let mcp_handle (withings : withings_config option) ~service ~user request =
++let mcp_handle (withings : withings_config option) ~service ~identity request =
+   match withings with
+-  | None -> Mcp.handle ~service ~user request
++  | None -> Mcp.handle ~service ~identity request
+   | Some withings ->
+       Mcp.handle ~withings:Mcp.{ oauth = withings.oauth; client_id = withings.client_id;
+-                                 redirect_uri = withings.redirect_uri } ~service ~user request
++                                 redirect_uri = withings.redirect_uri } ~service ~identity request
+ 
+ let handle_withings ~schedule_sync ~withings ~auth ~service ~method_ ~path ~headers ~body =
+   let route, query = query path in
+   match method_, route with
+   | `GET, "/health" -> json 200 "{\"status\":\"ok\"}"
+   | `GET, "/withings/connect" ->
+       (match withings with
+       | Some withings -> authenticated auth headers (fun user -> match Withings_oauth.begin_authorization ~client_id:withings.client_id ~redirect_uri:withings.redirect_uri withings.oauth ~user with Ok (_, url) -> { status = 302; headers = [ ("location", url) ]; body = "" } | Error _ -> plain 500 "Internal Server Error")
+       | None -> plain 404 "Not Found")
+   | `GET, "/withings/callback" ->
+       (match withings with Some withings -> withings_callback withings query | None -> plain 404 "Not Found")
+   | `HEAD, "/withings/webhook" -> plain 200 ""
+   | `POST, "/withings/webhook" -> (match withings with Some withings -> webhook ~schedule_sync withings headers body | None -> plain 404 "Not Found")
+   | `POST, "/mcp" ->
+       (match List.assoc_opt "content-type" (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) headers), bearer headers with
+       | Some content_type, Some token when json_media_type content_type ->
+           (match Auth.authenticate_bearer auth token with
+           | Error Error.Unauthorized -> plain 401 "Unauthorized"
+           | Error _ -> plain 500 "Internal Server Error"
+           | Ok identity ->
+-              (try json 200 (Yojson.Safe.to_string (mcp_handle withings ~service ~user:identity.user (Yojson.Safe.from_string body)))
++              (try
++                 match mcp_handle withings ~service ~identity (Yojson.Safe.from_string body) with
++                 | Ok response -> json 200 (Yojson.Safe.to_string response)
++                 | Error `Forbidden -> plain 403 "Forbidden"
+                with Yojson.Json_error _ ->
+                  json 400 (Yojson.Safe.to_string (Mcp.rpc_error (-32700) "Parse error"))))
+       | _, None -> plain 401 "Unauthorized"
+       | _ -> plain 415 "Unsupported Media Type")
+   | _ -> plain 404 "Not Found"
+ 
+ let handle ~auth ~service ~method_ ~path ~headers ~body =
+   handle_withings ~schedule_sync:(fun sync -> sync ()) ~withings:None ~auth ~service ~method_ ~path ~headers ~body
+ 
+ let split_address value =
+diff --git a/lib/mcp.ml b/lib/mcp.ml
+index 46cc66ee..e1056df2 100644
+--- a/lib/mcp.ml
++++ b/lib/mcp.ml
+@@ -115,21 +115,32 @@ type withings = {
+   oauth : Withings_oauth.t;
+   client_id : string;
+   redirect_uri : string;
+ }
+ 
+ let withings_status_json = function
+   | Withings_connection.Connected status ->
+       `Assoc [ ("connected", `Bool true); ("requires_reauthorization", `Bool status.requires_reauthorization);
+                ("token_expires_at", json_option (fun value -> `String (Time.to_utc_string value)) status.token_expires_at) ]
+ 
+-let call ?withings service user name arguments =
++let required_scope = function
++  | "get_meal" | "query_meals" | "get_weight" | "query_weights" ->
++      Some "ledger:read"
++  | "record_meal" | "update_meal" | "delete_meal"
++  | "record_weight" | "update_weight" | "delete_weight" ->
++      Some "ledger:write"
++  | "begin_withings_connection" | "get_withings_status"
++  | "disconnect_withings" -> Some "withings:manage"
++  | _ -> None
++
++let call ?withings service (identity : Auth.identity) name arguments =
++  let user = identity.user in
+   match arguments with
+   | `Assoc fields ->
+       (match name with
+       | "begin_withings_connection" ->
+           (match withings with
+           | Some withings -> Result.map (fun (_, url) -> text_result (`Assoc [ ("authorization_url", `String url) ])) (Withings_oauth.begin_authorization ~client_id:withings.client_id ~redirect_uri:withings.redirect_uri withings.oauth ~user)
+           | None -> Error (Error.Storage_error "Withings unavailable"))
+       | "get_withings_status" ->
+           (match withings with
+           | Some withings -> Result.map (fun status -> text_result (withings_status_json status)) (Store_sqlite.get_withings_status withings.oauth.store ~user)
+@@ -149,39 +160,50 @@ let call ?withings service user name arguments =
+       | "update_weight" -> let* fields = only_fields ("id" :: List.map fst weight_properties) (`Assoc fields) in let* value = required_string "id" fields in let* record = id value Weigh_in_id.of_string in let* measured_at = optional_time "measured_at" fields in let* weight_kg = optional_float "weight_kg" fields in Result.map (fun x -> text_result (weight_json x)) (Service.update_manual_weigh_in service ~user record Weigh_in.{ measured_at; weight_kg })
+       | "delete_weight" -> let* fields = only_fields [ "id" ] (`Assoc fields) in let* value = required_string "id" fields in let* record = id value Weigh_in_id.of_string in Result.map (fun () -> text_result (`Assoc [ ("deleted", `Bool true) ])) (Service.delete_weigh_in service ~user record)
+       | _ -> invalid ())
+   | _ -> invalid ()
+ 
+ let response ?(id = `Null) result = `Assoc [ ("jsonrpc", `String "2.0"); ("id", id); ("result", result) ]
+ let rpc_error ?(id = `Null) code message = `Assoc [ ("jsonrpc", `String "2.0"); ("id", id); ("error", `Assoc [ ("code", `Int code); ("message", `String message) ]) ]
+ 
+ let protocol_version = "2025-03-26"
+ 
+-let handle ?withings ~service ~user request =
++let handle ?withings ~service ~identity request =
+   match request with
+   | `Assoc fields ->
+       let request_id = Option.value (List.assoc_opt "id" fields) ~default:`Null in
+       let valid_request = List.assoc_opt "jsonrpc" fields = Some (`String "2.0") in
+       (match List.assoc_opt "method" fields with
+       | Some (`String "initialize") when valid_request ->
+           (match List.assoc_opt "params" fields with
+           | Some (`Assoc params) when List.assoc_opt "protocolVersion" params = Some (`String protocol_version) ->
+-              response ~id:request_id (`Assoc [ ("protocolVersion", `String protocol_version); ("capabilities", `Assoc [ ("tools", `Assoc []) ]); ("serverInfo", `Assoc [ ("name", `String "kcal"); ("version", `String "dev") ]) ])
+-          | _ -> rpc_error ~id:request_id (-32602) "Invalid params")
+-      | Some (`String "tools/list") when valid_request -> response ~id:request_id (`Assoc [ ("tools", `List tools) ])
++              Ok (response ~id:request_id (`Assoc [ ("protocolVersion", `String protocol_version); ("capabilities", `Assoc [ ("tools", `Assoc []) ]); ("serverInfo", `Assoc [ ("name", `String "kcal"); ("version", `String "dev") ]) ]))
++          | _ -> Ok (rpc_error ~id:request_id (-32602) "Invalid params"))
++      | Some (`String "tools/list") when valid_request ->
++          Ok (response ~id:request_id (`Assoc [ ("tools", `List tools) ]))
+       | Some (`String "tools/call") when valid_request ->
+           (match List.assoc_opt "params" fields with
+           | Some (`Assoc params) ->
+               (match required_string "name" params, List.assoc_opt "arguments" params with
+               | Ok name, Some arguments ->
+-                  (match call ?withings service user name arguments with
+-                  | Ok result -> response ~id:request_id result
+-                  | Error Error.Not_found -> response ~id:request_id tool_error
+-                  | Error (Error.Invalid_input _) -> rpc_error ~id:request_id (-32602) "Invalid params"
+-                  | Error _ -> rpc_error ~id:request_id (-32603) "Internal error")
++                  (match required_scope name with
++                  | Some scope when not (Auth.has_scope identity scope) -> Error `Forbidden
++                  | _ ->
++                      (match call ?withings service identity name arguments with
++                      | Ok result -> Ok (response ~id:request_id result)
++                      | Error Error.Not_found -> Ok (response ~id:request_id tool_error)
++                      | Error (Error.Invalid_input _) -> Ok (rpc_error ~id:request_id (-32602) "Invalid params")
++                      | Error _ -> Ok (rpc_error ~id:request_id (-32603) "Internal error")))
+               | Ok ("query_meals" | "query_weights" as name), None ->
+-                  (match call ?withings service user name (`Assoc []) with Ok result -> response ~id:request_id result | Error _ -> rpc_error ~id:request_id (-32603) "Internal error")
+-              | _ -> rpc_error ~id:request_id (-32602) "Invalid params")
+-          | _ -> rpc_error ~id:request_id (-32602) "Invalid params")
+-      | Some (`String _) when valid_request -> rpc_error ~id:request_id (-32601) "Method not found"
+-      | _ -> rpc_error ~id:request_id (-32600) "Invalid Request")
+-  | _ -> rpc_error (-32700) "Parse error"
++                  (match required_scope name with
++                  | Some scope when not (Auth.has_scope identity scope) -> Error `Forbidden
++                  | _ ->
++                      (match call ?withings service identity name (`Assoc []) with
++                      | Ok result -> Ok (response ~id:request_id result)
++                      | Error Error.Not_found -> Ok (response ~id:request_id tool_error)
++                      | Error (Error.Invalid_input _) -> Ok (rpc_error ~id:request_id (-32602) "Invalid params")
++                      | Error _ -> Ok (rpc_error ~id:request_id (-32603) "Internal error")))
++              | _ -> Ok (rpc_error ~id:request_id (-32602) "Invalid params"))
++          | _ -> Ok (rpc_error ~id:request_id (-32602) "Invalid params"))
++      | Some (`String _) when valid_request -> Ok (rpc_error ~id:request_id (-32601) "Method not found")
++      | _ -> Ok (rpc_error ~id:request_id (-32600) "Invalid Request"))
++  | _ -> Ok (rpc_error (-32700) "Parse error")
+diff --git a/test/test_http.ml b/test/test_http.ml
+index dbba73a1..45167dc8 100644
+--- a/test/test_http.ml
++++ b/test/test_http.ml
+@@ -12,13 +12,20 @@ let test_health_and_unauthenticated_mcp () =
+   Alcotest.(check int) "MCP bearer required" 401 (request store `POST "/mcp" "{}").status
+ 
+ let test_media_type_and_parse_error () =
+   let store, _ = Test_support.store_with_user () in
+   let auth_headers = [ ("authorization", "Bearer token") ] in
+   Alcotest.(check int) "exact media type" 415
+     (request store ~headers:(("content-type", "application/jsonx") :: auth_headers) `POST "/mcp" "{}").status;
+   Alcotest.(check int) "parse error" 400
+     (request store ~headers:(("content-type", "application/json; charset=utf-8") :: auth_headers) `POST "/mcp" "{").status
+ 
++let test_mcp_missing_scope_is_forbidden () =
++  let store, _ = Test_support.store_with_user () in
++  let headers = [ ("authorization", "Bearer token"); ("content-type", "application/json") ] in
++  let body = "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"query_meals\",\"arguments\":{}}}" in
++  Alcotest.(check int) "scope required" 403
++    (request store ~headers `POST "/mcp" body).status
++
+ let () =
+   Alcotest.run "http"
+-    [ ("boundary", [ Alcotest.test_case "health and bearer" `Quick test_health_and_unauthenticated_mcp; Alcotest.test_case "media type and parse error" `Quick test_media_type_and_parse_error ]) ]
++    [ ("boundary", [ Alcotest.test_case "health and bearer" `Quick test_health_and_unauthenticated_mcp; Alcotest.test_case "media type and parse error" `Quick test_media_type_and_parse_error; Alcotest.test_case "missing scope is forbidden" `Quick test_mcp_missing_scope_is_forbidden ]) ]
+diff --git a/test/test_mcp.ml b/test/test_mcp.ml
+index f2a40338..64e7a305 100644
+--- a/test/test_mcp.ml
++++ b/test/test_mcp.ml
+@@ -1,52 +1,136 @@
++let identity user scopes = Auth.{ user; scopes }
++
++let call name arguments =
++  `Assoc [
++    ("jsonrpc", `String "2.0");
++    ("method", `String "tools/call");
++    ("params", `Assoc [ ("name", `String name); ("arguments", arguments) ]);
++  ]
++
+ let response_has_error_code code = function
+-  | `Assoc fields ->
++  | Ok (`Assoc fields) ->
+       (match List.assoc_opt "error" fields with
+       | Some (`Assoc error) -> List.assoc_opt "code" error = Some (`Int code)
+       | _ -> false)
+   | _ -> false
+ 
+ let test_record_meal_rejects_user_id () =
+   let store, user = Test_support.store_with_user () in
+-  let request = `Assoc [
+-    ("jsonrpc", `String "2.0");
+-    ("method", `String "tools/call");
+-    ("params", `Assoc [ ("name", `String "record_meal");
+-      ("arguments", `Assoc [ ("user_id", `String "other-user");
+-        ("description", `String "Soup"); ("calories_kcal", `Int 250);
+-        ("protein_g", `Float 12.) ]) ]) ] in
++  let request = call "record_meal"
++    (`Assoc [ ("user_id", `String "other-user");
++      ("description", `String "Soup"); ("calories_kcal", `Int 250);
++      ("protein_g", `Float 12.) ]) in
+   Alcotest.(check bool) "invalid parameters" true
+-    (response_has_error_code (-32602) (Mcp.handle ~service:(Service.make ~store) ~user request))
++    (response_has_error_code (-32602)
++      (Mcp.handle ~service:(Service.make ~store)
++        ~identity:(identity user [ "ledger:write" ]) request))
+ 
+ let test_mcp_rejects_bad_jsonrpc_and_provenance_fields () =
+   let store, user = Test_support.store_with_user () in
+   let service = Service.make ~store in
+   let bad_version = `Assoc [ ("jsonrpc", `String "1.0"); ("method", `String "tools/list") ] in
+-  let source_argument = `Assoc [ ("jsonrpc", `String "2.0"); ("method", `String "tools/call"); ("params", `Assoc [ ("name", `String "record_weight"); ("arguments", `Assoc [ ("weight_kg", `Float 70.); ("source", `String "withings") ]) ]) ] in
+-  Alcotest.(check bool) "version" true (response_has_error_code (-32600) (Mcp.handle ~service ~user bad_version));
+-  Alcotest.(check bool) "provenance" true (response_has_error_code (-32602) (Mcp.handle ~service ~user source_argument))
++  let source_argument = call "record_weight"
++    (`Assoc [ ("weight_kg", `Float 70.); ("source", `String "withings") ]) in
++  Alcotest.(check bool) "version" true
++    (response_has_error_code (-32600)
++      (Mcp.handle ~service ~identity:(identity user []) bad_version));
++  Alcotest.(check bool) "provenance" true
++    (response_has_error_code (-32602)
++      (Mcp.handle ~service ~identity:(identity user [ "ledger:write" ]) source_argument))
++
++let test_read_scope_allows_reads_only () =
++  let store, user = Test_support.store_with_user () in
++  let service = Service.make ~store in
++  Alcotest.(check bool) "read allowed" true
++    (Result.is_ok (Mcp.handle ~service ~identity:(identity user [ "ledger:read" ])
++      (call "query_meals" (`Assoc []))));
++  Alcotest.(check bool) "write forbidden" true
++    (match Mcp.handle ~service ~identity:(identity user [ "ledger:read" ])
++      (call "record_weight" (`Assoc [ ("weight_kg", `Float 70.) ])) with
++    | Error `Forbidden -> true | _ -> false)
++
++let test_write_scope_allows_writes_only () =
++  let store, user = Test_support.store_with_user () in
++  let service = Service.make ~store in
++  Alcotest.(check bool) "write allowed" true
++    (Result.is_ok (Mcp.handle ~service ~identity:(identity user [ "ledger:write" ])
++      (call "record_weight" (`Assoc [ ("weight_kg", `Float 70.) ]))));
++  Alcotest.(check bool) "read forbidden" true
++    (match Mcp.handle ~service ~identity:(identity user [ "ledger:write" ])
++      (call "query_weights" (`Assoc [])) with
++    | Error `Forbidden -> true | _ -> false)
++
++let withings store =
++  let oauth = Withings_oauth.make ~store
++    ~now:(fun () -> Option.get (Ptime.of_float_s 1_800_000_000.)) in
++  Mcp.{ oauth; client_id = "mcp-client";
++        redirect_uri = "https://kcal.example/mcp-callback" }
++
++let test_withings_scope_allows_withings_tools () =
++  let store, user = Test_support.store_with_user () in
++  let service = Service.make ~store in
++  let withings = withings store in
++  List.iter (fun name ->
++    Alcotest.(check bool) (name ^ " allowed") true
++      (Result.is_ok (Mcp.handle ~withings ~service
++        ~identity:(identity user [ "withings:manage" ]) (call name (`Assoc [])))))
++    [ "begin_withings_connection"; "get_withings_status"; "disconnect_withings" ]
++
++let test_combined_scopes_allow_their_union () =
++  let store, user = Test_support.store_with_user () in
++  let service = Service.make ~store in
++  let scopes = [ "ledger:read"; "ledger:write" ] in
++  Alcotest.(check bool) "read allowed" true
++    (Result.is_ok (Mcp.handle ~service ~identity:(identity user scopes)
++      (call "query_weights" (`Assoc []))));
++  Alcotest.(check bool) "write allowed" true
++    (Result.is_ok (Mcp.handle ~service ~identity:(identity user scopes)
++      (call "record_weight" (`Assoc [ ("weight_kg", `Float 70.) ]))))
++
++let test_all_scopes_allow_each_tool_class () =
++  let store, user = Test_support.store_with_user () in
++  let service = Service.make ~store in
++  let scopes = [ "ledger:read"; "ledger:write"; "withings:manage" ] in
++  List.iter (fun (name, arguments) ->
++    Alcotest.(check bool) (name ^ " allowed") true
++      (Result.is_ok (Mcp.handle ~withings:(withings store) ~service
++        ~identity:(identity user scopes) (call name arguments))))
++    [ ("query_meals", `Assoc []);
++      ("record_weight", `Assoc [ ("weight_kg", `Float 70.) ]);
++      ("get_withings_status", `Assoc []) ]
+ 
+ let test_withings_mcp_uses_configured_oauth_url () =
+   let store, user = Test_support.store_with_user () in
+-  let oauth = Withings_oauth.make ~store ~now:(fun () -> Option.get (Ptime.of_float_s 1_800_000_000.)) in
+-  let request = `Assoc [ ("jsonrpc", `String "2.0"); ("method", `String "tools/call");
+-    ("params", `Assoc [ ("name", `String "begin_withings_connection"); ("arguments", `Assoc []) ]) ] in
+-  let response = Mcp.handle ~withings:Mcp.{ oauth; client_id = "mcp-client"; redirect_uri = "https://kcal.example/mcp-callback" }
+-    ~service:(Service.make ~store) ~user request in
++  let response = Mcp.handle ~withings:(withings store)
++    ~service:(Service.make ~store) ~identity:(identity user [ "withings:manage" ])
++    (call "begin_withings_connection" (`Assoc [])) in
+   let url = match response with
+-    | `Assoc [ (_, `String "2.0"); (_, `Null); (_, `Assoc [ (_, `List [ `Assoc [ (_, `String "text"); (_, `String body) ] ]); _ ]) ] ->
++    | Ok (`Assoc [ (_, `String "2.0"); (_, `Null); (_, `Assoc [ (_, `List [ `Assoc [ (_, `String "text"); (_, `String body) ] ]); _ ]) ]) ->
+         (match Yojson.Safe.from_string body with `Assoc [ (_, `String url) ] -> url | _ -> Alcotest.fail "missing authorization URL")
+     | _ -> Alcotest.fail "missing MCP result" in
+   Alcotest.(check (list (pair string (list string)))) "configured OAuth query"
+     [ ("response_type", ["code"]); ("client_id", ["mcp-client"]); ("redirect_uri", ["https://kcal.example/mcp-callback"]); ("scope", ["user.metrics"]); ("state", [List.assoc "state" (Uri.query (Uri.of_string url)) |> List.hd]) ]
+     (Uri.query (Uri.of_string url))
+ 
+ let test_tool_list_is_exact () =
+   let store, user = Test_support.store_with_user () in
+-  let response = Mcp.handle ~service:(Service.make ~store) ~user (`Assoc [ ("jsonrpc", `String "2.0"); ("method", `String "tools/list") ]) in
++  let response = Mcp.handle ~service:(Service.make ~store) ~identity:(identity user [])
++    (`Assoc [ ("jsonrpc", `String "2.0"); ("method", `String "tools/list") ]) in
+   let names = match response with
+-    | `Assoc fields -> (match List.assoc_opt "result" fields with Some (`Assoc result) -> (match List.assoc_opt "tools" result with Some (`List tools) -> List.filter_map (function `Assoc tool -> (match List.assoc_opt "name" tool with Some (`String name) -> Some name | _ -> None) | _ -> None) tools | _ -> []) | _ -> [])
+-    | _ -> [] in
++    | Ok (`Assoc fields) -> (match List.assoc_opt "result" fields with Some (`Assoc result) -> (match List.assoc_opt "tools" result with Some (`List tools) -> List.filter_map (function `Assoc tool -> (match List.assoc_opt "name" tool with Some (`String name) -> Some name | _ -> None) | _ -> None) tools | _ -> []) | _ -> [])
++    | Error `Forbidden -> [] in
+   Alcotest.(check (list string)) "approved tools"
+     [ "record_meal"; "get_meal"; "query_meals"; "update_meal"; "delete_meal"; "record_weight"; "get_weight"; "query_weights"; "update_weight"; "delete_weight"; "begin_withings_connection"; "get_withings_status"; "disconnect_withings" ] names
+ 
+-let () = Alcotest.run "mcp" [ ("boundary", [ Alcotest.test_case "rejects user id" `Quick test_record_meal_rejects_user_id; Alcotest.test_case "rejects bad JSON-RPC and provenance" `Quick test_mcp_rejects_bad_jsonrpc_and_provenance_fields; Alcotest.test_case "configured Withings OAuth URL" `Quick test_withings_mcp_uses_configured_oauth_url; Alcotest.test_case "lists approved tools" `Quick test_tool_list_is_exact ]) ]
++let () = Alcotest.run "mcp" [
++  ("boundary", [
++    Alcotest.test_case "rejects user id" `Quick test_record_meal_rejects_user_id;
++    Alcotest.test_case "rejects bad JSON-RPC and provenance" `Quick test_mcp_rejects_bad_jsonrpc_and_provenance_fields;
++    Alcotest.test_case "read scope permits reads only" `Quick test_read_scope_allows_reads_only;
++    Alcotest.test_case "write scope permits writes only" `Quick test_write_scope_allows_writes_only;
++    Alcotest.test_case "Withings scope permits Withings tools" `Quick test_withings_scope_allows_withings_tools;
++    Alcotest.test_case "combined scopes permit union" `Quick test_combined_scopes_allow_their_union;
++    Alcotest.test_case "all scopes permit each tool class" `Quick test_all_scopes_allow_each_tool_class;
++    Alcotest.test_case "configured Withings OAuth URL" `Quick test_withings_mcp_uses_configured_oauth_url;
++    Alcotest.test_case "lists approved tools" `Quick test_tool_list_is_exact;
++  ]) ]

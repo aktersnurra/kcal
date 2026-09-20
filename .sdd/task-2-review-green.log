@@ -1,0 +1,15 @@
+Testing `mcp'.
+This run has ID `SMO2RER8'.
+
+  [OK]          boundary          0   rejects user id.
+  [OK]          boundary          1   rejects bad JSON-RPC and provenance.
+  [OK]          boundary          2   read scope permits reads only.
+  [OK]          boundary          3   write scope permits writes only.
+  [OK]          boundary          4   Withings scope is isolated and requires...
+  [OK]          boundary          5   combined scopes permit union.
+  [OK]          boundary          6   all scopes permit each tool class.
+  [OK]          boundary          7   configured Withings OAuth URL.
+  [OK]          boundary          8   lists approved tools.
+
+Full test results in `~/projects/vibe/kcal.workspaces/scope-authorization/_build/.sandbox/985fc18b4b878e17bda17c35f3ef24cf/default/test/_build/_tests/mcp'.
+Test Successful in 0.008s. 9 tests run.
