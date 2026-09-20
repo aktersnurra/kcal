@@ -1,0 +1,278 @@
+# Review package: 3e14b72192e4febf021c1597b5ea3d9155dec4ce..d0f1e0af24d9fb79724c722e0b1c599d7c7b30f0
+
+## Commits
+d0f1e0af feat(http): return forbidden for missing scopes
+
+## Files changed
+ .sdd/task-3-base.txt       |  3 +++
+ .sdd/task-3-green.log      |  2 ++
+ .sdd/task-3-red.log        |  2 ++
+ lib/http_adapter.ml        | 38 +++++++++++++++++++-------------------
+ test/test_http.ml          | 27 +++++++++++++++++----------
+ test/test_withings_http.ml | 20 ++++++++++++++------
+ 6 files changed, 57 insertions(+), 35 deletions(-)
+
+## Diff
+diff --git a/.sdd/task-3-base.txt b/.sdd/task-3-base.txt
+new file mode 100644
+index 00000000..3060ef44
+--- /dev/null
++++ b/.sdd/task-3-base.txt
+@@ -0,0 +1,3 @@
++○  3e14b72192e4febf021c1597b5ea3d9155dec4ce
++│
++~
+diff --git a/.sdd/task-3-green.log b/.sdd/task-3-green.log
+new file mode 100644
+index 00000000..fb370dba
+--- /dev/null
++++ b/.sdd/task-3-green.log
+@@ -0,0 +1,2 @@
++GREEN: dune exec test/test_http.exe && dune exec test/test_withings_http.exe
++passed
+diff --git a/.sdd/task-3-red.log b/.sdd/task-3-red.log
+new file mode 100644
+index 00000000..71cbbd96
+--- /dev/null
++++ b/.sdd/task-3-red.log
+@@ -0,0 +1,2 @@
++RED: dune exec test/test_http.exe && dune exec test/test_withings_http.exe
++exit=1
+diff --git a/lib/http_adapter.ml b/lib/http_adapter.ml
+index b4366983..eed53d04 100644
+--- a/lib/http_adapter.ml
++++ b/lib/http_adapter.ml
+@@ -1,14 +1,15 @@
+ type response = { status : int; headers : (string * string) list; body : string }
+ 
+ let json status body = { status; headers = [ ("content-type", "application/json") ]; body }
+ let plain status body = { status; headers = []; body }
++let forbidden = plain 403 "Forbidden"
+ 
+ let json_media_type value =
+   match String.split_on_char ';' (String.lowercase_ascii value) with
+   | media_type :: parameters ->
+       String.trim media_type = "application/json"
+       && List.for_all (fun parameter -> String.trim parameter <> "") parameters
+   | [] -> false
+ 
+ let bearer headers =
+   match List.assoc_opt "authorization" (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) headers) with
+@@ -24,28 +25,31 @@ type withings_config = {
+   client_id : string;
+   redirect_uri : string;
+ }
+ 
+ let query path =
+   let uri = Uri.of_string path in
+   (Uri.path uri, Uri.query uri)
+ 
+ let query_value name query = match List.assoc_opt name query with Some [ value ] when value <> "" -> Some value | _ -> None
+ 
+-let authenticated auth headers f =
++let authenticated auth headers ?scope f =
+   match bearer headers with
+   | None -> plain 401 "Unauthorized"
+   | Some token ->
+       (match Auth.authenticate_bearer auth token with
+-      | Ok identity -> f identity.user
+       | Error Error.Unauthorized -> plain 401 "Unauthorized"
+-      | Error _ -> plain 500 "Internal Server Error")
++      | Error _ -> plain 500 "Internal Server Error"
++      | Ok identity ->
++          (match scope with
++          | Some scope when not (Auth.has_scope identity scope) -> forbidden
++          | None | Some _ -> f identity))
+ 
+ let withings_callback withings query =
+   match query_value "state" query, query_value "code" query with
+   | Some state, Some code ->
+       (match Withings_oauth.consume_callback_state withings.oauth ~state with
+       | Error _ -> plain 400 "Invalid OAuth state"
+       | Ok user ->
+           let module Client = (val withings.client : Withings.S) in
+           (match Client.exchange_code ~code with
+           | Error _ -> plain 502 "Withings authorization failed"
+@@ -88,55 +92,51 @@ let mcp_handle (withings : withings_config option) ~service ~identity request =
+   | Some withings ->
+       Mcp.handle ~withings:Mcp.{ oauth = withings.oauth; client_id = withings.client_id;
+                                  redirect_uri = withings.redirect_uri } ~service ~identity request
+ 
+ let handle_withings ~schedule_sync ~withings ~auth ~service ~method_ ~path ~headers ~body =
+   let route, query = query path in
+   match method_, route with
+   | `GET, "/health" -> json 200 "{\"status\":\"ok\"}"
+   | `GET, "/withings/connect" ->
+       (match withings with
+-      | Some withings -> authenticated auth headers (fun user -> match Withings_oauth.begin_authorization ~client_id:withings.client_id ~redirect_uri:withings.redirect_uri withings.oauth ~user with Ok (_, url) -> { status = 302; headers = [ ("location", url) ]; body = "" } | Error _ -> plain 500 "Internal Server Error")
++      | Some withings -> authenticated auth headers ~scope:"withings:manage" (fun identity -> match Withings_oauth.begin_authorization ~client_id:withings.client_id ~redirect_uri:withings.redirect_uri withings.oauth ~user:identity.user with Ok (_, url) -> { status = 302; headers = [ ("location", url) ]; body = "" } | Error _ -> plain 500 "Internal Server Error")
+       | None -> plain 404 "Not Found")
+   | `GET, "/withings/callback" ->
+       (match withings with Some withings -> withings_callback withings query | None -> plain 404 "Not Found")
+   | `HEAD, "/withings/webhook" -> plain 200 ""
+   | `POST, "/withings/webhook" -> (match withings with Some withings -> webhook ~schedule_sync withings headers body | None -> plain 404 "Not Found")
+   | `POST, "/mcp" ->
+-      (match List.assoc_opt "content-type" (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) headers), bearer headers with
+-      | Some content_type, Some token when json_media_type content_type ->
+-          (match Auth.authenticate_bearer auth token with
+-          | Error Error.Unauthorized -> plain 401 "Unauthorized"
+-          | Error _ -> plain 500 "Internal Server Error"
+-          | Ok identity ->
+-              (try
+-                 match mcp_handle withings ~service ~identity (Yojson.Safe.from_string body) with
+-                 | Ok response -> json 200 (Yojson.Safe.to_string response)
+-                 | Error `Forbidden -> plain 403 "Forbidden"
+-               with Yojson.Json_error _ ->
+-                 json 400 (Yojson.Safe.to_string (Mcp.rpc_error (-32700) "Parse error"))))
+-      | _, None -> plain 401 "Unauthorized"
+-      | _ -> plain 415 "Unsupported Media Type")
++      authenticated auth headers (fun identity ->
++        match List.assoc_opt "content-type" (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) headers) with
++        | Some content_type when json_media_type content_type ->
++            (try
++               match mcp_handle withings ~service ~identity (Yojson.Safe.from_string body) with
++               | Ok response -> json 200 (Yojson.Safe.to_string response)
++               | Error `Forbidden -> forbidden
++             with Yojson.Json_error _ ->
++               json 400 (Yojson.Safe.to_string (Mcp.rpc_error (-32700) "Parse error")))
++        | _ -> plain 415 "Unsupported Media Type")
+   | _ -> plain 404 "Not Found"
+ 
+ let handle ~auth ~service ~method_ ~path ~headers ~body =
+   handle_withings ~schedule_sync:(fun sync -> sync ()) ~withings:None ~auth ~service ~method_ ~path ~headers ~body
+ 
+ let split_address value =
+   match String.rindex_opt value ':' with
+   | Some index when index > 0 && index < String.length value - 1 ->
+       (String.sub value 0 index, String.sub value (index + 1) (String.length value - index - 1))
+   | _ -> invalid_arg "invalid listen address"
+ 
+ let status = function
+   | 200 -> `OK | 400 -> `Bad_request
+-  | 401 -> `Unauthorized | 404 -> `Not_found | 413 -> `Payload_too_large
++  | 401 -> `Unauthorized | 403 -> `Forbidden | 404 -> `Not_found | 413 -> `Payload_too_large
+   | 415 -> `Unsupported_media_type | 302 -> `Found | _ -> `Internal_server_error
+ 
+ let serve_request ~sw ~withings ~auth ~service reqd =
+   let request = Httpun.Reqd.request reqd in
+   let method_ = match request.meth with `GET -> `GET | `POST -> `POST | `HEAD -> `HEAD | _ -> `OTHER in
+   let respond body =
+     let response =
+       match method_ with
+       | `OTHER -> plain 404 "Not Found"
+       | (`GET | `POST | `HEAD) ->
+diff --git a/test/test_http.ml b/test/test_http.ml
+index 45167dc8..86f716d4 100644
+--- a/test/test_http.ml
++++ b/test/test_http.ml
+@@ -1,31 +1,38 @@
+-let auth store =
+-  let claims = Oidc.{ issuer = "https://issuer.example"; subject = "alice"; audience = [ "kcal-client"; ]; expires_at = Option.get (Ptime.of_float_s 2_000_000_000.); scopes = [] } in
++let auth store scopes =
++  let claims = Oidc.{ issuer = "https://issuer.example"; subject = "alice"; audience = [ "kcal-client"; ]; expires_at = Option.get (Ptime.of_float_s 2_000_000_000.); scopes } in
+   Auth.make ~resolve_user:(Store_sqlite.resolve_user store)
+     ~verifier:(Oidc.of_verified_claims (fun _ -> Ok claims))
+ 
+-let request store ?(headers = []) method_ path body =
+-  Http_adapter.handle ~auth:(auth store) ~service:(Service.make ~store) ~method_ ~path ~headers ~body
++let request store ?(scopes = []) ?(headers = []) method_ path body =
++  Http_adapter.handle ~auth:(auth store scopes) ~service:(Service.make ~store) ~method_ ~path ~headers ~body
+ 
+ let test_health_and_unauthenticated_mcp () =
+   let store, _ = Test_support.store_with_user () in
+   Alcotest.(check int) "health" 200 (request store `GET "/health" "").status;
+   Alcotest.(check int) "MCP bearer required" 401 (request store `POST "/mcp" "{}").status
+ 
+ let test_media_type_and_parse_error () =
+   let store, _ = Test_support.store_with_user () in
+   let auth_headers = [ ("authorization", "Bearer token") ] in
+   Alcotest.(check int) "exact media type" 415
+     (request store ~headers:(("content-type", "application/jsonx") :: auth_headers) `POST "/mcp" "{}").status;
+   Alcotest.(check int) "parse error" 400
+     (request store ~headers:(("content-type", "application/json; charset=utf-8") :: auth_headers) `POST "/mcp" "{").status
+ 
+-let test_mcp_missing_scope_is_forbidden () =
++let test_mcp_scope_failures_are_forbidden () =
+   let store, _ = Test_support.store_with_user () in
+-  let headers = [ ("authorization", "Bearer token"); ("content-type", "application/json") ] in
+-  let body = "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"query_meals\",\"arguments\":{}}}" in
+-  Alcotest.(check int) "scope required" 403
+-    (request store ~headers `POST "/mcp" body).status
++  let headers = [
++    ("authorization", "Bearer token");
++    ("content-type", "application/json");
++  ] in
++  let body =
++    {|{"jsonrpc":"2.0","method":"tools/call","params":{"name":"query_meals","arguments":{}}}|}
++  in
++  Alcotest.(check int) "authenticated without read scope" 403
++    (request ~scopes:[] store ~headers `POST "/mcp" body).status;
++  Alcotest.(check int) "read scope accepted" 200
++    (request ~scopes:[ "ledger:read" ] store ~headers `POST "/mcp" body).status
+ 
+ let () =
+   Alcotest.run "http"
+-    [ ("boundary", [ Alcotest.test_case "health and bearer" `Quick test_health_and_unauthenticated_mcp; Alcotest.test_case "media type and parse error" `Quick test_media_type_and_parse_error; Alcotest.test_case "missing scope is forbidden" `Quick test_mcp_missing_scope_is_forbidden ]) ]
++    [ ("boundary", [ Alcotest.test_case "health and bearer" `Quick test_health_and_unauthenticated_mcp; Alcotest.test_case "media type and parse error" `Quick test_media_type_and_parse_error; Alcotest.test_case "scope failures are forbidden" `Quick test_mcp_scope_failures_are_forbidden ]) ]
+diff --git a/test/test_withings_http.ml b/test/test_withings_http.ml
+index 2e4acb88..7d8d2f80 100644
+--- a/test/test_withings_http.ml
++++ b/test/test_withings_http.ml
+@@ -1,43 +1,51 @@
+-let auth store =
+-  let claims = Oidc.{ issuer = "https://issuer.example"; subject = "alice"; audience = [ "kcal-client" ]; expires_at = Option.get (Ptime.of_float_s 2_000_000_000.); scopes = [] } in
++let auth store scopes =
++  let claims = Oidc.{ issuer = "https://issuer.example"; subject = "alice"; audience = [ "kcal-client" ]; expires_at = Option.get (Ptime.of_float_s 2_000_000_000.); scopes } in
+   Auth.make ~resolve_user:(Store_sqlite.resolve_user store) ~verifier:(Oidc.of_verified_claims (fun _ -> Ok claims))
+ 
+ let integration ?(sync = fun _ _ -> Ok ()) store =
+   let module Client = struct
+     let exchange_code ~code:_ = Error (Error.Invalid_input "unused")
+     let refresh ~refresh_token:_ = Error (Error.Invalid_input "unused")
+     let get_measurements ~access_token:_ ~lastupdate:_ = Ok Withings.{ measurements = []; lastupdate = None }
+     let subscribe ~access_token:_ ~callback_url:_ = Ok ()
+   end in
+   Http_adapter.{ oauth = Withings_oauth.make ~store ~now:(fun () -> Option.get (Ptime.of_float_s 1_800_000_000.)); client = (module Client); token_key = Bytes.make 32 'k'; sync; callback_url = "https://kcal.example.com/withings/webhook"; client_id = "client"; redirect_uri = "https://kcal.example.com/withings/callback" }
+ 
+-let request store ?(headers = []) method_ path body =
+-  Http_adapter.handle_withings ~schedule_sync:(fun sync -> sync ()) ~withings:(Some (integration store)) ~auth:(auth store) ~service:(Service.make ~store) ~method_ ~path ~headers ~body
++let request store ?(scopes = []) ?(headers = []) method_ path body =
++  Http_adapter.handle_withings ~schedule_sync:(fun sync -> sync ()) ~withings:(Some (integration store)) ~auth:(auth store scopes) ~service:(Service.make ~store) ~method_ ~path ~headers ~body
+ 
+ let test_webhook_boundaries () =
+   let store, _ = Test_support.store_with_user () in
+   Alcotest.(check int) "head" 200 (request store `HEAD "/withings/webhook" "").status;
+   Alcotest.(check int) "malformed" 400 (request store ~headers:[ ("content-type", "application/x-www-form-urlencoded") ] `POST "/withings/webhook" "{}").status;
+   Alcotest.(check int) "unknown identity" 404 (request store ~headers:[ ("content-type", "application/x-www-form-urlencoded") ] `POST "/withings/webhook" "userid=unknown&appli=1").status
+ 
+ let test_known_webhook_schedules_sync_after_validation () =
+   let store, _ = Test_support.store_with_user () in
+   let user = Result.get_ok (Store_sqlite.resolve_user store ~issuer:"issuer" ~subject:"webhook-user") in
+   let connection = Result.get_ok (Store_sqlite.ensure_withings_connection store ~user ~withings_user_id:"known") in
+   let sync_calls = ref 0 in
+   let scheduled = ref None in
+   let withings = integration ~sync:(fun _ _ -> incr sync_calls; Ok ()) store in
+   let response = Http_adapter.handle_withings ~schedule_sync:(fun sync -> scheduled := Some sync)
+-    ~withings:(Some withings) ~auth:(auth store) ~service:(Service.make ~store)
++    ~withings:(Some withings) ~auth:(auth store []) ~service:(Service.make ~store)
+     ~method_:`POST ~path:"/withings/webhook" ~headers:[ ("content-type", "application/x-www-form-urlencoded") ] ~body:"userid=known&appli=1" in
+   Alcotest.(check int) "acknowledged" 200 response.status;
+   Alcotest.(check int) "not in response path" 0 !sync_calls;
+   Option.iter (fun sync -> sync ()) !scheduled;
+   Alcotest.(check int) "known webhook triggers shared sync" 1 !sync_calls;
+   ignore connection
+ 
+ let test_connect_requires_authentication () =
+   let store, _ = Test_support.store_with_user () in
+   Alcotest.(check int) "connect auth" 401 (request store `GET "/withings/connect" "").status
+ 
+-let () = Alcotest.run "withings http" [ ("routes", [ Alcotest.test_case "webhook boundaries" `Quick test_webhook_boundaries; Alcotest.test_case "known webhook schedules sync" `Quick test_known_webhook_schedules_sync_after_validation; Alcotest.test_case "connect authentication" `Quick test_connect_requires_authentication ]) ]
++let test_connect_requires_withings_manage_scope () =
++  let store, _ = Test_support.store_with_user () in
++  let headers = [ ("authorization", "Bearer token") ] in
++  Alcotest.(check int) "ledger read is insufficient" 403
++    (request ~scopes:[ "ledger:read" ] store ~headers `GET "/withings/connect" "").status;
++  Alcotest.(check int) "withings manage is accepted" 302
++    (request ~scopes:[ "withings:manage" ] store ~headers `GET "/withings/connect" "").status
++
++let () = Alcotest.run "withings http" [ ("routes", [ Alcotest.test_case "webhook boundaries" `Quick test_webhook_boundaries; Alcotest.test_case "known webhook schedules sync" `Quick test_known_webhook_schedules_sync_after_validation; Alcotest.test_case "connect authentication" `Quick test_connect_requires_authentication; Alcotest.test_case "connect requires Withings manage scope" `Quick test_connect_requires_withings_manage_scope ]) ]
