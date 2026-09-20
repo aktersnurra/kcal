@@ -139,7 +139,7 @@ let handle_withings ~protected_resource ~schedule_sync ~withings ~auth ~service 
         | _ -> plain 415 "Unsupported Media Type")
   | _ -> plain 404 "Not Found"
 
-let[@warning "-16"] handle ?protected_resource ~auth ~service ~method_ ~path ~headers ~body =
+let handle ?protected_resource ~auth ~service ~method_ ~path ~headers ~body () =
   handle_withings ~protected_resource ~schedule_sync:(fun sync -> sync ()) ~withings:None ~auth ~service ~method_ ~path ~headers ~body
 
 let split_address value =
