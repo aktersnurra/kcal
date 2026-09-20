@@ -153,6 +153,21 @@ let status = function
   | 401 -> `Unauthorized | 403 -> `Forbidden | 404 -> `Not_found | 413 -> `Payload_too_large
   | 415 -> `Unsupported_media_type | 302 -> `Found | _ -> `Internal_server_error
 
+let framed_response response =
+  let headers =
+    List.fold_left
+      (fun headers (key, value) -> Httpun.Headers.add headers key value)
+      Httpun.Headers.empty response.headers
+    |> fun headers ->
+    Httpun.Headers.add
+      (Httpun.Headers.remove headers "content-length")
+      "content-length" (string_of_int (String.length response.body))
+  in
+  Httpun.Response.create ~headers (status response.status)
+
+let respond_with_string reqd response =
+  Httpun.Reqd.respond_with_string reqd (framed_response response) response.body
+
 let serve_request ~sw ~protected_resource ~withings ~auth ~service reqd =
   let request = Httpun.Reqd.request reqd in
   let method_ = match request.meth with `GET -> `GET | `POST -> `POST | `HEAD -> `HEAD | _ -> `OTHER in
@@ -166,8 +181,7 @@ let serve_request ~sw ~protected_resource ~withings ~auth ~service reqd =
             ~withings ~auth ~service ~method_ ~path:request.target
             ~headers:(Httpun.Headers.to_list request.headers) ~body
     in
-    let headers = List.fold_left (fun headers (key, value) -> Httpun.Headers.add headers key value) Httpun.Headers.empty response.headers in
-    Httpun.Reqd.respond_with_string reqd (Httpun.Response.create ~headers (status response.status)) response.body
+    respond_with_string reqd response
   in
   let buffer = Buffer.create 1024 in
   let responded = ref false in
@@ -178,7 +192,7 @@ let serve_request ~sw ~protected_resource ~withings ~auth ~service reqd =
       ~on_read:(fun bytes ~off ~len ->
         if Buffer.length buffer + len > 1_048_576 then (
           responded := true;
-          Httpun.Reqd.respond_with_string reqd (Httpun.Response.create (status 413)) "Payload Too Large")
+          respond_with_string reqd (plain 413 "Payload Too Large"))
         else (Buffer.add_string buffer (Bigstringaf.substring bytes ~off ~len); read ()))
   in
   read ()

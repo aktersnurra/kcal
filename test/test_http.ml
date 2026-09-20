@@ -31,6 +31,15 @@ let test_health_and_unauthenticated_mcp () =
   Alcotest.(check int) "health" 200 (request store `GET "/health" "").status;
   Alcotest.(check int) "MCP bearer required" 401 (request store `POST "/mcp" "{}").status
 
+let test_http_response_has_fixed_length () =
+  let store, _ = Test_support.store_with_user () in
+  let response = Http_adapter.framed_response (request store `GET "/health" "") in
+  Alcotest.(check (option string)) "content length" (Some "15")
+    (Httpun.Headers.get response.headers "content-length");
+  match Httpun.Response.body_length ~request_method:`GET response with
+  | `Fixed length -> Alcotest.(check int64) "fixed body length" 15L length
+  | _ -> Alcotest.fail "health response is not fixed-length"
+
 let test_media_type_and_parse_error () =
   let store, _ = Test_support.store_with_user () in
   let auth_headers = [ ("authorization", "Bearer token") ] in
@@ -55,4 +64,4 @@ let test_mcp_scope_failures_are_forbidden () =
 
 let () =
   Alcotest.run "http"
-    [ ("boundary", [ Alcotest.test_case "protected resource metadata" `Quick test_protected_resource_metadata; Alcotest.test_case "unconfigured protected resource is not found" `Quick test_unconfigured_protected_resource_is_not_found; Alcotest.test_case "health and bearer" `Quick test_health_and_unauthenticated_mcp; Alcotest.test_case "media type and parse error" `Quick test_media_type_and_parse_error; Alcotest.test_case "scope failures are forbidden" `Quick test_mcp_scope_failures_are_forbidden ]) ]
+    [ ("boundary", [ Alcotest.test_case "protected resource metadata" `Quick test_protected_resource_metadata; Alcotest.test_case "unconfigured protected resource is not found" `Quick test_unconfigured_protected_resource_is_not_found; Alcotest.test_case "health and bearer" `Quick test_health_and_unauthenticated_mcp; Alcotest.test_case "fixed response length" `Quick test_http_response_has_fixed_length; Alcotest.test_case "media type and parse error" `Quick test_media_type_and_parse_error; Alcotest.test_case "scope failures are forbidden" `Quick test_mcp_scope_failures_are_forbidden ]) ]
