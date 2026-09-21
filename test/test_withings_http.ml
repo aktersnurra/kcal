@@ -4,7 +4,7 @@ let auth store scopes =
 
 let integration ?(sync = fun _ _ -> Ok ()) store =
   let module Client = struct
-    let exchange_code ~code:_ = Error (Error.Invalid_input "unused")
+    let exchange_code ~redirect_uri:_ ~code:_ = Error (Error.Invalid_input "unused")
     let refresh ~refresh_token:_ = Error (Error.Invalid_input "unused")
     let get_measurements ~access_token:_ ~lastupdate:_ = Ok Withings.{ measurements = []; lastupdate = None }
     let subscribe ~access_token:_ ~callback_url:_ = Ok ()

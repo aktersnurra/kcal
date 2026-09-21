@@ -11,7 +11,7 @@ let test_exchange_and_refresh_response_are_sanitized () =
       Ok {|{"status":0,"body":{"access_token":"access","refresh_token":"refresh","expires_in":3600,"userid":"42"}}|}) }
   in
   let module Client = (val Withings.make ~request ~config:Withings.{ client_id = "id"; client_secret = "secret" }) in
-  let exchanged = Result.get_ok (Client.exchange_code ~code:"code") in
+  let exchanged = Result.get_ok (Client.exchange_code ~redirect_uri:"https://kcal.example.com/withings/callback" ~code:"code") in
   Alcotest.(check string) "exchange token" "access" exchanged.access_token;
   let refreshed = Result.get_ok (Client.refresh ~refresh_token:"refresh") in
   Alcotest.(check string) "refresh token" "refresh" refreshed.refresh_token;
@@ -41,8 +41,40 @@ let test_credentials_are_replaced_and_refresh_failure_marks_reauthorization () =
   Alcotest.(check bool) "reauthorization required" true status.requires_reauthorization;
   ignore connection
 
+
+let test_exchange_code_sends_redirect_uri () =
+  let calls = ref [] in
+  let request =
+    Withings.{ post_form = (fun ~uri:_ ~fields ->
+      calls := fields :: !calls;
+      Ok {|{"status":0,"body":{"access_token":"access","refresh_token":"refresh","expires_in":3600,"userid":"42"}}|}) }
+  in
+  let module Client = (val Withings.make ~request ~config:Withings.{ client_id = "id"; client_secret = "secret" }) in
+  ignore (Result.get_ok (Client.exchange_code ~redirect_uri:"https://kcal.example.com/withings/callback" ~code:"code"));
+  match !calls with
+  | [ fields ] ->
+      Alcotest.(check (option string)) "redirect_uri is posted"
+        (Some "https://kcal.example.com/withings/callback") (List.assoc_opt "redirect_uri" fields)
+  | _ -> Alcotest.fail "expected exactly one token request"
+
+let test_upstream_status_is_preserved_in_error () =
+  let request = Withings.{ post_form = (fun ~uri:_ ~fields:_ -> Ok {|{"status":503,"error":"nope"}|}) } in
+  let module Client = (val Withings.make ~request ~config:Withings.{ client_id = "id"; client_secret = "secret" }) in
+  match Client.exchange_code ~redirect_uri:"https://kcal.example.com/withings/callback" ~code:"code" with
+  | Ok _ -> Alcotest.fail "expected the exchange to fail"
+  | Error (Error.Invalid_input message) ->
+      let contains needle haystack =
+        let n = String.length needle and h = String.length haystack in
+        let rec scan i = i + n <= h && (String.sub haystack i n = needle || scan (i + 1)) in
+        scan 0
+      in
+      Alcotest.(check bool) "error names the upstream status" true (contains "503" message)
+  | Error _ -> Alcotest.fail "expected an Invalid_input error"
+
 let () =
   Alcotest.run "withings client"
     [ ("credentials", [ Alcotest.test_case "exchange and refresh" `Quick test_exchange_and_refresh_response_are_sanitized;
                            Alcotest.test_case "realistic numeric measurement fixture" `Quick test_measurement_fixture_accepts_withings_numbers;
-                           Alcotest.test_case "rotation and permanent failure" `Quick test_credentials_are_replaced_and_refresh_failure_marks_reauthorization ]) ]
+                           Alcotest.test_case "rotation and permanent failure" `Quick test_credentials_are_replaced_and_refresh_failure_marks_reauthorization;
+                           Alcotest.test_case "exchange posts redirect_uri" `Quick test_exchange_code_sends_redirect_uri;
+                           Alcotest.test_case "upstream status preserved" `Quick test_upstream_status_is_preserved_in_error ]) ]

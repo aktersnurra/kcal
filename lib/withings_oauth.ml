@@ -16,7 +16,7 @@ let authorization_url ~client_id ~redirect_uri state =
   Uri.encoded_of_query [ ("response_type", [ "code" ]); ("client_id", [ client_id ]);
                          ("redirect_uri", [ redirect_uri ]); ("scope", [ "user.metrics" ]);
                          ("state", [ state ]) ]
-  |> fun query -> "https://account.withings.com/oauth2_user/authorize?" ^ query
+  |> fun query -> "https://account.withings.com/oauth2_user/authorize2?" ^ query
 
 let begin_authorization ~client_id ~redirect_uri oauth ~user =
   try
