@@ -150,15 +150,33 @@ let handle_withings ~protected_resource ~schedule_sync ~withings ~auth ~service 
         | Some content_type when json_media_type content_type ->
             (try
                let request = Yojson.Safe.from_string body in
-               let notification =
+               let method_name, notification =
                  match request with
-                 | `Assoc fields -> not (List.mem_assoc "id" fields)
-                 | _ -> false
+                 | `Assoc fields ->
+                     let method_name =
+                       match List.assoc_opt "method" fields with
+                       | Some (`String method_name) -> method_name
+                       | _ -> "<invalid>"
+                     in
+                     (method_name, not (List.mem_assoc "id" fields))
+                 | _ -> ("<invalid>", false)
                in
                match mcp_handle withings ~service ~identity request with
-               | Ok _ when notification -> plain 202 ""
-               | Ok response -> json 200 (Yojson.Safe.to_string response)
-               | Error `Forbidden -> forbidden
+               | Ok response ->
+                   let outcome =
+                     match response with
+                     | `Assoc fields when List.mem_assoc "error" fields -> "error"
+                     | `Assoc fields when List.mem_assoc "result" fields -> "result"
+                     | _ -> "invalid"
+                   in
+                   Printf.eprintf "mcp method=%s notification=%b outcome=%s\n%!"
+                     method_name notification outcome;
+                   if notification then plain 202 ""
+                   else json 200 (Yojson.Safe.to_string response)
+               | Error `Forbidden ->
+                   Printf.eprintf "mcp method=%s notification=%b outcome=forbidden\n%!"
+                     method_name notification;
+                   forbidden
              with Yojson.Json_error _ ->
                json 400 (Yojson.Safe.to_string (Mcp.rpc_error (-32700) "Parse error")))
         | _ -> plain 415 "Unsupported Media Type")
