@@ -42,6 +42,9 @@ CREATE INDEX weigh_ins_withings_connection_idx ON weigh_ins(withings_connection_
 |} );
   ]
 
+let log_src = Logs.Src.create "kcal.store" ~doc:"SQLite persistence"
+module Log = (val Logs.src_log log_src : Logs.LOG)
+
 let storage_error () = Error.Storage_error "SQLite operation failed"
 let invalid_input () = Error.Invalid_input "invalid query or update"
 let now () = Option.get (Ptime.of_float_s (Unix.gettimeofday ()))
@@ -49,16 +52,27 @@ let timestamp time = Time.to_utc_string time
 let nullable = function None -> Sqlite3.Data.NULL | Some value -> Sqlite3.Data.TEXT value
 let nullable_float = function None -> Sqlite3.Data.NULL | Some value -> Sqlite3.Data.FLOAT value
 
+(* [sql] is only ever a literal query defined in this module, never
+   user-controlled, so logging it carries no injection or PII risk. *)
 let with_statement db sql f =
   try
     let statement = Sqlite3.prepare db sql in
     Fun.protect
       ~finally:(fun () -> try ignore (Sqlite3.finalize statement) with _ -> ())
-      (fun () -> try f statement with _ -> Error (storage_error ()))
-  with _ -> Error (storage_error ())
+      (fun () ->
+        try f statement
+        with exn ->
+          Log.err (fun m -> m "query %S raised %s" sql (Printexc.to_string exn));
+          Error (storage_error ()))
+  with exn ->
+    Log.err (fun m -> m "preparing query %S raised %s" sql (Printexc.to_string exn));
+    Error (storage_error ())
 
 let bind statement values =
-  if Sqlite3.bind_values statement values = Sqlite3.Rc.OK then Ok () else Error (storage_error ())
+  if Sqlite3.bind_values statement values = Sqlite3.Rc.OK then Ok ()
+  else (
+    Log.err (fun m -> m "binding statement parameters failed");
+    Error (storage_error ()))
 
 let row_or_not_found statement decode =
   match Sqlite3.step statement with

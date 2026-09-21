@@ -1,11 +1,11 @@
 let migrate () =
   match Config.load_from_environment () with
-  | Error _ -> prerr_endline "invalid configuration"; 1
+  | Error _ -> Logs.err (fun m -> m "invalid configuration"); 1
   | Ok config ->
       let db = Sqlite3.db_open config.database_path in
       Fun.protect
         ~finally:(fun () -> ignore (Sqlite3.db_close db))
-        (fun () -> match Migration.apply_all db with Ok () -> 0 | Error _ -> prerr_endline "migration failed"; 1)
+        (fun () -> match Migration.apply_all db with Ok () -> 0 | Error _ -> Logs.err (fun m -> m "migration failed"); 1)
 
 let withings_client env config =
   (* Reconciliation constructs this transport without visiting the OAuth flow. *)
@@ -48,22 +48,22 @@ let withings_client env config =
 
 let reconciliation () =
   match Config.load_from_environment () with
-  | Error _ -> prerr_endline "invalid configuration"; 1
+  | Error _ -> Logs.err (fun m -> m "invalid configuration"); 1
   | Ok config ->
       Eio_main.run @@ fun env ->
       let db = Sqlite3.db_open config.database_path in
       Fun.protect ~finally:(fun () -> ignore (Sqlite3.db_close db)) (fun () ->
         match Migration.apply_all db with
-        | Error _ -> prerr_endline "migration failed"; 1
+        | Error _ -> Logs.err (fun m -> m "migration failed"); 1
         | Ok () ->
             let client = withings_client env config in
             let sync = Withings_sync.make ~store:db ~client ~token_key:config.token_encryption_key ~now:(fun () -> Option.get (Ptime.of_float_s (Unix.gettimeofday ()))) in
             match Withings_reconciliation.sync_all ~store:db ~sync:(Withings_sync.sync sync) with
-            | Ok () -> 0 | Error _ -> prerr_endline "Withings synchronization failed"; 1)
+            | Ok () -> 0 | Error _ -> Logs.err (fun m -> m "Withings synchronization failed"); 1)
 
 let serve () =
   match Config.load_from_environment () with
-  | Error _ -> prerr_endline "invalid configuration"; 1
+  | Error _ -> Logs.err (fun m -> m "invalid configuration"); 1
   | Ok config ->
       Eio_main.run @@ fun env ->
       let db = Sqlite3.db_open config.database_path in
@@ -71,7 +71,7 @@ let serve () =
         ~finally:(fun () -> ignore (Sqlite3.db_close db))
         (fun () ->
           match Migration.apply_all db with
-          | Error _ -> prerr_endline "migration failed"; 1
+          | Error _ -> Logs.err (fun m -> m "migration failed"); 1
           | Ok () ->
               let store = db in
               let client = Oidc.https_client env in
@@ -89,4 +89,6 @@ let command =
   let sync_command = Cmd.v (Cmd.info "sync-withings" ~doc:"Synchronize connected Withings accounts") Term.(const (fun () -> exit (reconciliation ())) $ const ()) in
   Cmd.group (Cmd.info "kcal") [ serve_command; migrate_command; sync_command ]
 
-let () = exit (Cmdliner.Cmd.eval command)
+let () =
+  Logging.setup ();
+  exit (Cmdliner.Cmd.eval command)
