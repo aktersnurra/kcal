@@ -1,3 +1,6 @@
+let log_src = Logs.Src.create "kcal.oidc" ~doc:"OIDC discovery and bearer token verification"
+module Log = (val Logs.src_log log_src : Logs.LOG)
+
 type claims = {
   issuer : string;
   subject : string;
@@ -94,31 +97,60 @@ let claims_of_jwt ~issuer ~audience ~now jwt =
           expires_at;
           scopes = scopes_of_payload jwt.Jose.Jwt.payload;
         }
-  | _ -> Error ()
+  | Some token_issuer, _, _, _ when token_issuer <> issuer ->
+      Log.warn (fun m -> m "rejected bearer token: issuer %S does not match configured issuer %S" token_issuer issuer);
+      Error ()
+  | _, _, _, Some expires_at when Ptime.compare expires_at now <= 0 ->
+      Log.debug (fun m -> m "rejected bearer token: expired at %s" (Ptime.to_rfc3339 ~tz_offset_s:0 expires_at));
+      Error ()
+  | _, _, None, _ ->
+      Log.warn (fun m -> m "rejected bearer token: missing or malformed audience claim");
+      Error ()
+  | _ ->
+      Log.warn (fun m -> m "rejected bearer token: missing required claims (iss/sub/exp)");
+      Error ()
 
 let key_for_token keys token =
   match Jose.Jwt.unsafe_of_string token with
-  | Error _ -> Error ()
+  | Error _ ->
+      Log.warn (fun m -> m "rejected bearer token: not a well-formed JWT");
+      Error ()
   | Ok jwt ->
       (match jwt.Jose.Jwt.header.alg, jwt.Jose.Jwt.header.kid with
-      | `None, _ | _, None -> Error ()
+      | `None, _ ->
+          Log.warn (fun m -> m "rejected bearer token: alg \"none\" is not accepted");
+          Error ()
+      | _, None ->
+          Log.warn (fun m -> m "rejected bearer token: missing key id (kid) header");
+          Error ()
       | _, Some kid ->
-          (match Jose.Jwks.find_key keys kid with Some key -> Ok key | None -> Error ()))
+          (match Jose.Jwks.find_key keys kid with
+          | Some key -> Ok key
+          | None ->
+              Log.warn (fun m -> m "rejected bearer token: kid=%s not found in the cached JWKS" kid);
+              Error ()))
 
 let make ~issuer ~audience ?(clock = unix_clock) ~client () =
   let cached_keys = ref None in
   let fresh_keys now =
     match client.discover ~issuer with
-    | Error () -> Error ()
-    | Ok discovery when discovery.issuer <> issuer -> Error ()
+    | Error () ->
+        Log.err (fun m -> m "OIDC discovery for issuer=%s failed" issuer);
+        Error ()
+    | Ok discovery when discovery.issuer <> issuer ->
+        Log.err (fun m -> m "OIDC discovery document issuer=%s does not match configured issuer=%s" discovery.issuer issuer);
+        Error ()
     | Ok discovery ->
         (match client.fetch_jwks ~uri:discovery.jwks_uri with
-        | Error () -> Error ()
+        | Error () ->
+            Log.err (fun m -> m "fetching JWKS from %s failed" discovery.jwks_uri);
+            Error ()
         | Ok response ->
             let ttl = bounded_ttl response.max_age_s in
             (match Ptime.add_span now (Ptime.Span.of_int_s ttl) with
             | None -> Error ()
             | Some expires_at ->
+                Log.info (fun m -> m "refreshed JWKS from %s, caching for %ds" discovery.jwks_uri ttl);
                 cached_keys := Some (response.keys, expires_at);
                 Ok response.keys))
   in
@@ -136,7 +168,9 @@ let make ~issuer ~audience ?(clock = unix_clock) ~client () =
         | Error () -> Error ()
         | Ok key ->
             match Jose.Jwt.of_string ~jwk:key ~now token with
-            | Error _ -> Error ()
+            | Error _ ->
+                Log.warn (fun m -> m "rejected bearer token: signature verification failed");
+                Error ()
             | Ok jwt -> claims_of_jwt ~issuer ~audience ~now jwt)
 
 let max_age headers =
@@ -170,13 +204,19 @@ let https_client env =
   in
   let tls =
     match certificate_bundle () with
-    | Error () -> Error ()
+    | Error () ->
+        Log.err (fun m -> m "no usable CA certificate bundle found; OIDC discovery and JWKS fetches will fail");
+        Error ()
     | Ok certificates ->
         let authenticator =
           X509.Authenticator.chain_of_trust
             ~time:(fun () -> Ptime.of_float_s (Unix.gettimeofday ())) certificates
         in
-        (match Tls.Config.client ~authenticator () with Ok config -> Ok config | Error _ -> Error ())
+        (match Tls.Config.client ~authenticator () with
+        | Ok config -> Ok config
+        | Error _ ->
+            Log.err (fun m -> m "could not build TLS client configuration");
+            Error ())
   in
   match tls with
   | Error () -> { discover = (fun ~issuer:_ -> Error ()); fetch_jwks = (fun ~uri:_ -> Error ()) }
@@ -194,18 +234,26 @@ let https_client env =
       let get uri =
         try
           let uri = Uri.of_string uri in
-          if Uri.scheme uri <> Some "https" then Error ()
+          if Uri.scheme uri <> Some "https" then (
+            Log.err (fun m -> m "refusing to fetch %s: only https is allowed" (Uri.to_string uri));
+            Error ())
           else
             Eio.Switch.run @@ fun sw ->
             let response, body = Cohttp_eio.Client.get client ~sw uri in
-            if Cohttp.Response.status response <> `OK then Error ()
+            if Cohttp.Response.status response <> `OK then (
+              Log.warn (fun m -> m "GET %s returned %s" (Uri.to_string uri) (Cohttp.Code.string_of_status (Cohttp.Response.status response)));
+              Error ())
             else Ok (Eio.Flow.read_all body, Cohttp.Response.headers response)
-        with _ -> Error ()
+        with exn ->
+          Log.warn (fun m -> m "GET %s raised %s" uri (Printexc.to_string exn));
+          Error ()
       in
       {
         discover =
           (fun ~issuer ->
-            if Uri.scheme (Uri.of_string issuer) <> Some "https" then Error ()
+            if Uri.scheme (Uri.of_string issuer) <> Some "https" then (
+              Log.err (fun m -> m "refusing OIDC discovery for issuer=%s: only https is allowed" issuer);
+              Error ())
             else
               match get (Uri.to_string (Uri.with_path (Uri.of_string issuer) "/.well-known/openid-configuration")) with
               | Error () -> Error ()
@@ -217,16 +265,24 @@ let https_client env =
                          | Some (`String discovered_issuer), Some (`String jwks_uri)
                            when Uri.scheme (Uri.of_string jwks_uri) = Some "https" ->
                              Ok { issuer = discovered_issuer; jwks_uri; max_age_s = max_age headers }
-                         | _ -> Error ())
-                     | _ -> Error ()
-                   with Yojson.Json_error _ -> Error ()));
+                         | _ ->
+                             Log.err (fun m -> m "OIDC discovery document for issuer=%s is missing issuer/jwks_uri or jwks_uri is not https" issuer);
+                             Error ())
+                     | _ ->
+                         Log.err (fun m -> m "OIDC discovery document for issuer=%s is not a JSON object" issuer);
+                         Error ()
+                   with Yojson.Json_error message ->
+                     Log.err (fun m -> m "OIDC discovery document for issuer=%s is not valid JSON: %s" issuer message);
+                     Error ()));
         fetch_jwks =
           (fun ~uri ->
             match get uri with
             | Error () -> Error ()
             | Ok (body, headers) ->
                 (try Ok { keys = Jose.Jwks.of_string body; max_age_s = max_age headers }
-                 with _ -> Error ()));
+                 with exn ->
+                   Log.err (fun m -> m "JWKS at %s could not be parsed: %s" uri (Printexc.to_string exn));
+                   Error ()));
       }
 
 let of_verified_claims ?(issuer = "https://issuer.example")

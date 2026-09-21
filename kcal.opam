@@ -23,6 +23,7 @@ depends: [
   "ptime"
   "uuidm"
   "cmdliner"
+  "logs"
   "alcotest" {with-test}
 ]
 build: [ ["dune" "build" "-p" name] ]

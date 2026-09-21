@@ -1,3 +1,3 @@
 (executable
  (name kcal)
- (libraries kcal cmdliner eio_main))
+ (libraries kcal cmdliner eio_main logs))
