@@ -7,12 +7,13 @@ let claims ?(issuer = "https://issuer.example") ?(subject = "alice")
 let verifier results = Oidc.of_verified_claims (fun _ -> results)
 
 let signed_token ?(issuer = "https://issuer.example") ?(audience = "kcal-client")
-    ?(expires_at = 2_000_000_000) ?(scopes = "") () =
+    ?(expires_at = 2_000_000_000) ?(scopes = "") ?scopes_json () =
   let key = Result.get_ok (Jose.Jwk.of_priv_json_string {|{"kty":"oct","k":"c2VjcmV0","kid":"test","alg":"HS256"}|}) in
   let header = Jose.Header.make_header key in
+  let scopes_json = Option.value scopes_json ~default:(Printf.sprintf "%S" scopes) in
   let payload =
-    Printf.sprintf {|{"iss":"%s","sub":"alice","aud":"%s","exp":%d,"scope":"%s"}|}
-      issuer audience expires_at scopes
+    Printf.sprintf {|{"iss":"%s","sub":"alice","aud":"%s","exp":%d,"scope":%s}|}
+      issuer audience expires_at scopes_json
   in
   Jose.Jws.sign ~header ~payload key |> Result.get_ok |> Jose.Jws.to_string
 
@@ -35,6 +36,15 @@ let test_oidc_verifies_signed_jwt_and_cache () =
 let test_oidc_preserves_validated_scopes () =
   let verifier, _ = oidc ~clock:(fun () -> time 1_000.) () in
   let token = signed_token ~scopes:"ledger:read withings:manage" () in
+  match verifier token with
+  | Ok claims ->
+      Alcotest.(check (list string)) "scopes"
+        [ "ledger:read"; "withings:manage" ] claims.scopes
+  | Error () -> Alcotest.fail "valid token rejected"
+
+let test_oidc_preserves_array_scopes () =
+  let verifier, _ = oidc ~clock:(fun () -> time 1_000.) () in
+  let token = signed_token ~scopes_json:{|["ledger:read","withings:manage"]|} () in
   match verifier token with
   | Ok claims ->
       Alcotest.(check (list string)) "scopes"
@@ -113,6 +123,7 @@ let () =
       ( "authentication",
         [ Alcotest.test_case "OIDC signed JWT and cache" `Quick test_oidc_verifies_signed_jwt_and_cache;
           Alcotest.test_case "OIDC preserves validated scopes" `Quick test_oidc_preserves_validated_scopes;
+          Alcotest.test_case "OIDC preserves array scopes" `Quick test_oidc_preserves_array_scopes;
           Alcotest.test_case "OIDC rejects malformed and bad claims" `Quick test_oidc_rejects_bad_tokens_and_claims;
           Alcotest.test_case "user and scopes" `Quick test_auth_returns_user_and_scopes;
           Alcotest.test_case "expired token" `Quick test_rejects_expired_token;

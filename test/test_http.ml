@@ -98,6 +98,17 @@ let test_media_type_and_parse_error () =
   Alcotest.(check int) "parse error" 400
     (request store ~headers:(("content-type", "application/json; charset=utf-8") :: auth_headers) `POST "/mcp" "{").status
 
+let test_mcp_notification_is_accepted_without_response () =
+  let store, _ = Test_support.store_with_user () in
+  let headers = [
+    ("authorization", "Bearer token");
+    ("content-type", "application/json");
+  ] in
+  let body = {|{"jsonrpc":"2.0","method":"notifications/initialized"}|} in
+  let response = request store ~headers `POST "/mcp" body in
+  Alcotest.(check int) "accepted" 202 response.status;
+  Alcotest.(check string) "empty body" "" response.body
+
 let test_mcp_scope_failures_are_forbidden () =
   let store, _ = Test_support.store_with_user () in
   let headers = [
@@ -105,7 +116,7 @@ let test_mcp_scope_failures_are_forbidden () =
     ("content-type", "application/json");
   ] in
   let body =
-    {|{"jsonrpc":"2.0","method":"tools/call","params":{"name":"query_meals","arguments":{}}}|}
+    {|{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"query_meals","arguments":{}}}|}
   in
   Alcotest.(check int) "authenticated without read scope" 403
     (request ~scopes:[] store ~headers `POST "/mcp" body).status;
@@ -114,4 +125,4 @@ let test_mcp_scope_failures_are_forbidden () =
 
 let () =
   Alcotest.run "http"
-    [ ("boundary", [ Alcotest.test_case "protected resource metadata alias" `Quick test_protected_resource_metadata_alias; Alcotest.test_case "path specific protected resource metadata" `Quick test_protected_resource_metadata_path_specific; Alcotest.test_case "metadata endpoints are identical" `Quick test_metadata_endpoints_are_identical; Alcotest.test_case "missing bearer token is challenged" `Quick test_missing_bearer_token_is_challenged; Alcotest.test_case "invalid bearer token is challenged" `Quick test_invalid_bearer_token_is_challenged; Alcotest.test_case "unconfigured protected resource is not found" `Quick test_unconfigured_protected_resource_is_not_found; Alcotest.test_case "health and bearer" `Quick test_health_and_unauthenticated_mcp; Alcotest.test_case "fixed response length" `Quick test_http_response_has_fixed_length; Alcotest.test_case "media type and parse error" `Quick test_media_type_and_parse_error; Alcotest.test_case "scope failures are forbidden" `Quick test_mcp_scope_failures_are_forbidden ]) ]
+    [ ("boundary", [ Alcotest.test_case "protected resource metadata alias" `Quick test_protected_resource_metadata_alias; Alcotest.test_case "path specific protected resource metadata" `Quick test_protected_resource_metadata_path_specific; Alcotest.test_case "metadata endpoints are identical" `Quick test_metadata_endpoints_are_identical; Alcotest.test_case "missing bearer token is challenged" `Quick test_missing_bearer_token_is_challenged; Alcotest.test_case "invalid bearer token is challenged" `Quick test_invalid_bearer_token_is_challenged; Alcotest.test_case "unconfigured protected resource is not found" `Quick test_unconfigured_protected_resource_is_not_found; Alcotest.test_case "health and bearer" `Quick test_health_and_unauthenticated_mcp; Alcotest.test_case "fixed response length" `Quick test_http_response_has_fixed_length; Alcotest.test_case "media type and parse error" `Quick test_media_type_and_parse_error; Alcotest.test_case "notification accepted without response" `Quick test_mcp_notification_is_accepted_without_response; Alcotest.test_case "scope failures are forbidden" `Quick test_mcp_scope_failures_are_forbidden ]) ]

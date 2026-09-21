@@ -149,7 +149,14 @@ let handle_withings ~protected_resource ~schedule_sync ~withings ~auth ~service 
         match List.assoc_opt "content-type" (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) headers) with
         | Some content_type when json_media_type content_type ->
             (try
-               match mcp_handle withings ~service ~identity (Yojson.Safe.from_string body) with
+               let request = Yojson.Safe.from_string body in
+               let notification =
+                 match request with
+                 | `Assoc fields -> not (List.mem_assoc "id" fields)
+                 | _ -> false
+               in
+               match mcp_handle withings ~service ~identity request with
+               | Ok _ when notification -> plain 202 ""
                | Ok response -> json 200 (Yojson.Safe.to_string response)
                | Error `Forbidden -> forbidden
              with Yojson.Json_error _ ->
@@ -167,7 +174,7 @@ let split_address value =
   | _ -> invalid_arg "invalid listen address"
 
 let status = function
-  | 200 -> `OK | 400 -> `Bad_request
+  | 200 -> `OK | 202 -> `Accepted | 400 -> `Bad_request
   | 401 -> `Unauthorized | 403 -> `Forbidden | 404 -> `Not_found | 413 -> `Payload_too_large
   | 415 -> `Unsupported_media_type | 302 -> `Found | _ -> `Internal_server_error
 

@@ -57,6 +57,10 @@ let scopes_of_payload = function
       | Some (`String scopes) ->
           String.split_on_char ' ' scopes
           |> List.filter (fun scope -> scope <> "")
+      | Some (`List scopes) ->
+          List.filter_map
+            (function `String scope when scope <> "" -> Some scope | _ -> None)
+            scopes
       | _ -> [])
   | _ -> []
 
