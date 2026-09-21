@@ -63,10 +63,15 @@ let weight_json (weight : Weigh_in.t) =
     ("weight_kg", `Float weight.weight_kg); ("source", `String (Weigh_in.source_to_string weight.source));
     ("created_at", `String (Time.to_utc_string weight.created_at)); ("updated_at", `String (Time.to_utc_string weight.updated_at)) ]
 
-let text_result value =
-  `Assoc [ ("content", `List [ `Assoc [ ("type", `String "text"); ("text", `String (Yojson.Safe.to_string value)) ] ]); ("structuredContent", value) ]
+let complete fields = `Assoc (("resultType", `String "complete") :: fields)
 
-let tool_error = `Assoc [ ("content", `List [ `Assoc [ ("type", `String "text"); ("text", `String "record not found") ] ]); ("isError", `Bool true) ]
+let cacheable fields =
+  complete (("ttlMs", `Int 300_000) :: ("cacheScope", `String "public") :: fields)
+
+let text_result value =
+  complete [ ("content", `List [ `Assoc [ ("type", `String "text"); ("text", `String (Yojson.Safe.to_string value)) ] ]); ("structuredContent", value) ]
+
+let tool_error = complete [ ("content", `List [ `Assoc [ ("type", `String "text"); ("text", `String "record not found") ] ]); ("isError", `Bool true) ]
 
 let schema properties required =
   `Assoc [ ("type", `String "object"); ("properties", `Assoc properties); ("required", `List (List.map (fun name -> `String name) required)); ("additionalProperties", `Bool false) ]
@@ -165,7 +170,23 @@ let call ?withings service (identity : Auth.identity) name arguments =
 let response ?(id = `Null) result = `Assoc [ ("jsonrpc", `String "2.0"); ("id", id); ("result", result) ]
 let rpc_error ?(id = `Null) code message = `Assoc [ ("jsonrpc", `String "2.0"); ("id", id); ("error", `Assoc [ ("code", `Int code); ("message", `String message) ]) ]
 
-let protocol_version = "2025-03-26"
+let stateless_protocol_version = "2026-07-28"
+let legacy_protocol_version = "2025-03-26"
+
+let discover_result =
+  cacheable [
+    ("supportedVersions", `List [
+      `String stateless_protocol_version;
+      `String legacy_protocol_version;
+    ]);
+    ("capabilities", `Assoc [ ("tools", `Assoc []) ]);
+    ("_meta", `Assoc [
+      ("io.modelcontextprotocol/serverInfo", `Assoc [
+        ("name", `String "kcal");
+        ("version", `String "dev");
+      ]);
+    ]);
+  ]
 
 let handle ?withings ~service ~identity request =
   match request with
@@ -173,13 +194,15 @@ let handle ?withings ~service ~identity request =
       let request_id = Option.value (List.assoc_opt "id" fields) ~default:`Null in
       let valid_request = List.assoc_opt "jsonrpc" fields = Some (`String "2.0") in
       (match List.assoc_opt "method" fields with
+      | Some (`String "server/discover") when valid_request ->
+          Ok (response ~id:request_id discover_result)
       | Some (`String "initialize") when valid_request ->
           (match List.assoc_opt "params" fields with
-          | Some (`Assoc params) when List.assoc_opt "protocolVersion" params = Some (`String protocol_version) ->
-              Ok (response ~id:request_id (`Assoc [ ("protocolVersion", `String protocol_version); ("capabilities", `Assoc [ ("tools", `Assoc []) ]); ("serverInfo", `Assoc [ ("name", `String "kcal"); ("version", `String "dev") ]) ]))
+          | Some (`Assoc params) when List.assoc_opt "protocolVersion" params = Some (`String legacy_protocol_version) ->
+              Ok (response ~id:request_id (`Assoc [ ("protocolVersion", `String legacy_protocol_version); ("capabilities", `Assoc [ ("tools", `Assoc []) ]); ("serverInfo", `Assoc [ ("name", `String "kcal"); ("version", `String "dev") ]) ]))
           | _ -> Ok (rpc_error ~id:request_id (-32602) "Invalid params"))
       | Some (`String "tools/list") when valid_request ->
-          Ok (response ~id:request_id (`Assoc [ ("tools", `List tools) ]))
+          Ok (response ~id:request_id (cacheable [ ("tools", `List tools) ]))
       | Some (`String "tools/call") when valid_request ->
           (match List.assoc_opt "params" fields with
           | Some (`Assoc params) ->

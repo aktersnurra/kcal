@@ -18,6 +18,13 @@ let response_has_result = function
   | Ok (`Assoc fields) -> Option.is_some (List.assoc_opt "result" fields)
   | Error `Forbidden -> false
 
+let result_member name = function
+  | Ok (`Assoc fields) ->
+      (match List.assoc_opt "result" fields with
+      | Some (`Assoc result) -> List.assoc_opt name result
+      | _ -> None)
+  | Error `Forbidden -> None
+
 let is_forbidden = function Error `Forbidden -> true | Ok _ -> false
 
 let test_record_meal_rejects_user_id () =
@@ -130,13 +137,79 @@ let test_withings_mcp_uses_configured_oauth_url () =
   let response = Mcp.handle ~withings:(withings store)
     ~service:(Service.make ~store) ~identity:(identity user [ "withings:manage" ])
     (call "begin_withings_connection" (`Assoc [])) in
-  let url = match response with
-    | Ok (`Assoc [ (_, `String "2.0"); (_, `Null); (_, `Assoc [ (_, `List [ `Assoc [ (_, `String "text"); (_, `String body) ] ]); _ ]) ]) ->
-        (match Yojson.Safe.from_string body with `Assoc [ (_, `String url) ] -> url | _ -> Alcotest.fail "missing authorization URL")
-    | _ -> Alcotest.fail "missing MCP result" in
+  let url =
+    match result_member "content" response with
+    | Some (`List [ `Assoc content ]) ->
+        (match List.assoc_opt "text" content with
+        | Some (`String body) ->
+            (match Yojson.Safe.from_string body with
+            | `Assoc [ (_, `String url) ] -> url
+            | _ -> Alcotest.fail "missing authorization URL")
+        | _ -> Alcotest.fail "missing text content")
+    | _ -> Alcotest.fail "missing MCP result"
+  in
   Alcotest.(check (list (pair string (list string)))) "configured OAuth query"
     [ ("response_type", ["code"]); ("client_id", ["mcp-client"]); ("redirect_uri", ["https://kcal.example/mcp-callback"]); ("scope", ["user.metrics"]); ("state", [List.assoc "state" (Uri.query (Uri.of_string url)) |> List.hd]) ]
     (Uri.query (Uri.of_string url))
+
+let test_server_discover_advertises_stateless_protocol () =
+  let store, user = Test_support.store_with_user () in
+  let request =
+    `Assoc [
+      ("jsonrpc", `String "2.0");
+      ("id", `Int 1);
+      ("method", `String "server/discover");
+      ("params", `Assoc [
+        ("_meta", `Assoc [
+          ("io.modelcontextprotocol/protocolVersion", `String "2026-07-28");
+          ("io.modelcontextprotocol/clientCapabilities", `Assoc []);
+        ]);
+      ]);
+    ]
+  in
+  let response =
+    Mcp.handle ~service:(Service.make ~store) ~identity:(identity user []) request
+  in
+  Alcotest.(check (option (list string))) "supported versions"
+    (Some [ "2026-07-28"; "2025-03-26" ])
+    (match result_member "supportedVersions" response with
+    | Some (`List versions) ->
+        Some (List.filter_map (function `String version -> Some version | _ -> None) versions)
+    | _ -> None);
+  Alcotest.(check (option string)) "result type" (Some "complete")
+    (match result_member "resultType" response with Some (`String value) -> Some value | _ -> None);
+  Alcotest.(check (option string)) "cache scope" (Some "public")
+    (match result_member "cacheScope" response with Some (`String value) -> Some value | _ -> None);
+  Alcotest.(check bool) "tools capability" true
+    (match result_member "capabilities" response with
+    | Some (`Assoc capabilities) -> List.mem_assoc "tools" capabilities
+    | _ -> false)
+
+let test_modern_results_include_required_metadata () =
+  let store, user = Test_support.store_with_user () in
+  let service = Service.make ~store in
+  let tool_list =
+    Mcp.handle ~service ~identity:(identity user [])
+      (`Assoc [ ("jsonrpc", `String "2.0"); ("id", `Int 1);
+                ("method", `String "tools/list") ])
+  in
+  let tool_call =
+    Mcp.handle ~service ~identity:(identity user [ "ledger:read" ])
+      (call "query_meals" (`Assoc []))
+  in
+  List.iter
+    (fun (name, response) ->
+      Alcotest.(check (option string)) (name ^ " result type") (Some "complete")
+        (match result_member "resultType" response with
+        | Some (`String value) -> Some value
+        | _ -> None))
+    [ ("tools/list", tool_list); ("tools/call", tool_call) ];
+  Alcotest.(check bool) "tools/list cache ttl" true
+    (match result_member "ttlMs" tool_list with Some (`Int ttl) -> ttl > 0 | _ -> false);
+  Alcotest.(check (option string)) "tools/list cache scope" (Some "public")
+    (match result_member "cacheScope" tool_list with
+    | Some (`String value) -> Some value
+    | _ -> None)
 
 let test_tool_list_is_exact () =
   let store, user = Test_support.store_with_user () in
@@ -158,5 +231,7 @@ let () = Alcotest.run "mcp" [
     Alcotest.test_case "combined scopes permit union" `Quick test_combined_scopes_allow_their_union;
     Alcotest.test_case "all scopes permit each tool class" `Quick test_all_scopes_allow_each_tool_class;
     Alcotest.test_case "configured Withings OAuth URL" `Quick test_withings_mcp_uses_configured_oauth_url;
+    Alcotest.test_case "discovers stateless protocol" `Quick test_server_discover_advertises_stateless_protocol;
+    Alcotest.test_case "modern result metadata" `Quick test_modern_results_include_required_metadata;
     Alcotest.test_case "lists approved tools" `Quick test_tool_list_is_exact;
   ]) ]
