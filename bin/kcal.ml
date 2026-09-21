@@ -8,43 +8,9 @@ let migrate () =
         (fun () -> match Migration.apply_all db with Ok () -> 0 | Error _ -> Logs.err (fun m -> m "migration failed"); 1)
 
 let withings_client env config =
-  (* Reconciliation constructs this transport without visiting the OAuth flow. *)
-  Mirage_crypto_rng_unix.use_default ();
-  let certificates =
-    try
-      let channel = open_in_bin "/etc/ssl/cert.pem" in
-      Fun.protect ~finally:(fun () -> close_in_noerr channel) (fun () -> X509.Certificate.decode_pem_multiple (really_input_string channel (in_channel_length channel)))
-    with _ -> Error (`Msg "certificate bundle unavailable")
-  in
-  let request =
-    match certificates with
-    | Error _ -> { Withings.post_form = (fun ~uri:_ ~fields:_ -> Error (Error.Invalid_input "Withings transport unavailable")) }
-    | Ok certificates ->
-        let authenticator = X509.Authenticator.chain_of_trust ~time:(fun () -> Ptime.of_float_s (Unix.gettimeofday ())) certificates in
-        (match Tls.Config.client ~authenticator () with
-        | Error _ -> { Withings.post_form = (fun ~uri:_ ~fields:_ -> Error (Error.Invalid_input "Withings transport unavailable")) }
-        | Ok tls ->
-            let https uri flow =
-              match Uri.host uri with
-              | Some hostname -> (match Domain_name.of_string hostname with
-                  | Ok host -> Tls_eio.client_of_flow tls ~host:(Domain_name.host_exn host) flow
-                  | Error _ -> failwith "invalid Withings HTTPS host")
-              | None -> failwith "invalid Withings HTTPS host"
-            in
-            let client = Cohttp_eio.Client.make ~https:(Some https) env#net in
-            { Withings.post_form = (fun ~uri ~fields ->
-                try
-                  let target = Uri.of_string uri in
-                  if Uri.scheme target <> Some "https" then Error (Error.Invalid_input "Withings transport unavailable")
-                  else Eio.Switch.run @@ fun sw ->
-                    let body = Cohttp_eio.Body.of_string (Uri.encoded_of_query (List.map (fun (key, value) -> (key, [ value ])) fields)) in
-                    let headers = Cohttp.Header.init_with "content-type" "application/x-www-form-urlencoded" in
-                    let response, response_body = Cohttp_eio.Client.post client ~sw ~headers ~body target in
-                    if Cohttp.Code.code_of_status (Cohttp.Response.status response) / 100 <> 2 then Error (Error.Invalid_input "Withings request failed")
-                    else Ok (Eio.Flow.read_all response_body)
-                with _ -> Error (Error.Invalid_input "Withings request failed")) })
-  in
-  Withings.make ~config:Withings.{ client_id = config.Config.withings_client_id; client_secret = config.withings_client_secret } ~request
+  Withings.make
+    ~config:Withings.{ client_id = config.Config.withings_client_id; client_secret = config.withings_client_secret }
+    ~request:(Withings_transport.make env)
 
 let reconciliation () =
   match Config.load_from_environment () with

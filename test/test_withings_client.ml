@@ -71,10 +71,35 @@ let test_upstream_status_is_preserved_in_error () =
       Alcotest.(check bool) "error names the upstream status" true (contains "503" message)
   | Error _ -> Alcotest.fail "expected an Invalid_input error"
 
+
+let test_transport_error_names_the_http_status () =
+  match Withings_transport.error_of_status `Bad_gateway with
+  | Error.Invalid_input message ->
+      let contains needle haystack =
+        let n = String.length needle and h = String.length haystack in
+        let rec scan i = i + n <= h && (String.sub haystack i n = needle || scan (i + 1)) in
+        scan 0
+      in
+      Alcotest.(check bool) "names the HTTP status" true (contains "502" message)
+  | _ -> Alcotest.fail "expected an Invalid_input error"
+
+let test_transport_error_names_the_exception () =
+  match Withings_transport.error_of_exn (Failure "connection reset") with
+  | Error.Invalid_input message ->
+      let contains needle haystack =
+        let n = String.length needle and h = String.length haystack in
+        let rec scan i = i + n <= h && (String.sub haystack i n = needle || scan (i + 1)) in
+        scan 0
+      in
+      Alcotest.(check bool) "names the exception" true (contains "connection reset" message)
+  | _ -> Alcotest.fail "expected an Invalid_input error"
+
 let () =
   Alcotest.run "withings client"
     [ ("credentials", [ Alcotest.test_case "exchange and refresh" `Quick test_exchange_and_refresh_response_are_sanitized;
                            Alcotest.test_case "realistic numeric measurement fixture" `Quick test_measurement_fixture_accepts_withings_numbers;
                            Alcotest.test_case "rotation and permanent failure" `Quick test_credentials_are_replaced_and_refresh_failure_marks_reauthorization;
                            Alcotest.test_case "exchange posts redirect_uri" `Quick test_exchange_code_sends_redirect_uri;
-                           Alcotest.test_case "upstream status preserved" `Quick test_upstream_status_is_preserved_in_error ]) ]
+                           Alcotest.test_case "upstream status preserved" `Quick test_upstream_status_is_preserved_in_error;
+                           Alcotest.test_case "transport error names HTTP status" `Quick test_transport_error_names_the_http_status;
+                           Alcotest.test_case "transport error names exception" `Quick test_transport_error_names_the_exception ]) ]
