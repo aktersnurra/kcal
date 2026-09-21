@@ -196,6 +196,16 @@ let respond_with_string reqd response =
 let serve_request ~sw ~protected_resource ~withings ~auth ~service reqd =
   let request = Httpun.Reqd.request reqd in
   let method_ = match request.meth with `GET -> `GET | `POST -> `POST | `HEAD -> `HEAD | _ -> `OTHER in
+  let method_name = match method_ with `GET -> "GET" | `POST -> "POST" | `HEAD -> "HEAD" | `OTHER -> "OTHER" in
+  let path =
+    match String.index_opt request.target '?' with
+    | Some index -> String.sub request.target 0 index
+    | None -> request.target
+  in
+  let respond_with_log response =
+    Printf.eprintf "http method=%s path=%s status=%d\n%!" method_name path response.status;
+    respond_with_string reqd response
+  in
   let respond body =
     let response =
       match method_ with
@@ -206,7 +216,7 @@ let serve_request ~sw ~protected_resource ~withings ~auth ~service reqd =
             ~withings ~auth ~service ~method_ ~path:request.target
             ~headers:(Httpun.Headers.to_list request.headers) ~body
     in
-    respond_with_string reqd response
+    respond_with_log response
   in
   let buffer = Buffer.create 1024 in
   let responded = ref false in
@@ -217,7 +227,7 @@ let serve_request ~sw ~protected_resource ~withings ~auth ~service reqd =
       ~on_read:(fun bytes ~off ~len ->
         if Buffer.length buffer + len > 1_048_576 then (
           responded := true;
-          respond_with_string reqd (plain 413 "Payload Too Large"))
+          respond_with_log (plain 413 "Payload Too Large"))
         else (Buffer.add_string buffer (Bigstringaf.substring bytes ~off ~len); read ()))
   in
   read ()
