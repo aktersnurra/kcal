@@ -2,6 +2,12 @@ opam-version: "2.0"
 name: "kcal"
 version: "dev"
 synopsis: "Portable local calorie ledger"
+maintainer: "Gustaf Rydholm <gustaf.rydholm@gmail.com>"
+authors: "Gustaf Rydholm <gustaf.rydholm@gmail.com>"
+license: "MIT"
+homepage: "https://github.com/aktersnurra/kcal"
+bug-reports: "https://github.com/aktersnurra/kcal/issues"
+dev-repo: "git+https://github.com/aktersnurra/kcal.git"
 depends: [
   "ocaml" {>= "5.2"}
   "dune" {>= "3.24"}

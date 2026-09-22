@@ -89,7 +89,7 @@ let withings_callback withings query =
       | Ok user ->
           let user_id = User_id.to_string user.User.id in
           let module Client = (val withings.client : Withings.S) in
-          (match Client.exchange_code ~code with
+          (match Client.exchange_code ~redirect_uri:withings.redirect_uri ~code with
           | Error error ->
               Withings_log.err (fun m -> m "user=%s code exchange with Withings failed: %s" user_id (Error.to_string error));
               plain 502 "Withings authorization failed"

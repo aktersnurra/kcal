@@ -10,7 +10,7 @@ let setup measurements =
   let credentials = Withings.{ access_token = "access"; refresh_token = "refresh"; expires_at = Option.get (Ptime.add_span now (Ptime.Span.of_int_s 3600)); withings_user_id = "upstream-alice" } in
   let connection = Result.get_ok (Store_sqlite.save_withings_credentials store ~user ~key credentials) in
   let module Client = struct
-    let exchange_code ~code:_ = Error (Error.Invalid_input "unused")
+    let exchange_code ~redirect_uri:_ ~code:_ = Error (Error.Invalid_input "unused")
     let refresh ~refresh_token:_ = Error (Error.Invalid_input "unused")
     let get_measurements ~access_token:_ ~lastupdate:_ = Ok Withings.{ measurements; lastupdate = Some 77L }
     let subscribe ~access_token:_ ~callback_url:_ = Ok ()

@@ -16,7 +16,7 @@ type measurement = {
 type measurement_batch = { measurements : measurement list; lastupdate : int64 option }
 
 module type S = sig
-  val exchange_code : code:string -> (credentials, Error.t) result
+  val exchange_code : redirect_uri:string -> code:string -> (credentials, Error.t) result
   val refresh : refresh_token:string -> (credentials, Error.t) result
   val get_measurements : access_token:string -> lastupdate:int64 option -> (measurement_batch, Error.t) result
   val subscribe : access_token:string -> callback_url:string -> (unit, Error.t) result
@@ -31,6 +31,7 @@ let oauth_url = "https://wbsapi.withings.net/v2/oauth2"
 let measure_url = "https://wbsapi.withings.net/measure"
 let notification_url = "https://wbsapi.withings.net/notify"
 let upstream_error () = Error.Invalid_input "Withings request failed"
+let upstream_status_error status = Error.Invalid_input (Printf.sprintf "Withings request failed (status %d)" status)
 let permanent_refresh_error () = Error.Invalid_input "Withings authorization failure"
 let is_permanent_refresh_error = function Error.Invalid_input "Withings authorization failure" -> true | _ -> false
 let int64_member json name =
@@ -47,7 +48,7 @@ let credentials_of_response ?(refresh = false) body =
     let json = Yojson.Safe.from_string body in
     let status = int_member json "status" in
     if status <> 0 then
-      if refresh && List.mem status [ 401; 403; 400 ] then Error (permanent_refresh_error ()) else Error (upstream_error ())
+      if refresh && List.mem status [ 401; 403; 400 ] then Error (permanent_refresh_error ()) else Error (upstream_status_error status)
     else
       let body = Yojson.Safe.Util.member "body" json in
       let expires_in = int_member body "expires_in" in
@@ -87,7 +88,8 @@ let make ~request ~config : (module S) =
     let token ~refresh fields =
       match request.post_form ~uri:oauth_url ~fields:(fields @ [ ("client_id", config.client_id); ("client_secret", config.client_secret) ]) with
       | Error _ -> Error (upstream_error ()) | Ok body -> credentials_of_response ~refresh body
-    let exchange_code ~code = token ~refresh:false [ ("action", "requesttoken"); ("grant_type", "authorization_code"); ("code", code) ]
+    let exchange_code ~redirect_uri ~code =
+      token ~refresh:false [ ("action", "requesttoken"); ("grant_type", "authorization_code"); ("code", code); ("redirect_uri", redirect_uri) ]
     let refresh ~refresh_token = token ~refresh:true [ ("action", "requesttoken"); ("grant_type", "refresh_token"); ("refresh_token", refresh_token) ]
     let get_measurements ~access_token ~lastupdate =
       let fields = [ ("action", "getmeas"); ("category", "1"); ("access_token", access_token) ] in

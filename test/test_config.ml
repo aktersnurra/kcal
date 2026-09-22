@@ -1,7 +1,7 @@
 let test_metadata_url_is_derived_from_audience_path () =
   Alcotest.(check string) "path-specific metadata url"
-    "https://kcal.gustafrydholm.xyz/.well-known/oauth-protected-resource/mcp"
-    (Config.protected_resource_metadata_url ~audience:"https://kcal.gustafrydholm.xyz/mcp")
+    "https://kcal.example.com/.well-known/oauth-protected-resource/mcp"
+    (Config.protected_resource_metadata_url ~audience:"https://kcal.example.com/mcp")
 
 let test_metadata_url_for_audience_without_path () =
   Alcotest.(check string) "root metadata url"
@@ -20,8 +20,8 @@ let test_metadata_url_preserves_nested_path () =
 
 let test_deployed_audience_derivation () =
   Alcotest.(check string) "deployed metadata url"
-    "https://kcal.gustafrydholm.xyz/.well-known/oauth-protected-resource/mcp"
-    (Config.protected_resource_metadata_url ~audience:"https://kcal.gustafrydholm.xyz/mcp")
+    "https://kcal.example.com/.well-known/oauth-protected-resource/mcp"
+    (Config.protected_resource_metadata_url ~audience:"https://kcal.example.com/mcp")
 
 let () =
   Alcotest.run "config"
