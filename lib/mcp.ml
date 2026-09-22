@@ -57,6 +57,13 @@ let meal_json (meal : Meal.t) =
     ("notes", json_option (fun v -> `String v) meal.notes);
     ("created_at", `String (Time.to_utc_string meal.created_at)); ("updated_at", `String (Time.to_utc_string meal.updated_at)) ]
 
+let totals_json ~date (totals : Meal.totals) =
+  `Assoc [
+    ("date", `String date); ("meal_count", `Int totals.meal_count);
+    ("calories_kcal", `Int totals.calories_kcal); ("protein_g", `Float totals.protein_g);
+    ("carbs_g", json_option (fun v -> `Float v) totals.carbs_g);
+    ("fat_g", json_option (fun v -> `Float v) totals.fat_g) ]
+
 let weight_json (weight : Weigh_in.t) =
   `Assoc [
     ("id", `String (Weigh_in_id.to_string weight.id)); ("measured_at", `String (Time.to_utc_string weight.measured_at));
@@ -79,27 +86,60 @@ let schema properties required =
 let string = `Assoc [ ("type", `String "string") ]
 let integer = `Assoc [ ("type", `String "integer") ]
 let number = `Assoc [ ("type", `String "number") ]
-let meal_properties = [ ("description", string); ("calories_kcal", integer); ("protein_g", number); ("carbs_g", number); ("fat_g", number); ("confidence", number); ("estimate_source", string); ("notes", string); ("eaten_at", string) ]
-let weight_properties = [ ("weight_kg", number); ("measured_at", string) ]
-let id_properties = [ ("id", string) ]
-let query_properties = [ ("from", string); ("to", string); ("limit", integer) ]
 
-let tool name input_schema = `Assoc [ ("name", `String name); ("inputSchema", input_schema) ]
+let describe text = function
+  | `Assoc fields -> `Assoc (fields @ [ ("description", `String text) ])
+  | other -> other
+
+let property name text field_schema = (name, describe text field_schema)
+
+let meal_properties = [
+  property "description" "Free-text description of what was eaten." string;
+  property "calories_kcal" "Energy in kilocalories." integer;
+  property "protein_g" "Protein in grams." number;
+  property "carbs_g" "Carbohydrates in grams, if known." number;
+  property "fat_g" "Fat in grams, if known." number;
+  property "confidence" "Estimate confidence from 0.0 to 1.0, if the macros were estimated rather than measured." number;
+  property "estimate_source" "Where the estimate came from (e.g. a nutrition label or an AI estimate), if applicable." string;
+  property "notes" "Freeform notes." string;
+  property "eaten_at" "When the meal was eaten, as an RFC 3339 UTC timestamp (e.g. 2026-09-22T12:30:00Z). Defaults to now if omitted." string;
+]
+let weight_properties = [
+  property "weight_kg" "Body weight in kilograms." number;
+  property "measured_at" "When the weigh-in was taken, as an RFC 3339 UTC timestamp. Defaults to now if omitted." string;
+]
+let id_properties = [ property "id" "The record's id, as returned by a previous call." string ]
+let query_properties = [
+  property "from" "Inclusive lower bound as an RFC 3339 UTC timestamp (e.g. 2026-09-22T00:00:00Z for the start of that day)." string;
+  property "to" "Inclusive upper bound as an RFC 3339 UTC timestamp." string;
+  property "limit"
+    "Maximum number of records to return (default 100, max 500). Results are ordered oldest first, so once you have more history than limit, pass from/to to scope the query instead of relying on limit alone. For a single day's totals, prefer get_daily_totals; for the current weight, prefer get_latest_weight."
+    integer;
+]
+let daily_totals_properties = [
+  property "date" "Calendar date as YYYY-MM-DD, interpreted as a UTC day. Defaults to today (UTC) if omitted." string;
+]
+
+let tool ?description name input_schema =
+  let fields = [ ("name", `String name); ("inputSchema", input_schema) ] in
+  `Assoc (match description with None -> fields | Some text -> fields @ [ ("description", `String text) ])
 let withings_tools = [
-  tool "begin_withings_connection" (schema [] []);
-  tool "get_withings_status" (schema [] []);
-  tool "disconnect_withings" (schema [] []) ]
+  tool "begin_withings_connection" ~description:"Start linking a Withings account; returns an authorization_url to open in a browser." (schema [] []);
+  tool "get_withings_status" ~description:"Check whether a Withings account is connected and whether it needs reauthorization." (schema [] []);
+  tool "disconnect_withings" ~description:"Unlink the connected Withings account." (schema [] []) ]
 let tools = [
-  tool "record_meal" (schema meal_properties [ "description"; "calories_kcal"; "protein_g" ]);
-  tool "get_meal" (schema id_properties [ "id" ]);
-  tool "query_meals" (schema query_properties []);
-  tool "update_meal" (schema (id_properties @ meal_properties) [ "id" ]);
-  tool "delete_meal" (schema id_properties [ "id" ]);
-  tool "record_weight" (schema weight_properties [ "weight_kg" ]);
-  tool "get_weight" (schema id_properties [ "id" ]);
-  tool "query_weights" (schema query_properties []);
-  tool "update_weight" (schema (id_properties @ weight_properties) [ "id" ]);
-  tool "delete_weight" (schema id_properties [ "id" ]) ] @ withings_tools
+  tool "record_meal" ~description:"Record a new meal in the nutrition ledger." (schema meal_properties [ "description"; "calories_kcal"; "protein_g" ]);
+  tool "get_meal" ~description:"Fetch a single meal by id." (schema id_properties [ "id" ]);
+  tool "query_meals" ~description:"List meals, oldest first, optionally bounded by from/to. For a day's totals, prefer get_daily_totals, which aggregates server-side instead of requiring client-side summation." (schema query_properties []);
+  tool "update_meal" ~description:"Update fields on an existing meal; omitted fields are left unchanged." (schema (id_properties @ meal_properties) [ "id" ]);
+  tool "delete_meal" ~description:"Delete a meal." (schema id_properties [ "id" ]);
+  tool "get_daily_totals" ~description:"Aggregate calories, protein, carbs, and fat for all meals on a given UTC calendar day (default: today). Prefer this over query_meals plus client-side summation." (schema daily_totals_properties []);
+  tool "record_weight" ~description:"Record a manual weigh-in." (schema weight_properties [ "weight_kg" ]);
+  tool "get_weight" ~description:"Fetch a single weigh-in by id." (schema id_properties [ "id" ]);
+  tool "query_weights" ~description:"List weigh-ins, oldest first, optionally bounded by from/to. For the current weight, prefer get_latest_weight." (schema query_properties []);
+  tool "update_weight" ~description:"Update a manual weigh-in; omitted fields are left unchanged." (schema (id_properties @ weight_properties) [ "id" ]);
+  tool "delete_weight" ~description:"Delete a weigh-in." (schema id_properties [ "id" ]);
+  tool "get_latest_weight" ~description:"Fetch the single most recent weigh-in (manual or Withings-imported), if any." (schema [] []) ] @ withings_tools
 
 let meal_create fields : (Meal.create, Error.t) result =
   let* fields = only_fields (List.map fst meal_properties) (`Assoc fields) in
@@ -116,6 +156,15 @@ let query fields =
   let* from = optional_time "from" fields in let* to_ = optional_time "to" fields in let* limit = optional_int "limit" fields in
   Ok (from, to_, Option.value limit ~default:100)
 
+let now () = Option.get (Ptime.of_float_s (Unix.gettimeofday ()))
+
+let day_bounds_query fields =
+  let* fields = only_fields (List.map fst daily_totals_properties) (`Assoc fields) in
+  let* date = optional_string "date" fields in
+  match date with
+  | None -> Ok (Time.day_bounds (now ()))
+  | Some value -> Result.map Time.day_bounds (Time.parse_date value)
+
 type withings = {
   oauth : Withings_oauth.t;
   client_id : string;
@@ -128,7 +177,7 @@ let withings_status_json = function
                ("token_expires_at", json_option (fun value -> `String (Time.to_utc_string value)) status.token_expires_at) ]
 
 let required_scope = function
-  | "get_meal" | "query_meals" | "get_weight" | "query_weights" ->
+  | "get_meal" | "query_meals" | "get_daily_totals" | "get_weight" | "query_weights" | "get_latest_weight" ->
       Some "ledger:read"
   | "record_meal" | "update_meal" | "delete_meal"
   | "record_weight" | "update_weight" | "delete_weight" ->
@@ -157,11 +206,13 @@ let call ?withings service (identity : Auth.identity) name arguments =
       | "record_meal" -> Result.map (fun record -> text_result (meal_json record)) (Result.bind (meal_create fields) (Service.record_meal service ~user))
       | "get_meal" -> let* fields = only_fields [ "id" ] (`Assoc fields) in let* value = required_string "id" fields in let* record = id value Meal_id.of_string in Result.map (fun x -> text_result (meal_json x)) (Service.get_meal service ~user record)
       | "query_meals" -> let* from, to_, limit = query fields in Result.map (fun records -> text_result (`Assoc [ ("meals", `List (List.map meal_json records)) ])) (Service.query_meals service ~user ~from ~to_ ~limit)
+      | "get_daily_totals" -> let* day_start, day_end = day_bounds_query fields in Result.map (fun totals -> text_result (totals_json ~date:(Time.to_date_string day_start) totals)) (Service.daily_totals service ~user ~day_start ~day_end)
       | "update_meal" -> let* fields = only_fields ("id" :: List.map fst meal_properties) (`Assoc fields) in let* value = required_string "id" fields in let* record = id value Meal_id.of_string in let* patch = meal_patch fields in Result.map (fun x -> text_result (meal_json x)) (Service.update_meal service ~user record patch)
       | "delete_meal" -> let* fields = only_fields [ "id" ] (`Assoc fields) in let* value = required_string "id" fields in let* record = id value Meal_id.of_string in Result.map (fun () -> text_result (`Assoc [ ("deleted", `Bool true) ])) (Service.delete_meal service ~user record)
       | "record_weight" -> let* fields = only_fields (List.map fst weight_properties) (`Assoc fields) in let* weight_kg = required_float "weight_kg" fields in let* measured_at = optional_time "measured_at" fields in Result.map (fun x -> text_result (weight_json x)) (Service.record_manual_weigh_in service ~user Weigh_in.{ measured_at; weight_kg })
       | "get_weight" -> let* fields = only_fields [ "id" ] (`Assoc fields) in let* value = required_string "id" fields in let* record = id value Weigh_in_id.of_string in Result.map (fun x -> text_result (weight_json x)) (Service.get_weigh_in service ~user record)
       | "query_weights" -> let* from, to_, limit = query fields in Result.map (fun records -> text_result (`Assoc [ ("weights", `List (List.map weight_json records)) ])) (Service.query_weigh_ins service ~user ~from ~to_ ~limit)
+      | "get_latest_weight" -> Result.map (fun x -> text_result (weight_json x)) (Service.latest_weigh_in service ~user)
       | "update_weight" -> let* fields = only_fields ("id" :: List.map fst weight_properties) (`Assoc fields) in let* value = required_string "id" fields in let* record = id value Weigh_in_id.of_string in let* measured_at = optional_time "measured_at" fields in let* weight_kg = optional_float "weight_kg" fields in Result.map (fun x -> text_result (weight_json x)) (Service.update_manual_weigh_in service ~user record Weigh_in.{ measured_at; weight_kg })
       | "delete_weight" -> let* fields = only_fields [ "id" ] (`Assoc fields) in let* value = required_string "id" fields in let* record = id value Weigh_in_id.of_string in Result.map (fun () -> text_result (`Assoc [ ("deleted", `Bool true) ])) (Service.delete_weigh_in service ~user record)
       | _ -> invalid ())
@@ -216,7 +267,7 @@ let handle ?withings ~service ~identity request =
                       | Error Error.Not_found -> Ok (response ~id:request_id tool_error)
                       | Error (Error.Invalid_input _) -> Ok (rpc_error ~id:request_id (-32602) "Invalid params")
                       | Error _ -> Ok (rpc_error ~id:request_id (-32603) "Internal error")))
-              | Ok ("query_meals" | "query_weights" as name), None ->
+              | Ok ("query_meals" | "query_weights" | "get_daily_totals" | "get_latest_weight" as name), None ->
                   (match required_scope name with
                   | Some scope when not (Auth.has_scope identity scope) -> Error `Forbidden
                   | _ ->

@@ -198,6 +198,26 @@ let query_meals db ~user ~from ~to_ ~limit =
             | _ -> Error (storage_error ())
           in rows [])
 
+let daily_totals db ~user ~day_start ~day_end =
+  with_statement db
+    "SELECT COUNT(*), COALESCE(SUM(calories_kcal), 0), COALESCE(SUM(protein_g), 0.0), SUM(carbs_g), SUM(fat_g) FROM meals WHERE user_id = ? AND deleted_at IS NULL AND eaten_at >= ? AND eaten_at < ?"
+    (fun statement ->
+      match bind statement [ Sqlite3.Data.TEXT (User_id.to_string user.User.id); Sqlite3.Data.TEXT (timestamp day_start); Sqlite3.Data.TEXT (timestamp day_end) ] with
+      | Error _ as error -> error
+      | Ok () ->
+          (match Sqlite3.step statement with
+          | Sqlite3.Rc.ROW ->
+              Ok
+                Meal.
+                  {
+                    meal_count = int statement 0;
+                    calories_kcal = int statement 1;
+                    protein_g = float statement 2;
+                    carbs_g = optional_float statement 3;
+                    fat_g = optional_float statement 4;
+                  }
+          | _ -> Error (storage_error ())))
+
 let delete_meal db ~user id =
   let current = timestamp (now ()) in
   with_statement db
@@ -286,6 +306,14 @@ let query_weigh_ins db ~user ~from ~to_ ~limit =
             | Sqlite3.Rc.DONE -> Ok (List.rev values)
             | _ -> Error (storage_error ())
           in rows [])
+
+let latest_weigh_in db ~user =
+  with_statement db
+    ("SELECT " ^ weigh_in_columns ^ " FROM weigh_ins WHERE user_id = ? AND deleted_at IS NULL ORDER BY measured_at DESC LIMIT 1")
+    (fun statement ->
+      match bind statement [ Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] with
+      | Error _ as error -> error
+      | Ok () -> row_or_not_found statement weigh_in_of_row)
 
 let withings_connection_of_row statement =
   match User_id.of_string (text statement 1) with

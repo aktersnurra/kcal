@@ -20,6 +20,9 @@ let update_meal service ~user id patch =
 
 let delete_meal service ~user id = Store_sqlite.delete_meal service.store ~user id
 
+let daily_totals service ~user ~day_start ~day_end =
+  Store_sqlite.daily_totals service.store ~user ~day_start ~day_end
+
 let record_manual_weigh_in service ~user input =
   Store_sqlite.create_manual_weigh_in service.store ~user input
 
@@ -33,6 +36,8 @@ let update_manual_weigh_in service ~user id patch =
 
 let delete_weigh_in service ~user id =
   Store_sqlite.delete_weigh_in service.store ~user id
+
+let latest_weigh_in service ~user = Store_sqlite.latest_weigh_in service.store ~user
 
 let begin_withings_authorization ~client_id ~redirect_uri service ~user =
   Withings_oauth.begin_authorization ~client_id ~redirect_uri service.withings_oauth ~user

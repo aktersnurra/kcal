@@ -105,6 +105,34 @@ let test_withings_scope_isolated_and_requires_configuration () =
           (call "get_withings_status" (`Assoc [])))))
     [ [ "ledger:read" ]; [ "ledger:write" ] ]
 
+let test_get_daily_totals_defaults_to_today_and_respects_scope () =
+  let store, user = Test_support.store_with_user () in
+  let service = Service.make ~store in
+  ignore (Result.get_ok (Service.record_meal service ~user (Test_support.meal_input ())));
+  Alcotest.(check bool) "read allowed with omitted arguments" true
+    (Result.is_ok (Mcp.handle ~service ~identity:(identity user [ "ledger:read" ])
+      (call "get_daily_totals" (`Assoc []))));
+  Alcotest.(check bool) "write forbidden" true
+    (is_forbidden (Mcp.handle ~service ~identity:(identity user [ "ledger:write" ])
+      (call "get_daily_totals" (`Assoc []))))
+
+let test_get_daily_totals_rejects_a_malformed_date () =
+  let store, user = Test_support.store_with_user () in
+  let service = Service.make ~store in
+  Alcotest.(check bool) "invalid date rejected" true
+    (response_has_error_code (-32602)
+      (Mcp.handle ~service ~identity:(identity user [ "ledger:read" ])
+        (call "get_daily_totals" (`Assoc [ ("date", `String "not-a-date") ]))))
+
+let test_get_latest_weight_returns_not_found_when_empty () =
+  let store, user = Test_support.store_with_user () in
+  let service = Service.make ~store in
+  let response =
+    Mcp.handle ~service ~identity:(identity user [ "ledger:read" ]) (call "get_latest_weight" (`Assoc []))
+  in
+  Alcotest.(check bool) "record not found result" true
+    (match result_member "isError" response with Some (`Bool true) -> true | _ -> false)
+
 let test_combined_scopes_allow_their_union () =
   let store, user = Test_support.store_with_user () in
   let service = Service.make ~store in
@@ -219,7 +247,7 @@ let test_tool_list_is_exact () =
     | Ok (`Assoc fields) -> (match List.assoc_opt "result" fields with Some (`Assoc result) -> (match List.assoc_opt "tools" result with Some (`List tools) -> List.filter_map (function `Assoc tool -> (match List.assoc_opt "name" tool with Some (`String name) -> Some name | _ -> None) | _ -> None) tools | _ -> []) | _ -> [])
     | Error `Forbidden -> [] in
   Alcotest.(check (list string)) "approved tools"
-    [ "record_meal"; "get_meal"; "query_meals"; "update_meal"; "delete_meal"; "record_weight"; "get_weight"; "query_weights"; "update_weight"; "delete_weight"; "begin_withings_connection"; "get_withings_status"; "disconnect_withings" ] names
+    [ "record_meal"; "get_meal"; "query_meals"; "update_meal"; "delete_meal"; "get_daily_totals"; "record_weight"; "get_weight"; "query_weights"; "update_weight"; "delete_weight"; "get_latest_weight"; "begin_withings_connection"; "get_withings_status"; "disconnect_withings" ] names
 
 let () = Alcotest.run "mcp" [
   ("boundary", [
@@ -227,6 +255,9 @@ let () = Alcotest.run "mcp" [
     Alcotest.test_case "rejects bad JSON-RPC and provenance" `Quick test_mcp_rejects_bad_jsonrpc_and_provenance_fields;
     Alcotest.test_case "read scope permits reads only" `Quick test_read_scope_allows_reads_only;
     Alcotest.test_case "write scope permits writes only" `Quick test_write_scope_allows_writes_only;
+    Alcotest.test_case "get_daily_totals defaults to today and respects scope" `Quick test_get_daily_totals_defaults_to_today_and_respects_scope;
+    Alcotest.test_case "get_daily_totals rejects a malformed date" `Quick test_get_daily_totals_rejects_a_malformed_date;
+    Alcotest.test_case "get_latest_weight is not found when empty" `Quick test_get_latest_weight_returns_not_found_when_empty;
     Alcotest.test_case "Withings scope is isolated and requires configuration" `Quick test_withings_scope_isolated_and_requires_configuration;
     Alcotest.test_case "combined scopes permit union" `Quick test_combined_scopes_allow_their_union;
     Alcotest.test_case "all scopes permit each tool class" `Quick test_all_scopes_allow_each_tool_class;
