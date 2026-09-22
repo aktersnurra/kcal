@@ -25,5 +25,7 @@ depends: [
   "cmdliner"
   "logs"
   "alcotest" {with-test}
+  "hegel" {with-test}
+  "ppx_hegel_test" {with-test}
 ]
 build: [ ["dune" "build" "-p" name] ]

@@ -84,3 +84,10 @@
  (name test_config)
  (modules test_config)
  (libraries alcotest kcal))
+
+(test
+ (name test_properties)
+ (modules test_properties test_support)
+ (libraries alcotest sqlite3 kcal hegel)
+ (preprocess (pps ppx_hegel_test))
+ (deps ../migrations/001_ledger.sql))
