@@ -47,6 +47,23 @@ let test_deleted_meal_is_excluded_from_query () =
        (Result.get_ok
           (Store_sqlite.query_meals store ~user ~from:None ~to_:None ~limit:100)))
 
+let test_partial_update_leaves_omitted_fields_unchanged () =
+  let store, user = Test_support.store_with_user () in
+  let meal = Test_support.create_meal store user in
+  let updated =
+    Result.get_ok
+      (Store_sqlite.update_meal store ~user meal.id Meal.{ empty_patch with confidence = Some 0.5 })
+  in
+  Alcotest.(check (float 0.0001)) "confidence updated" 0.5 (Option.get updated.confidence);
+  Alcotest.(check string) "description untouched" meal.description updated.description;
+  Alcotest.(check int) "calories untouched" meal.calories_kcal updated.calories_kcal;
+  Alcotest.(check (float 0.0001)) "protein untouched" meal.protein_g updated.protein_g;
+  Alcotest.(check (option (float 0.0001))) "carbs untouched" meal.carbs_g updated.carbs_g;
+  Alcotest.(check (option (float 0.0001))) "fat untouched" meal.fat_g updated.fat_g;
+  Alcotest.(check (option string)) "estimate source untouched" meal.estimate_source updated.estimate_source;
+  Alcotest.(check (option string)) "notes untouched" meal.notes updated.notes;
+  Alcotest.(check string) "eaten_at untouched" (Time.to_utc_string meal.eaten_at) (Time.to_utc_string updated.eaten_at)
+
 let test_locked_meal_get_and_update_are_storage_errors () =
   Test_support.with_exclusive_lock
     (fun store user -> (Test_support.create_meal store user, Meal.empty_patch))
@@ -59,6 +76,43 @@ let test_locked_meal_get_and_update_are_storage_errors () =
         (is_storage_error (Store_sqlite.get_meal store ~user meal.id));
       Alcotest.(check bool) "locked update is sanitized" true
         (is_storage_error (Store_sqlite.update_meal store ~user meal.id patch)))
+
+let test_daily_totals_aggregates_meals_within_the_utc_day () =
+  let store, user = Test_support.store_with_user () in
+  let at value = Result.get_ok (Time.parse_offset_datetime value) in
+  let first =
+    Result.get_ok (Store_sqlite.create_meal store ~user (Test_support.meal_input ~eaten_at:(at "2026-09-22T08:00:00Z") ()))
+  in
+  let second =
+    Result.get_ok
+      (Store_sqlite.create_meal store ~user
+         Meal.{ (Test_support.meal_input ~eaten_at:(at "2026-09-22T20:00:00Z") ()) with calories_kcal = 400; protein_g = 30.0; carbs_g = None; fat_g = Some 10.0 })
+  in
+  (* Outside the UTC day on either side; must not be counted. *)
+  ignore (Result.get_ok (Store_sqlite.create_meal store ~user (Test_support.meal_input ~eaten_at:(at "2026-09-23T00:00:00Z") ())));
+  ignore (Result.get_ok (Store_sqlite.create_meal store ~user (Test_support.meal_input ~eaten_at:(at "2026-09-21T23:59:59Z") ())));
+  let day_start, day_end = Time.day_bounds (at "2026-09-22T12:00:00Z") in
+  let totals = Result.get_ok (Store_sqlite.daily_totals store ~user ~day_start ~day_end) in
+  Alcotest.(check int) "meal count" 2 totals.meal_count;
+  Alcotest.(check int) "calories summed" (250 + 400) totals.calories_kcal;
+  Alcotest.(check (float 0.0001)) "protein summed" (12.0 +. 30.0) totals.protein_g;
+  Alcotest.(check (option (float 0.0001))) "carbs summed over present values only" (Some 20.0) totals.carbs_g;
+  Alcotest.(check (option (float 0.0001))) "fat summed over present values only" (Some 15.0) totals.fat_g;
+  Result.get_ok (Store_sqlite.delete_meal store ~user second.id);
+  let totals_after_delete = Result.get_ok (Store_sqlite.daily_totals store ~user ~day_start ~day_end) in
+  Alcotest.(check int) "deleted meal excluded" 1 totals_after_delete.meal_count;
+  Alcotest.(check int) "deleted meal's calories excluded" 250 totals_after_delete.calories_kcal;
+  ignore first
+
+let test_daily_totals_are_null_and_zero_for_an_empty_day () =
+  let store, user = Test_support.store_with_user () in
+  let day_start, day_end = Time.day_bounds (Result.get_ok (Time.parse_offset_datetime "2026-09-22T12:00:00Z")) in
+  let totals = Result.get_ok (Store_sqlite.daily_totals store ~user ~day_start ~day_end) in
+  Alcotest.(check int) "no meals" 0 totals.meal_count;
+  Alcotest.(check int) "zero calories" 0 totals.calories_kcal;
+  Alcotest.(check (float 0.0001)) "zero protein" 0.0 totals.protein_g;
+  Alcotest.(check (option (float 0.0001))) "no carbs" None totals.carbs_g;
+  Alcotest.(check (option (float 0.0001))) "no fat" None totals.fat_g
 
 let test_rejects_invalid_limit () =
   let store, user = Test_support.store_with_user () in
@@ -80,10 +134,16 @@ let () =
             test_cannot_read_another_users_meal;
           Alcotest.test_case "foreign meal operations are hidden" `Quick test_foreign_meal_operations_are_hidden;
           Alcotest.test_case "meal CRUD and soft delete" `Quick test_meal_crud_and_soft_delete;
+          Alcotest.test_case "partial update leaves omitted fields unchanged" `Quick
+            test_partial_update_leaves_omitted_fields_unchanged;
           Alcotest.test_case "deleted meals are excluded from queries" `Quick
             test_deleted_meal_is_excluded_from_query;
           Alcotest.test_case "locked meal get and update are sanitized" `Quick
             test_locked_meal_get_and_update_are_storage_errors;
           Alcotest.test_case "invalid query limits are rejected" `Quick test_rejects_invalid_limit;
+          Alcotest.test_case "daily totals aggregate meals within the UTC day" `Quick
+            test_daily_totals_aggregates_meals_within_the_utc_day;
+          Alcotest.test_case "daily totals are null and zero for an empty day" `Quick
+            test_daily_totals_are_null_and_zero_for_an_empty_day;
         ] );
     ]

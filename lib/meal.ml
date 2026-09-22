@@ -39,6 +39,14 @@ type create = {
   eaten_at : Ptime.t option;
 }
 
+type totals = {
+  meal_count : int;
+  calories_kcal : int;
+  protein_g : float;
+  carbs_g : float option;
+  fat_g : float option;
+}
+
 let invalid_input = Error.Invalid_input "invalid meal"
 
 let is_nonnegative value = value >= 0.0
