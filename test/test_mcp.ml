@@ -105,6 +105,18 @@ let test_withings_scope_isolated_and_requires_configuration () =
           (call "get_withings_status" (`Assoc [])))))
     [ [ "ledger:read" ]; [ "ledger:write" ] ]
 
+let test_zero_parameter_withings_tools_accept_omitted_arguments () =
+  let store, user = Test_support.store_with_user () in
+  let service = Service.make ~store in
+  let withings = withings store in
+  List.iter (fun name ->
+    let request = `Assoc [ ("jsonrpc", `String "2.0"); ("method", `String "tools/call");
+                           ("params", `Assoc [ ("name", `String name) ]) ] in
+    Alcotest.(check bool) (name ^ " accepts omitted arguments") true
+      (response_has_result (Mcp.handle ~withings ~service
+        ~identity:(identity user [ "withings:manage" ]) request)))
+    [ "begin_withings_connection"; "get_withings_status"; "disconnect_withings" ]
+
 let test_update_meal_partial_patch_leaves_other_fields_unchanged () =
   let store, user = Test_support.store_with_user () in
   let service = Service.make ~store in
@@ -282,6 +294,7 @@ let () = Alcotest.run "mcp" [
     Alcotest.test_case "get_daily_totals rejects a malformed date" `Quick test_get_daily_totals_rejects_a_malformed_date;
     Alcotest.test_case "get_latest_weight is not found when empty" `Quick test_get_latest_weight_returns_not_found_when_empty;
     Alcotest.test_case "Withings scope is isolated and requires configuration" `Quick test_withings_scope_isolated_and_requires_configuration;
+    Alcotest.test_case "zero-parameter Withings tools accept omitted arguments" `Quick test_zero_parameter_withings_tools_accept_omitted_arguments;
     Alcotest.test_case "combined scopes permit union" `Quick test_combined_scopes_allow_their_union;
     Alcotest.test_case "all scopes permit each tool class" `Quick test_all_scopes_allow_each_tool_class;
     Alcotest.test_case "configured Withings OAuth URL" `Quick test_withings_mcp_uses_configured_oauth_url;

@@ -267,7 +267,8 @@ let handle ?withings ~service ~identity request =
                       | Error Error.Not_found -> Ok (response ~id:request_id tool_error)
                       | Error (Error.Invalid_input _) -> Ok (rpc_error ~id:request_id (-32602) "Invalid params")
                       | Error _ -> Ok (rpc_error ~id:request_id (-32603) "Internal error")))
-              | Ok ("query_meals" | "query_weights" | "get_daily_totals" | "get_latest_weight" as name), None ->
+              | Ok ("query_meals" | "query_weights" | "get_daily_totals" | "get_latest_weight"
+                  | "begin_withings_connection" | "get_withings_status" | "disconnect_withings" as name), None ->
                   (match required_scope name with
                   | Some scope when not (Auth.has_scope identity scope) -> Error `Forbidden
                   | _ ->

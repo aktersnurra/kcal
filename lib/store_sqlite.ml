@@ -392,7 +392,7 @@ let get_withings_status db ~user =
 let ensure_withings_connection db ~user ~withings_user_id =
   let current = timestamp (now ()) in
   with_statement db
-    "INSERT INTO withings_connections (id, user_id, withings_user_id, access_token_encrypted, refresh_token_encrypted, token_expires_at, sync_cursor, requires_reauthorization, created_at, updated_at) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, 0, ?, ?) ON CONFLICT(user_id) DO UPDATE SET withings_user_id = excluded.withings_user_id, updated_at = excluded.updated_at RETURNING id, user_id, withings_user_id, token_expires_at, sync_cursor, requires_reauthorization"
+    "INSERT INTO withings_connections (id, user_id, withings_user_id, access_token_encrypted, refresh_token_encrypted, token_expires_at, sync_cursor, requires_reauthorization, created_at, updated_at) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, 0, ?, ?) ON CONFLICT(user_id) DO UPDATE SET sync_cursor = CASE WHEN withings_connections.withings_user_id IS NOT excluded.withings_user_id THEN NULL ELSE withings_connections.sync_cursor END, withings_user_id = excluded.withings_user_id, updated_at = excluded.updated_at RETURNING id, user_id, withings_user_id, token_expires_at, sync_cursor, requires_reauthorization"
     (fun statement ->
       match bind statement [ Sqlite3.Data.TEXT (Withings_connection_id.to_string (Withings_connection_id.fresh ())); Sqlite3.Data.TEXT (User_id.to_string user.User.id); Sqlite3.Data.TEXT withings_user_id; Sqlite3.Data.TEXT current; Sqlite3.Data.TEXT current ] with
       | Error _ as error -> error
@@ -499,7 +499,7 @@ let persist_withings_import db ~user ~connection ~rows ~cursor =
         let current = timestamp (now ()) in
         let persist (row : Weigh_in.import) =
           with_statement db
-            "INSERT INTO weigh_ins (id, user_id, measured_at, weight_kg, source, external_id, created_at, updated_at, deleted_at, withings_connection_id) VALUES (?, ?, ?, ?, 'withings', ?, ?, ?, NULL, ?) ON CONFLICT(source, external_id) DO UPDATE SET weight_kg = excluded.weight_kg, updated_at = excluded.updated_at WHERE weigh_ins.deleted_at IS NULL AND weigh_ins.user_id = excluded.user_id AND weigh_ins.withings_connection_id = excluded.withings_connection_id"
+            "INSERT INTO weigh_ins (id, user_id, measured_at, weight_kg, source, external_id, created_at, updated_at, deleted_at, withings_connection_id) VALUES (?, ?, ?, ?, 'withings', ?, ?, ?, NULL, ?) ON CONFLICT(source, external_id) DO UPDATE SET weight_kg = excluded.weight_kg, withings_connection_id = excluded.withings_connection_id, updated_at = excluded.updated_at WHERE weigh_ins.deleted_at IS NULL AND weigh_ins.user_id = excluded.user_id"
             (fun statement ->
               match bind statement [ Sqlite3.Data.TEXT (Weigh_in_id.to_string (Weigh_in_id.fresh ())); Sqlite3.Data.TEXT (User_id.to_string user.User.id);
                                      Sqlite3.Data.TEXT (timestamp row.Weigh_in.measured_at); Sqlite3.Data.FLOAT row.weight_kg;

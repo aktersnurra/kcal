@@ -55,6 +55,30 @@ let test_upstream_change_preserves_timestamp_and_tombstone () =
   Result.get_ok (sync [ measurement ~value:82000L "one" ]);
   Alcotest.(check int) "tombstone retained" 0 (List.length (Result.get_ok (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None ~limit:10)))
 
+let test_relink_different_account_resets_cursor () =
+  let store, user, connection, _ = setup [] in
+  Result.get_ok (Store_sqlite.persist_withings_import store ~user ~connection ~rows:[] ~cursor:(Some 100L));
+  ignore (Result.get_ok (Store_sqlite.ensure_withings_connection store ~user ~withings_user_id:"upstream-alice"));
+  Alcotest.(check (option int64)) "same account retains cursor" (Some 100L) (sync_cursor store);
+  ignore (Result.get_ok (Store_sqlite.ensure_withings_connection store ~user ~withings_user_id:"upstream-bob"));
+  Alcotest.(check (option int64)) "different account starts from beginning" None (sync_cursor store)
+
+let test_reconnect_same_account_updates_import () =
+  let store, user, connection, _ = setup [] in
+  let original = Weigh_in.{ external_id = "upstream-alice:one"; measured_at = now; weight_kg = 80.0 } in
+  Result.get_ok (Store_sqlite.persist_withings_import store ~user ~connection ~rows:[ original ] ~cursor:(Some 100L));
+  Result.get_ok (Store_sqlite.delete_withings_connection store ~user);
+  let replacement = Result.get_ok (Store_sqlite.ensure_withings_connection store ~user ~withings_user_id:"upstream-alice") in
+  let corrected = Weigh_in.{ original with weight_kg = 81.0 } in
+  Result.get_ok (Store_sqlite.persist_withings_import store ~user ~connection:replacement ~rows:[ corrected ] ~cursor:(Some 101L));
+  let rows = Result.get_ok (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None ~limit:10) in
+  Alcotest.(check int) "no duplicate" 1 (List.length rows);
+  Alcotest.(check (float 0.0001)) "corrected weight" 81.0 (List.hd rows).weight_kg;
+  let statement = Sqlite3.prepare store "SELECT withings_connection_id FROM weigh_ins WHERE external_id = 'upstream-alice:one'" in
+  Fun.protect ~finally:(fun () -> ignore (Sqlite3.finalize statement)) (fun () ->
+    Alcotest.(check bool) "import exists" true (Sqlite3.step statement = Sqlite3.Rc.ROW);
+    Alcotest.(check string) "new connection owns import" replacement.id (Sqlite3.column_text statement 0))
+
 let test_failed_transaction_retains_cursor () =
   let store, user, connection, _ = setup [] in
   ignore (Sqlite3.exec store "CREATE TRIGGER reject_import BEFORE INSERT ON weigh_ins WHEN NEW.source = 'withings' BEGIN SELECT RAISE(ABORT, 'reject'); END");
@@ -98,6 +122,8 @@ let test_transient_refresh_failure_does_not_require_reauthorization () =
 let () = Alcotest.run "withings sync"
   [ ("sync", [ Alcotest.test_case "normalization, duplicate and cursor" `Quick test_normalizes_deduplicates_and_advances_cursor;
                 Alcotest.test_case "update and tombstone" `Quick test_upstream_change_preserves_timestamp_and_tombstone;
+                Alcotest.test_case "relink different account resets cursor" `Quick test_relink_different_account_resets_cursor;
+                Alcotest.test_case "reconnect same account updates import" `Quick test_reconnect_same_account_updates_import;
                 Alcotest.test_case "failed transaction retains cursor" `Quick test_failed_transaction_retains_cursor;
                 Alcotest.test_case "stale batch cannot regress" `Quick test_stale_batch_cannot_regress_value_or_cursor;
                 Alcotest.test_case "permanent refresh failure" `Quick test_refresh_failure_requires_reauthorization;
