@@ -42,6 +42,21 @@ let test_weight_crud_and_delete () =
   Alcotest.(check bool) "deleted hidden" true
     (match Store_sqlite.get_weigh_in store ~user weight.id with Error Error.Not_found -> true | _ -> false)
 
+let test_partial_update_leaves_omitted_field_unchanged () =
+  let store, user = Test_support.store_with_user () in
+  let weight = Test_support.create_weight store user in
+  let weight_only =
+    Result.get_ok (Store_sqlite.update_manual_weigh_in store ~user weight.id Weigh_in.{ empty_patch with weight_kg = Some 80.0 })
+  in
+  Alcotest.(check (float 0.0001)) "weight updated" 80.0 weight_only.weight_kg;
+  Alcotest.(check string) "measured_at untouched" (Time.to_utc_string weight.measured_at) (Time.to_utc_string weight_only.measured_at);
+  let new_measured_at = Result.get_ok (Time.parse_offset_datetime "2026-01-01T00:00:00Z") in
+  let date_only =
+    Result.get_ok (Store_sqlite.update_manual_weigh_in store ~user weight.id Weigh_in.{ empty_patch with measured_at = Some new_measured_at })
+  in
+  Alcotest.(check string) "measured_at updated" (Time.to_utc_string new_measured_at) (Time.to_utc_string date_only.measured_at);
+  Alcotest.(check (float 0.0001)) "weight untouched by date-only patch" 80.0 date_only.weight_kg
+
 let test_locked_weight_get_and_update_are_storage_errors () =
   Test_support.with_exclusive_lock
     (fun store user -> (Test_support.create_weight store user, Weigh_in.empty_patch))
@@ -100,6 +115,8 @@ let () =
           Alcotest.test_case "users cannot update each other's weights" `Quick test_cannot_update_another_users_weight;
           Alcotest.test_case "foreign weight operations are hidden" `Quick test_foreign_weight_operations_are_hidden;
           Alcotest.test_case "weight CRUD and delete" `Quick test_weight_crud_and_delete;
+          Alcotest.test_case "partial update leaves omitted field unchanged" `Quick
+            test_partial_update_leaves_omitted_field_unchanged;
           Alcotest.test_case "locked weight get and update are sanitized" `Quick
             test_locked_weight_get_and_update_are_storage_errors;
           Alcotest.test_case "weight queries are ordered and bounded" `Quick test_weight_queries_are_ordered_and_bounded;
