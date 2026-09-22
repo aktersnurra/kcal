@@ -79,43 +79,67 @@ let authenticated ?protected_resource auth headers ?scope f =
           | Some scope when not (Auth.has_scope identity scope) -> forbidden
           | None | Some _ -> f identity))
 
+let ( let* ) = Result.bind
+
+let callback_user withings state =
+  match Withings_oauth.consume_callback_state withings.oauth ~state with
+  | Ok user -> Ok user
+  | Error error ->
+      Withings_log.warn (fun m -> m "callback rejected: invalid or expired OAuth state (%s)" (Error.to_string error));
+      Error (plain 400 "Invalid OAuth state")
+
+let exchange_withings_code withings ~user_id code =
+  let module Client = (val withings.client : Withings.S) in
+  match Client.exchange_code ~redirect_uri:withings.redirect_uri ~code with
+  | Ok credentials -> Ok credentials
+  | Error error ->
+      Withings_log.err (fun m -> m "user=%s code exchange with Withings failed: %s" user_id (Error.to_string error));
+      Error (plain 502 "Withings authorization failed")
+
+let ensure_callback_connection withings ~user ~user_id credentials =
+  match Store_sqlite.ensure_withings_connection withings.oauth.store ~user ~withings_user_id:credentials.Withings.withings_user_id with
+  | Ok connection -> Ok connection
+  | Error error ->
+      Withings_log.err (fun m -> m "user=%s failed to persist Withings connection: %s" user_id (Error.to_string error));
+      Error (plain 500 "Internal Server Error")
+
+let save_callback_credentials withings ~user ~user_id credentials =
+  match Store_sqlite.save_withings_credentials withings.oauth.store ~user ~key:withings.token_key credentials with
+  | Ok connection -> Ok connection
+  | Error error ->
+      Withings_log.err (fun m -> m "user=%s failed to store Withings credentials: %s" user_id (Error.to_string error));
+      Error (plain 500 "Internal Server Error")
+
+let sync_callback_connection withings ~user ~user_id connection =
+  match withings.sync user connection with
+  | Ok () -> Ok ()
+  | Error error ->
+      Withings_log.err (fun m -> m "user=%s initial Withings sync failed: %s" user_id (Error.to_string error));
+      Error (plain 502 "Withings synchronization failed")
+
+let subscribe_callback withings ~user_id credentials =
+  let module Client = (val withings.client : Withings.S) in
+  match Client.subscribe ~access_token:credentials.Withings.access_token ~callback_url:withings.callback_url with
+  | Ok () -> Ok ()
+  | Error error ->
+      Withings_log.err (fun m -> m "user=%s Withings webhook subscription failed: %s" user_id (Error.to_string error));
+      Error (plain 502 "Withings subscription failed")
+
 let withings_callback withings query =
   match query_value "state" query, query_value "code" query with
   | Some state, Some code ->
-      (match Withings_oauth.consume_callback_state withings.oauth ~state with
-      | Error error ->
-          Withings_log.warn (fun m -> m "callback rejected: invalid or expired OAuth state (%s)" (Error.to_string error));
-          plain 400 "Invalid OAuth state"
-      | Ok user ->
-          let user_id = User_id.to_string user.User.id in
-          let module Client = (val withings.client : Withings.S) in
-          (match Client.exchange_code ~redirect_uri:withings.redirect_uri ~code with
-          | Error error ->
-              Withings_log.err (fun m -> m "user=%s code exchange with Withings failed: %s" user_id (Error.to_string error));
-              plain 502 "Withings authorization failed"
-          | Ok credentials ->
-              (match Store_sqlite.ensure_withings_connection withings.oauth.store ~user ~withings_user_id:credentials.withings_user_id with
-              | Error error ->
-                  Withings_log.err (fun m -> m "user=%s failed to persist Withings connection: %s" user_id (Error.to_string error));
-                  plain 500 "Internal Server Error"
-              | Ok connection ->
-                  (match Store_sqlite.save_withings_credentials withings.oauth.store ~user ~key:withings.token_key credentials with
-                  | Error error ->
-                      Withings_log.err (fun m -> m "user=%s failed to store Withings credentials: %s" user_id (Error.to_string error));
-                      plain 500 "Internal Server Error"
-                  | Ok connection ->
-                      (match withings.sync user connection with
-                      | Error error ->
-                          Withings_log.err (fun m -> m "user=%s initial Withings sync failed: %s" user_id (Error.to_string error));
-                          plain 502 "Withings synchronization failed"
-                      | Ok () ->
-                          (match Client.subscribe ~access_token:credentials.access_token ~callback_url:withings.callback_url with
-                          | Ok () ->
-                              Withings_log.info (fun m -> m "user=%s connected Withings account" user_id);
-                              plain 200 "Withings connected"
-                          | Error error ->
-                              Withings_log.err (fun m -> m "user=%s Withings webhook subscription failed: %s" user_id (Error.to_string error));
-                              plain 502 "Withings subscription failed"))))))
+      let result =
+        let* user = callback_user withings state in
+        let user_id = User_id.to_string user.User.id in
+        let* credentials = exchange_withings_code withings ~user_id code in
+        let* _ = ensure_callback_connection withings ~user ~user_id credentials in
+        let* connection = save_callback_credentials withings ~user ~user_id credentials in
+        let* () = sync_callback_connection withings ~user ~user_id connection in
+        let* () = subscribe_callback withings ~user_id credentials in
+        Withings_log.info (fun m -> m "user=%s connected Withings account" user_id);
+        Ok (plain 200 "Withings connected")
+      in
+      (match result with Ok response | Error response -> response)
   | _ ->
       Withings_log.warn (fun m -> m "callback rejected: missing state or code parameter");
       plain 400 "Invalid OAuth callback"

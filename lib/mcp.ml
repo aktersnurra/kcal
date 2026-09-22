@@ -186,35 +186,120 @@ let required_scope = function
   | "disconnect_withings" -> Some "withings:manage"
   | _ -> None
 
+let withings_for_call = function
+  | Some withings -> Ok withings
+  | None -> Error (Error.Storage_error "Withings unavailable")
+
+let call_begin_withings_connection withings ~user =
+  let* withings = withings_for_call withings in
+  Result.map (fun (_, url) -> text_result (`Assoc [ ("authorization_url", `String url) ]))
+    (Withings_oauth.begin_authorization ~client_id:withings.client_id
+      ~redirect_uri:withings.redirect_uri withings.oauth ~user)
+
+let call_get_withings_status withings ~user =
+  let* withings = withings_for_call withings in
+  Result.map (fun status -> text_result (withings_status_json status))
+    (Store_sqlite.get_withings_status withings.oauth.store ~user)
+
+let call_disconnect_withings withings ~user =
+  let* withings = withings_for_call withings in
+  Result.map (fun () -> text_result (`Assoc [ ("disconnected", `Bool true) ]))
+    (Store_sqlite.delete_withings_connection withings.oauth.store ~user)
+
+let call_record_meal service ~user fields =
+  let* input = meal_create fields in
+  Result.map (fun meal -> text_result (meal_json meal)) (Service.record_meal service ~user input)
+
+let call_get_meal service ~user fields =
+  let* fields = only_fields [ "id" ] (`Assoc fields) in
+  let* value = required_string "id" fields in
+  let* meal_id = id value Meal_id.of_string in
+  Result.map (fun meal -> text_result (meal_json meal)) (Service.get_meal service ~user meal_id)
+
+let call_query_meals service ~user fields =
+  let* from, to_, limit = query fields in
+  Result.map (fun meals -> text_result (`Assoc [ ("meals", `List (List.map meal_json meals)) ]))
+    (Service.query_meals service ~user ~from ~to_ ~limit)
+
+let call_get_daily_totals service ~user fields =
+  let* day_start, day_end = day_bounds_query fields in
+  Result.map (fun totals -> text_result (totals_json ~date:(Time.to_date_string day_start) totals))
+    (Service.daily_totals service ~user ~day_start ~day_end)
+
+let call_update_meal service ~user fields =
+  let* fields = only_fields ("id" :: List.map fst meal_properties) (`Assoc fields) in
+  let* value = required_string "id" fields in
+  let* meal_id = id value Meal_id.of_string in
+  let* patch = meal_patch fields in
+  Result.map (fun meal -> text_result (meal_json meal))
+    (Service.update_meal service ~user meal_id patch)
+
+let call_delete_meal service ~user fields =
+  let* fields = only_fields [ "id" ] (`Assoc fields) in
+  let* value = required_string "id" fields in
+  let* meal_id = id value Meal_id.of_string in
+  Result.map (fun () -> text_result (`Assoc [ ("deleted", `Bool true) ]))
+    (Service.delete_meal service ~user meal_id)
+
+let call_record_weight service ~user fields =
+  let* fields = only_fields (List.map fst weight_properties) (`Assoc fields) in
+  let* weight_kg = required_float "weight_kg" fields in
+  let* measured_at = optional_time "measured_at" fields in
+  Result.map (fun weight -> text_result (weight_json weight))
+    (Service.record_manual_weigh_in service ~user Weigh_in.{ measured_at; weight_kg })
+
+let call_get_weight service ~user fields =
+  let* fields = only_fields [ "id" ] (`Assoc fields) in
+  let* value = required_string "id" fields in
+  let* weight_id = id value Weigh_in_id.of_string in
+  Result.map (fun weight -> text_result (weight_json weight))
+    (Service.get_weigh_in service ~user weight_id)
+
+let call_query_weights service ~user fields =
+  let* from, to_, limit = query fields in
+  Result.map (fun weights -> text_result (`Assoc [ ("weights", `List (List.map weight_json weights)) ]))
+    (Service.query_weigh_ins service ~user ~from ~to_ ~limit)
+
+let call_get_latest_weight service ~user =
+  Result.map (fun weight -> text_result (weight_json weight))
+    (Service.latest_weigh_in service ~user)
+
+let call_update_weight service ~user fields =
+  let* fields = only_fields ("id" :: List.map fst weight_properties) (`Assoc fields) in
+  let* value = required_string "id" fields in
+  let* weight_id = id value Weigh_in_id.of_string in
+  let* measured_at = optional_time "measured_at" fields in
+  let* weight_kg = optional_float "weight_kg" fields in
+  Result.map (fun weight -> text_result (weight_json weight))
+    (Service.update_manual_weigh_in service ~user weight_id Weigh_in.{ measured_at; weight_kg })
+
+let call_delete_weight service ~user fields =
+  let* fields = only_fields [ "id" ] (`Assoc fields) in
+  let* value = required_string "id" fields in
+  let* weight_id = id value Weigh_in_id.of_string in
+  Result.map (fun () -> text_result (`Assoc [ ("deleted", `Bool true) ]))
+    (Service.delete_weigh_in service ~user weight_id)
+
 let call ?withings service (identity : Auth.identity) name arguments =
-  let user = identity.user in
   match arguments with
   | `Assoc fields ->
+      let user = identity.user in
       (match name with
-      | "begin_withings_connection" ->
-          (match withings with
-          | Some withings -> Result.map (fun (_, url) -> text_result (`Assoc [ ("authorization_url", `String url) ])) (Withings_oauth.begin_authorization ~client_id:withings.client_id ~redirect_uri:withings.redirect_uri withings.oauth ~user)
-          | None -> Error (Error.Storage_error "Withings unavailable"))
-      | "get_withings_status" ->
-          (match withings with
-          | Some withings -> Result.map (fun status -> text_result (withings_status_json status)) (Store_sqlite.get_withings_status withings.oauth.store ~user)
-          | None -> Error (Error.Storage_error "Withings unavailable"))
-      | "disconnect_withings" ->
-          (match withings with
-          | Some withings -> Result.map (fun () -> text_result (`Assoc [ ("disconnected", `Bool true) ])) (Store_sqlite.delete_withings_connection withings.oauth.store ~user)
-          | None -> Error (Error.Storage_error "Withings unavailable"))
-      | "record_meal" -> Result.map (fun record -> text_result (meal_json record)) (Result.bind (meal_create fields) (Service.record_meal service ~user))
-      | "get_meal" -> let* fields = only_fields [ "id" ] (`Assoc fields) in let* value = required_string "id" fields in let* record = id value Meal_id.of_string in Result.map (fun x -> text_result (meal_json x)) (Service.get_meal service ~user record)
-      | "query_meals" -> let* from, to_, limit = query fields in Result.map (fun records -> text_result (`Assoc [ ("meals", `List (List.map meal_json records)) ])) (Service.query_meals service ~user ~from ~to_ ~limit)
-      | "get_daily_totals" -> let* day_start, day_end = day_bounds_query fields in Result.map (fun totals -> text_result (totals_json ~date:(Time.to_date_string day_start) totals)) (Service.daily_totals service ~user ~day_start ~day_end)
-      | "update_meal" -> let* fields = only_fields ("id" :: List.map fst meal_properties) (`Assoc fields) in let* value = required_string "id" fields in let* record = id value Meal_id.of_string in let* patch = meal_patch fields in Result.map (fun x -> text_result (meal_json x)) (Service.update_meal service ~user record patch)
-      | "delete_meal" -> let* fields = only_fields [ "id" ] (`Assoc fields) in let* value = required_string "id" fields in let* record = id value Meal_id.of_string in Result.map (fun () -> text_result (`Assoc [ ("deleted", `Bool true) ])) (Service.delete_meal service ~user record)
-      | "record_weight" -> let* fields = only_fields (List.map fst weight_properties) (`Assoc fields) in let* weight_kg = required_float "weight_kg" fields in let* measured_at = optional_time "measured_at" fields in Result.map (fun x -> text_result (weight_json x)) (Service.record_manual_weigh_in service ~user Weigh_in.{ measured_at; weight_kg })
-      | "get_weight" -> let* fields = only_fields [ "id" ] (`Assoc fields) in let* value = required_string "id" fields in let* record = id value Weigh_in_id.of_string in Result.map (fun x -> text_result (weight_json x)) (Service.get_weigh_in service ~user record)
-      | "query_weights" -> let* from, to_, limit = query fields in Result.map (fun records -> text_result (`Assoc [ ("weights", `List (List.map weight_json records)) ])) (Service.query_weigh_ins service ~user ~from ~to_ ~limit)
-      | "get_latest_weight" -> Result.map (fun x -> text_result (weight_json x)) (Service.latest_weigh_in service ~user)
-      | "update_weight" -> let* fields = only_fields ("id" :: List.map fst weight_properties) (`Assoc fields) in let* value = required_string "id" fields in let* record = id value Weigh_in_id.of_string in let* measured_at = optional_time "measured_at" fields in let* weight_kg = optional_float "weight_kg" fields in Result.map (fun x -> text_result (weight_json x)) (Service.update_manual_weigh_in service ~user record Weigh_in.{ measured_at; weight_kg })
-      | "delete_weight" -> let* fields = only_fields [ "id" ] (`Assoc fields) in let* value = required_string "id" fields in let* record = id value Weigh_in_id.of_string in Result.map (fun () -> text_result (`Assoc [ ("deleted", `Bool true) ])) (Service.delete_weigh_in service ~user record)
+      | "begin_withings_connection" -> call_begin_withings_connection withings ~user
+      | "get_withings_status" -> call_get_withings_status withings ~user
+      | "disconnect_withings" -> call_disconnect_withings withings ~user
+      | "record_meal" -> call_record_meal service ~user fields
+      | "get_meal" -> call_get_meal service ~user fields
+      | "query_meals" -> call_query_meals service ~user fields
+      | "get_daily_totals" -> call_get_daily_totals service ~user fields
+      | "update_meal" -> call_update_meal service ~user fields
+      | "delete_meal" -> call_delete_meal service ~user fields
+      | "record_weight" -> call_record_weight service ~user fields
+      | "get_weight" -> call_get_weight service ~user fields
+      | "query_weights" -> call_query_weights service ~user fields
+      | "get_latest_weight" -> call_get_latest_weight service ~user
+      | "update_weight" -> call_update_weight service ~user fields
+      | "delete_weight" -> call_delete_weight service ~user fields
       | _ -> invalid ())
   | _ -> invalid ()
 

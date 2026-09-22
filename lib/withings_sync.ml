@@ -32,50 +32,67 @@ let cursor previous received =
   | Some value, None | None, Some value -> Some value
   | None, None -> None
 
-let sync t ~user ~connection =
-  let user_id = User_id.to_string user.User.id in
-  let module Client = (val t.client : Withings.S) in
+let ( let* ) = Result.bind
+
+let load_credentials t ~user ~connection ~user_id =
   match Store_sqlite.withings_credentials t.store ~user ~connection ~key:t.token_key with
+  | Ok credentials -> Ok credentials
   | Error error as result ->
       Log.err (fun m -> m "user=%s could not load stored Withings credentials: %s" user_id (Error.to_string error));
       result
-  | Ok credentials ->
-      let refreshed =
-        if Ptime.compare credentials.expires_at (t.now ()) > 0 then Ok (credentials, connection)
-        else
-          match Client.refresh ~refresh_token:credentials.refresh_token with
-          | Ok credentials ->
-              Log.info (fun m -> m "user=%s refreshed Withings access token" user_id);
-              Result.map (fun connection -> (credentials, connection)) (Store_sqlite.save_withings_credentials t.store ~user ~key:t.token_key credentials)
-          | Error error when Withings.is_permanent_refresh_error error ->
-              Log.warn (fun m -> m "user=%s Withings refresh token rejected, marking connection for reauthorization" user_id);
-              (match Store_sqlite.mark_withings_reauthorization t.store ~user ~connection with
-              | Ok () -> Error (Error.Invalid_input "Withings reauthorization required")
-              | Error error as persistence_error ->
-                  Log.err (fun m -> m "user=%s failed to mark Withings connection for reauthorization: %s" user_id (Error.to_string error));
-                  persistence_error)
-          | Error error as result ->
-              Log.err (fun m -> m "user=%s Withings token refresh failed: %s" user_id (Error.to_string error));
-              result
-      in
-      match refreshed with
-      | Error _ as error -> error
-      | Ok (credentials, connection) ->
-          match Client.get_measurements ~access_token:credentials.access_token ~lastupdate:connection.sync_cursor with
-          | Error error as result ->
-              Log.err (fun m -> m "user=%s fetching Withings measurements failed: %s" user_id (Error.to_string error));
-              result
-          | Ok batch ->
-              (match imports connection batch.measurements with
-              | Error error as result ->
-                  Log.err (fun m -> m "user=%s could not parse Withings measurement batch: %s" user_id (Error.to_string error));
-                  result
-              | Ok rows ->
-                  let cursor = cursor connection.sync_cursor batch.lastupdate in
-                  match Store_sqlite.persist_withings_import t.store ~user ~connection ~rows ~cursor with
-                  | Ok () as result ->
-                      Log.info (fun m -> m "user=%s synced %d Withings measurement(s)" user_id (List.length rows));
-                      result
-                  | Error error as result ->
-                      Log.err (fun m -> m "user=%s failed to persist Withings import: %s" user_id (Error.to_string error));
-                      result)
+
+let require_reauthorization t ~user ~connection ~user_id =
+  Log.warn (fun m -> m "user=%s Withings refresh token rejected, marking connection for reauthorization" user_id);
+  match Store_sqlite.mark_withings_reauthorization t.store ~user ~connection with
+  | Ok () -> Error (Error.Invalid_input "Withings reauthorization required")
+  | Error error as result ->
+      Log.err (fun m -> m "user=%s failed to mark Withings connection for reauthorization: %s" user_id (Error.to_string error));
+      result
+
+let refresh_credentials t ~user ~connection ~user_id credentials =
+  if Ptime.compare credentials.Withings.expires_at (t.now ()) > 0 then Ok (credentials, connection)
+  else
+    let module Client = (val t.client : Withings.S) in
+    match Client.refresh ~refresh_token:credentials.refresh_token with
+    | Ok credentials ->
+        Log.info (fun m -> m "user=%s refreshed Withings access token" user_id);
+        Result.map (fun connection -> (credentials, connection))
+          (Store_sqlite.save_withings_credentials t.store ~user ~key:t.token_key credentials)
+    | Error error when Withings.is_permanent_refresh_error error ->
+        require_reauthorization t ~user ~connection ~user_id
+    | Error error as result ->
+        Log.err (fun m -> m "user=%s Withings token refresh failed: %s" user_id (Error.to_string error));
+        result
+
+let fetch_measurements t ~connection ~user_id credentials =
+  let module Client = (val t.client : Withings.S) in
+  match Client.get_measurements ~access_token:credentials.Withings.access_token ~lastupdate:connection.Withings_connection.sync_cursor with
+  | Ok batch -> Ok batch
+  | Error error as result ->
+      Log.err (fun m -> m "user=%s fetching Withings measurements failed: %s" user_id (Error.to_string error));
+      result
+
+let normalize_measurements ~connection ~user_id batch =
+  match imports connection batch.Withings.measurements with
+  | Ok rows -> Ok rows
+  | Error error as result ->
+      Log.err (fun m -> m "user=%s could not parse Withings measurement batch: %s" user_id (Error.to_string error));
+      result
+
+let persist_imports t ~user ~connection ~user_id ~cursor rows =
+  match Store_sqlite.persist_withings_import t.store ~user ~connection ~rows ~cursor with
+  | Ok () as result ->
+      Log.info (fun m -> m "user=%s synced %d Withings measurement(s)" user_id (List.length rows));
+      result
+  | Error error as result ->
+      Log.err (fun m -> m "user=%s failed to persist Withings import: %s" user_id (Error.to_string error));
+      result
+
+let sync t ~user ~connection =
+  let user_id = User_id.to_string user.User.id in
+  let* credentials = load_credentials t ~user ~connection ~user_id in
+  let* credentials, connection = refresh_credentials t ~user ~connection ~user_id credentials in
+  let* batch = fetch_measurements t ~connection ~user_id credentials in
+  let* rows = normalize_measurements ~connection ~user_id batch in
+  let cursor = cursor connection.sync_cursor batch.lastupdate in
+  persist_imports t ~user ~connection ~user_id ~cursor rows

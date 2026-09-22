@@ -67,4 +67,49 @@ let test_connect_requires_withings_manage_scope () =
   Alcotest.(check int) "withings manage is accepted" 302
     (request ~scopes:[ "withings:manage" ] store ~headers `GET "/withings/connect" "").status
 
-let () = Alcotest.run "withings http" [ ("routes", [ Alcotest.test_case "webhook boundaries" `Quick test_webhook_boundaries; Alcotest.test_case "known webhook schedules sync" `Quick test_known_webhook_schedules_sync_after_validation; Alcotest.test_case "connect authentication" `Quick test_connect_requires_authentication; Alcotest.test_case "connect unauthorized carries challenge" `Quick test_connect_unauthorized_carries_challenge; Alcotest.test_case "connect requires Withings manage scope" `Quick test_connect_requires_withings_manage_scope ]) ]
+let test_callback_syncs_before_subscribing () =
+  let store, user = Test_support.store_with_user () in
+  let events = ref [] in
+  let module Client = struct
+    let exchange_code ~redirect_uri:_ ~code:_ =
+      events := "exchange" :: !events;
+      Ok Withings.{ access_token = "access"; refresh_token = "refresh";
+                    expires_at = Option.get (Ptime.of_float_s 1_900_000_000.); withings_user_id = "alice" }
+    let refresh ~refresh_token:_ = Error (Error.Invalid_input "unused")
+    let get_measurements ~access_token:_ ~lastupdate:_ = Error (Error.Invalid_input "unused")
+    let subscribe ~access_token:_ ~callback_url:_ = events := "subscribe" :: !events; Ok ()
+  end in
+  let withings = integration ~sync:(fun _ _ -> events := "sync" :: !events; Ok ()) store in
+  let withings = { withings with client = (module Client : Withings.S) } in
+  let state, _ = Result.get_ok (Withings_oauth.begin_authorization
+    ~client_id:withings.client_id ~redirect_uri:withings.redirect_uri withings.oauth ~user) in
+  let response = Http_adapter.handle_withings ~protected_resource:None
+    ~schedule_sync:(fun sync -> sync ()) ~withings:(Some withings) ~auth:(auth store [])
+    ~service:(Service.make ~store) ~method_:`GET
+    ~path:("/withings/callback?state=" ^ state ^ "&code=valid") ~headers:[] ~body:"" in
+  Alcotest.(check int) "callback succeeds" 200 response.status;
+  Alcotest.(check (list string)) "exchange, sync, subscribe" [ "exchange"; "sync"; "subscribe" ] (List.rev !events)
+
+let test_callback_stops_before_subscription_on_sync_failure () =
+  let store, user = Test_support.store_with_user () in
+  let subscribed = ref false in
+  let module Client = struct
+    let exchange_code ~redirect_uri:_ ~code:_ =
+      Ok Withings.{ access_token = "access"; refresh_token = "refresh";
+                    expires_at = Option.get (Ptime.of_float_s 1_900_000_000.); withings_user_id = "alice" }
+    let refresh ~refresh_token:_ = Error (Error.Invalid_input "unused")
+    let get_measurements ~access_token:_ ~lastupdate:_ = Error (Error.Invalid_input "unused")
+    let subscribe ~access_token:_ ~callback_url:_ = subscribed := true; Ok ()
+  end in
+  let withings = integration ~sync:(fun _ _ -> Error (Error.Invalid_input "sync failed")) store in
+  let withings = { withings with client = (module Client : Withings.S) } in
+  let state, _ = Result.get_ok (Withings_oauth.begin_authorization
+    ~client_id:withings.client_id ~redirect_uri:withings.redirect_uri withings.oauth ~user) in
+  let response = Http_adapter.handle_withings ~protected_resource:None
+    ~schedule_sync:(fun sync -> sync ()) ~withings:(Some withings) ~auth:(auth store [])
+    ~service:(Service.make ~store) ~method_:`GET
+    ~path:("/withings/callback?state=" ^ state ^ "&code=valid") ~headers:[] ~body:"" in
+  Alcotest.(check int) "sync failure" 502 response.status;
+  Alcotest.(check bool) "subscription skipped" false !subscribed
+
+let () = Alcotest.run "withings http" [ ("routes", [ Alcotest.test_case "webhook boundaries" `Quick test_webhook_boundaries; Alcotest.test_case "known webhook schedules sync" `Quick test_known_webhook_schedules_sync_after_validation; Alcotest.test_case "connect authentication" `Quick test_connect_requires_authentication; Alcotest.test_case "connect unauthorized carries challenge" `Quick test_connect_unauthorized_carries_challenge; Alcotest.test_case "connect requires Withings manage scope" `Quick test_connect_requires_withings_manage_scope; Alcotest.test_case "callback syncs before subscribing" `Quick test_callback_syncs_before_subscribing; Alcotest.test_case "callback stops on sync failure" `Quick test_callback_stops_before_subscription_on_sync_failure ]) ]
