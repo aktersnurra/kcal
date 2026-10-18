@@ -20,14 +20,11 @@ let update_meal service ~user id patch =
 
 let delete_meal service ~user id = Store_sqlite.delete_meal service.store ~user id
 
-let daily_totals service ~user ~day_start ~day_end =
-  Store_sqlite.daily_totals service.store ~user ~day_start ~day_end
+let meals_between service ~user ~start ~stop =
+  Store_sqlite.meals_between service.store ~user ~start ~stop
 
-let meals_between service ~user ~from ~until =
-  Store_sqlite.meals_between service.store ~user ~from ~until
-
-let weigh_ins_between service ~user ~from ~until =
-  Store_sqlite.weigh_ins_between service.store ~user ~from ~until
+let weigh_ins_between service ~user ~start ~stop =
+  Store_sqlite.weigh_ins_between service.store ~user ~start ~stop
 
 let record_manual_weigh_in service ~user input =
   Store_sqlite.create_manual_weigh_in service.store ~user input

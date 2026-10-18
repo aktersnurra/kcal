@@ -16,8 +16,7 @@ module type S = sig
   val update_meal : t -> user:User.t -> Meal_id.t -> Meal.patch -> (Meal.t, Error.t) result
   val delete_meal : t -> user:User.t -> Meal_id.t -> (unit, Error.t) result
 
-  val daily_totals :
-    t -> user:User.t -> day_start:Ptime.t -> day_end:Ptime.t -> (Meal.totals, Error.t) result
+  val meals_between : t -> user:User.t -> start:Ptime.t -> stop:Ptime.t -> (Meal.t list, Error.t) result
 
   val create_manual_weigh_in :
     t -> user:User.t -> Weigh_in.manual_create -> (Weigh_in.t, Error.t) result
@@ -35,6 +34,7 @@ module type S = sig
     t -> user:User.t -> Weigh_in_id.t -> Weigh_in.patch -> (Weigh_in.t, Error.t) result
   val delete_weigh_in : t -> user:User.t -> Weigh_in_id.t -> (unit, Error.t) result
 
+  val weigh_ins_between : t -> user:User.t -> start:Ptime.t -> stop:Ptime.t -> (Weigh_in.t list, Error.t) result
   val latest_weigh_in : t -> user:User.t -> (Weigh_in.t, Error.t) result
 
   val create_withings_oauth_state :

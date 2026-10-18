@@ -1,119 +1,160 @@
-(* Pure aggregation over already-fetched meals and weigh-ins.  Instants are
-   bucketed into calendar days of the caller's [zone]. *)
+module Calorie_target = struct
+  type t = int
+  let of_kcal kcal = if kcal > 0 then Some kcal else None
+end
 
-type day = {
-  date : string;
-  meal_count : int;
-  calories_kcal : int;
-  protein_g : float;
-  carbs_g : float option;
-  fat_g : float option;
-}
+module Protein_target = struct
+  type t = float
+  let of_g g = if g > 0.0 then Some g else None
+end
+
+type daily_weight = { weigh_in_count : int; mean_weight_kg : float }
+type day = { date : Date.t; meals : Meal.totals option; weight : daily_weight option }
 
 let add_optional left right =
   match left, right with
   | None, other | other, None -> other
   | Some a, Some b -> Some (a +. b)
 
-let empty_day date =
-  { date; meal_count = 0; calories_kcal = 0; protein_g = 0.0; carbs_g = None; fat_g = None }
+let add_meal (meal : Meal.t) : Meal.totals option -> Meal.totals = function
+  | None ->
+      { meal_count = 1; calories_kcal = meal.calories_kcal; protein_g = meal.protein_g;
+        carbs_g = meal.carbs_g; fat_g = meal.fat_g }
+  | Some totals ->
+      { meal_count = totals.meal_count + 1;
+        calories_kcal = totals.calories_kcal + meal.calories_kcal;
+        protein_g = totals.protein_g +. meal.protein_g;
+        carbs_g = add_optional totals.carbs_g meal.carbs_g;
+        fat_g = add_optional totals.fat_g meal.fat_g }
 
-(* One entry per date in [dates], in order, including days with no meals. *)
-let daily_series ~zone ~dates (meals : Meal.t list) =
-  let days = Hashtbl.create 64 in
-  List.iter (fun date -> Hashtbl.replace days date (empty_day date)) dates;
-  List.iter
-    (fun (meal : Meal.t) ->
-      let date = Time.local_date_string zone meal.eaten_at in
-      match Hashtbl.find_opt days date with
-      | None -> ()
-      | Some day ->
-          Hashtbl.replace days date
-            { day with
-              meal_count = day.meal_count + 1;
-              calories_kcal = day.calories_kcal + meal.calories_kcal;
-              protein_g = day.protein_g +. meal.protein_g;
-              carbs_g = add_optional day.carbs_g meal.carbs_g;
-              fat_g = add_optional day.fat_g meal.fat_g })
-    meals;
-  List.map (fun date -> Hashtbl.find days date) dates
+let add_weigh_in (weigh_in : Weigh_in.t) = function
+  | None -> { weigh_in_count = 1; mean_weight_kg = weigh_in.weight_kg }
+  | Some { weigh_in_count; mean_weight_kg } ->
+      let weigh_in_count = weigh_in_count + 1 in
+      { weigh_in_count;
+        mean_weight_kg = mean_weight_kg +. ((weigh_in.weight_kg -. mean_weight_kg) /. float_of_int weigh_in_count) }
 
-type intake = {
-  days : int;
-  logged_days : int;
-  avg_calories_kcal : float option;
-  avg_protein_g : float option;
-  days_at_or_under_calorie_target : int option;
-  days_at_or_over_protein_target : int option;
-}
+module Date_map = Map.Make (Date)
 
-(* Averages and target hit-counts cover only days with at least one meal;
-   a day with nothing logged is unknown, not zero intake. *)
-let intake ?calorie_target ?protein_target series =
-  let logged = List.filter (fun day -> day.meal_count > 0) series in
-  let logged_days = List.length logged in
-  let average f =
-    if logged_days = 0 then None
-    else Some (List.fold_left (fun sum day -> sum +. f day) 0.0 logged /. float_of_int logged_days)
-  in
-  let count predicate = List.length (List.filter predicate logged) in
-  { days = List.length series;
-    logged_days;
-    avg_calories_kcal = average (fun day -> float_of_int day.calories_kcal);
-    avg_protein_g = average (fun day -> day.protein_g);
-    days_at_or_under_calorie_target =
-      Option.map (fun target -> count (fun day -> day.calories_kcal <= target)) calorie_target;
-    days_at_or_over_protein_target =
-      Option.map (fun target -> count (fun day -> day.protein_g >= target)) protein_target }
+(* Folds each record into the entry for its local date, if that date is in range. *)
+let bucket zone range ~instant ~add records =
+  List.fold_left
+    (fun buckets record ->
+      let date = Time.local_date zone (instant record) in
+      if Date_range.mem range date then Date_map.update date (fun entry -> Some (add record entry)) buckets else buckets)
+    Date_map.empty records
 
-type weight_trend = {
-  weigh_in_count : int;
-  first_kg : float;
-  last_kg : float;
-  change_kg : float;
-  span_days : float;
-  slope_kg_per_week : float option;
-}
+let daily_series zone range ~meals ~weigh_ins =
+  let meal_totals = bucket zone range ~instant:(fun (meal : Meal.t) -> meal.eaten_at) ~add:add_meal meals in
+  let weights = bucket zone range ~instant:(fun (weigh_in : Weigh_in.t) -> weigh_in.measured_at) ~add:add_weigh_in weigh_ins in
+  List.map
+    (fun date -> { date; meals = Date_map.find_opt date meal_totals; weight = Date_map.find_opt date weights })
+    (Date_range.dates range)
 
-let seconds_per_day = 86400.0
+type logged_intake = { logged_day_count : int; avg_calories_kcal : float; avg_protein_g : float }
+type 'target target_result = { target : 'target; days_met : int }
 
-(* Ordinary least squares of weight against time over weigh-ins whose local
-   date is in [dates].  [None] when there are none. *)
-let weight_trend ~zone ~dates (weights : Weigh_in.t list) =
-  let in_range (weight : Weigh_in.t) = List.mem (Time.local_date_string zone weight.measured_at) dates in
-  let sorted =
-    List.sort (fun (a : Weigh_in.t) (b : Weigh_in.t) -> Ptime.compare a.measured_at b.measured_at)
-      (List.filter in_range weights)
-  in
-  match sorted with
+let logged_intake (logged : Meal.totals list) =
+  match logged with
   | [] -> None
-  | first :: _ ->
-      let last = List.nth sorted (List.length sorted - 1) in
-      let origin = Ptime.to_float_s first.measured_at in
-      let points =
-        List.map (fun (w : Weigh_in.t) -> ((Ptime.to_float_s w.measured_at -. origin) /. seconds_per_day, w.weight_kg)) sorted
-      in
-      let n = float_of_int (List.length points) in
-      let mean f = List.fold_left (fun sum p -> sum +. f p) 0.0 points /. n in
-      let mean_x = mean fst and mean_y = mean snd in
-      let sxx = List.fold_left (fun sum (x, _) -> sum +. ((x -. mean_x) ** 2.)) 0.0 points in
-      let sxy = List.fold_left (fun sum (x, y) -> sum +. ((x -. mean_x) *. (y -. mean_y))) 0.0 points in
-      let span_days = (Ptime.to_float_s last.measured_at -. origin) /. seconds_per_day in
-      Some
-        { weigh_in_count = List.length sorted;
-          first_kg = first.weight_kg;
-          last_kg = last.weight_kg;
-          change_kg = last.weight_kg -. first.weight_kg;
-          span_days;
-          slope_kg_per_week = (if sxx > 0.0 then Some (sxy /. sxx *. 7.0) else None) }
+  | _ ->
+      let logged_day_count = List.length logged in
+      let average value = List.fold_left (fun sum totals -> sum +. value totals) 0.0 logged /. float_of_int logged_day_count in
+      Some { logged_day_count;
+             avg_calories_kcal = average (fun (totals : Meal.totals) -> float_of_int totals.calories_kcal);
+             avg_protein_g = average (fun (totals : Meal.totals) -> totals.protein_g) }
 
+let target_result logged ~is_met target =
+  { target; days_met = List.length (List.filter (is_met target) logged) }
+
+type weight_trend =
+  | Single_reading of { weight_kg : float; measured_at : Ptime.t }
+  | Trend of {
+      weigh_in_count : int;
+      first_kg : float;
+      last_kg : float;
+      change_kg : float;
+      span_days : float;
+      slope_kg_per_week : float;
+    }
+
+let days_since origin time = Ptime.Span.to_float_s (Ptime.diff time origin) /. float_of_int Time.seconds_per_day
+
+(* Simple linear regression of weight on time: the least-squares slope is
+   Sxy / Sxx over the points' deviations from their means. *)
+let least_squares_slope points =
+  let count = float_of_int (List.length points) in
+  let mean value = List.fold_left (fun sum point -> sum +. value point) 0.0 points /. count in
+  let mean_x = mean fst and mean_y = mean snd in
+  let sxx = List.fold_left (fun sum (x, _) -> sum +. ((x -. mean_x) ** 2.)) 0.0 points in
+  let sxy = List.fold_left (fun sum (x, y) -> sum +. ((x -. mean_x) *. (y -. mean_y))) 0.0 points in
+  sxy /. sxx
+
+let weight_trend zone range (weigh_ins : Weigh_in.t list) =
+  let in_range (weigh_in : Weigh_in.t) = Date_range.mem range (Time.local_date zone weigh_in.measured_at) in
+  let sorted =
+    List.stable_sort (fun (a : Weigh_in.t) (b : Weigh_in.t) -> Ptime.compare a.measured_at b.measured_at)
+      (List.filter in_range weigh_ins)
+  in
+  match sorted, List.rev sorted with
+  | [], _ | _, [] -> None
+  | first :: _, last :: _ ->
+      let span_days = days_since first.measured_at last.measured_at in
+      (* With no time between the readings there is nothing to fit a slope to. *)
+      if span_days <= 0.0 then Some (Single_reading { weight_kg = last.weight_kg; measured_at = last.measured_at })
+      else
+        let points = List.map (fun (w : Weigh_in.t) -> (days_since first.measured_at w.measured_at, w.weight_kg)) sorted in
+        Some
+          (Trend
+             { weigh_in_count = List.length sorted;
+               first_kg = first.weight_kg;
+               last_kg = last.weight_kg;
+               change_kg = last.weight_kg -. first.weight_kg;
+               span_days;
+               slope_kg_per_week = least_squares_slope points *. 7.0 })
+
+type maintenance_unavailable =
+  | No_intake_logged
+  | No_weight_trend
+  | Span_too_short of { span_days : float; required_days : float }
+
+type implied_maintenance = Estimate of { kcal : float } | Unavailable of maintenance_unavailable
+
+(* The 3500 kcal/lb rule of thumb (Wishnofsky, 1958) in metric.  Hall et al.
+   (Int J Obes, 2008) show it overstates long-run change, so the estimate is
+   a rough guide, best over a few weeks. *)
 let kcal_per_kg = 7700.0
+let required_span_days = 7.0
 
 (* Intake that would hold weight steady: average intake minus the energy
-   stored in (or released by) the weight trend.  Needs a week of weigh-ins to
-   be meaningful, and is only as accurate as the logging is complete. *)
-let implied_maintenance_kcal intake trend =
-  match intake.avg_calories_kcal, trend with
-  | Some average, Some { slope_kg_per_week = Some slope; span_days; _ } when span_days >= 7.0 ->
-      Some (average -. (slope /. 7.0 *. kcal_per_kg))
-  | _ -> None
+   stored in (or released by) the weight trend. *)
+let implied_maintenance logged_intake weight_trend =
+  match logged_intake, weight_trend with
+  | None, _ -> Unavailable No_intake_logged
+  | Some _, (None | Some (Single_reading _)) -> Unavailable No_weight_trend
+  | Some _, Some (Trend { span_days; _ }) when span_days < required_span_days ->
+      Unavailable (Span_too_short { span_days; required_days = required_span_days })
+  | Some { avg_calories_kcal; _ }, Some (Trend { slope_kg_per_week; _ }) ->
+      Estimate { kcal = avg_calories_kcal -. (slope_kg_per_week /. 7.0 *. kcal_per_kg) }
+
+type t = {
+  day_count : int;
+  logged_intake : logged_intake option;
+  calorie_target : Calorie_target.t target_result option;
+  protein_target : Protein_target.t target_result option;
+  weight_trend : weight_trend option;
+  implied_maintenance : implied_maintenance;
+}
+
+let summarise ?calorie_target ?protein_target zone range ~meals ~weigh_ins =
+  let logged = List.filter_map (fun day -> day.meals) (daily_series zone range ~meals ~weigh_ins:[]) in
+  let logged_intake = logged_intake logged in
+  let weight_trend = weight_trend zone range weigh_ins in
+  { day_count = Date_range.day_count range;
+    logged_intake;
+    calorie_target =
+      Option.map (target_result logged ~is_met:(fun target (totals : Meal.totals) -> totals.calories_kcal <= target)) calorie_target;
+    protein_target =
+      Option.map (target_result logged ~is_met:(fun target (totals : Meal.totals) -> totals.protein_g >= target)) protein_target;
+    weight_trend;
+    implied_maintenance = implied_maintenance logged_intake weight_trend }

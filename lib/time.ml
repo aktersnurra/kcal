@@ -8,103 +8,82 @@ let parse_offset_datetime value =
 
 let to_utc_string time = Ptime.to_rfc3339 ~frac_s:0 ~tz_offset_s:0 time
 
-let to_date_string time =
-  let (year, month, day), _ = Ptime.to_date_time ~tz_offset_s:0 time in
-  Printf.sprintf "%04d-%02d-%02d" year month day
+let seconds_per_day = 86400
 
-(* A bare calendar date (no time-of-day or offset), interpreted as UTC midnight. *)
-let parse_date value =
-  match String.length value, String.split_on_char '-' value with
-  | 10, [ year; month; day ]
-    when String.length year = 4 && String.length month = 2 && String.length day = 2 -> (
-      try
-        match Ptime.of_date_time ((int_of_string year, int_of_string month, int_of_string day), ((0, 0, 0), 0)) with
-        | Some time -> Ok time
-        | None -> Error invalid_timestamp
-      with Failure _ -> Error invalid_timestamp)
-  | _ -> Error invalid_timestamp
+(* No tz database is linked in, so a zone is either a fixed UTC offset or one
+   of the three EU standard times with EU summer time. *)
+type eu_standard_time = Wet | Cet | Eet
+type rule = Fixed of { utc_offset_s : int } | Eu_summer_time of eu_standard_time
+type zone = { name : string; rule : rule }
 
-(* [start, stop) UTC calendar-day bounds covering [time]. *)
-let day_bounds time =
-  let (year, month, day), _ = Ptime.to_date_time ~tz_offset_s:0 time in
-  let start = Option.get (Ptime.of_date_time ((year, month, day), ((0, 0, 0), 0))) in
-  let stop = Option.get (Ptime.add_span start (Ptime.Span.of_int_s 86400)) in
-  (start, stop)
+let utc = { name = "UTC"; rule = Fixed { utc_offset_s = 0 } }
 
-(* Time zones for bucketing instants into calendar days.  No tz database is
-   linked in, so a zone is either a fixed UTC offset or a fixed standard offset
-   with the EU summer-time rules (last Sunday of March to last Sunday of
-   October, switching at 01:00 UTC). *)
-type zone = Fixed of int | Eu of int
+let named_rules =
+  [ ("UTC", Fixed { utc_offset_s = 0 });
+    ("Europe/London", Eu_summer_time Wet); ("Europe/Dublin", Eu_summer_time Wet); ("Europe/Lisbon", Eu_summer_time Wet);
+    ("Europe/Stockholm", Eu_summer_time Cet); ("Europe/Oslo", Eu_summer_time Cet); ("Europe/Copenhagen", Eu_summer_time Cet);
+    ("Europe/Berlin", Eu_summer_time Cet); ("Europe/Amsterdam", Eu_summer_time Cet); ("Europe/Brussels", Eu_summer_time Cet);
+    ("Europe/Paris", Eu_summer_time Cet); ("Europe/Madrid", Eu_summer_time Cet); ("Europe/Rome", Eu_summer_time Cet);
+    ("Europe/Vienna", Eu_summer_time Cet); ("Europe/Zurich", Eu_summer_time Cet); ("Europe/Prague", Eu_summer_time Cet);
+    ("Europe/Warsaw", Eu_summer_time Cet);
+    ("Europe/Helsinki", Eu_summer_time Eet); ("Europe/Athens", Eu_summer_time Eet); ("Europe/Kyiv", Eu_summer_time Eet) ]
 
-let utc = Fixed 0
+let supported_zone_names = List.map fst named_rules
+let max_fixed_offset_s = 14 * 3600
 
-let named_zones =
-  [ ("UTC", Fixed 0);
-    ("Europe/London", Eu 0); ("Europe/Dublin", Eu 0); ("Europe/Lisbon", Eu 0);
-    ("Europe/Stockholm", Eu 3600); ("Europe/Oslo", Eu 3600); ("Europe/Copenhagen", Eu 3600);
-    ("Europe/Berlin", Eu 3600); ("Europe/Amsterdam", Eu 3600); ("Europe/Brussels", Eu 3600);
-    ("Europe/Paris", Eu 3600); ("Europe/Madrid", Eu 3600); ("Europe/Rome", Eu 3600);
-    ("Europe/Vienna", Eu 3600); ("Europe/Zurich", Eu 3600); ("Europe/Prague", Eu 3600);
-    ("Europe/Warsaw", Eu 3600);
-    ("Europe/Helsinki", Eu 7200); ("Europe/Athens", Eu 7200); ("Europe/Kyiv", Eu 7200) ]
-
-let invalid_zone = Error.Invalid_input "invalid timezone"
-
-(* Accepts a supported IANA name or a fixed offset such as "Z", "+02:00". *)
 let parse_zone value =
-  match List.assoc_opt value named_zones with
-  | Some zone -> Ok zone
+  match List.assoc_opt value named_rules with
+  | Some rule -> Ok { name = value; rule }
   | None -> (
       match Ptime.of_rfc3339 ~strict:true ("2000-01-01T00:00:00" ^ value) with
-      | Ok (_, Some offset, _) when abs offset <= 14 * 3600 -> Ok (Fixed offset)
-      | _ -> Error invalid_zone)
+      | Ok (_, Some utc_offset_s, _) when abs utc_offset_s <= max_fixed_offset_s -> Ok { name = value; rule = Fixed { utc_offset_s } }
+      | _ -> Error (Error.Unsupported_timezone value))
 
-let shift time seconds = Option.get (Ptime.add_span time (Ptime.Span.of_int_s seconds))
+let zone_name zone = zone.name
 
-let eu_transition year month =
-  let at day = Option.get (Ptime.of_date_time ((year, month, day), ((1, 0, 0), 0))) in
-  let days_back =
-    match Ptime.weekday (at 31) with
+let add_seconds time ~seconds =
+  match Ptime.add_span time (Ptime.Span.of_int_s seconds) with
+  | Some time -> time
+  | None -> invalid_arg "Time.add_seconds: result is outside Ptime's range"
+
+let standard_offset_s = function Wet -> 0 | Cet -> 3600 | Eet -> 7200
+
+type eu_switch = Spring_forward | Fall_back
+
+(* Directive 2000/84/EC: summer time begins and ends at 01:00 UTC on the last
+   Sunday of March and of October respectively. *)
+let eu_summer_time_switch year switch =
+  let month = match switch with Spring_forward -> 3 | Fall_back -> 10 in
+  let at_0100_utc day =
+    match Ptime.of_date_time ((year, month, day), ((1, 0, 0), 0)) with
+    | Some time -> time
+    | None -> invalid_arg "Time.eu_summer_time_switch: year is outside Ptime's calendar"
+  in
+  (* March and October both have 31 days. *)
+  let days_after_last_sunday =
+    match Ptime.weekday (at_0100_utc 31) with
     | `Sun -> 0 | `Mon -> 1 | `Tue -> 2 | `Wed -> 3 | `Thu -> 4 | `Fri -> 5 | `Sat -> 6
   in
-  at (31 - days_back)
+  at_0100_utc (31 - days_after_last_sunday)
 
-(* Seconds east of UTC in effect at the instant [time]. *)
-let offset_at zone time =
-  match zone with
-  | Fixed offset -> offset
-  | Eu standard ->
+let utc_offset_s_at zone time =
+  match zone.rule with
+  | Fixed { utc_offset_s } -> utc_offset_s
+  | Eu_summer_time standard ->
       let (year, _, _), _ = Ptime.to_date_time time in
-      if Ptime.compare time (eu_transition year 3) >= 0 && Ptime.compare time (eu_transition year 10) < 0
-      then standard + 3600
-      else standard
+      let in_summer_time =
+        Ptime.compare time (eu_summer_time_switch year Spring_forward) >= 0
+        && Ptime.compare time (eu_summer_time_switch year Fall_back) < 0
+      in
+      standard_offset_s standard + if in_summer_time then 3600 else 0
 
-let date_string_of_triple (year, month, day) = Printf.sprintf "%04d-%02d-%02d" year month day
+let local_date zone time = Date.of_instant ~utc_offset_s:(utc_offset_s_at zone time) time
 
-(* The calendar date, as YYYY-MM-DD, that [time] falls on in [zone]. *)
-let local_date_string zone time =
-  let date, _ = Ptime.to_date_time ~tz_offset_s:(offset_at zone time) time in
-  date_string_of_triple date
-
-(* The UTC instant at which the local calendar day starting at [date] (a bare
-   date, as returned by [parse_date]) begins in [zone]. *)
+(* The offset in effect at the date's UTC midnight is the offset in effect at
+   its local midnight: fixed offsets never change, and EU local midnight falls
+   between 21:00 and 00:00 UTC while the switches happen at 01:00 UTC. *)
 let local_midnight zone date =
-  let guess = shift date (-offset_at zone date) in
-  shift date (-offset_at zone guess)
+  let midnight_utc = Date.midnight_utc date in
+  add_seconds midnight_utc ~seconds:(-utc_offset_s_at zone midnight_utc)
 
-(* [start, stop) UTC bounds of the local calendar day [date] in [zone]. *)
-let local_day_bounds zone date = (local_midnight zone date, local_midnight zone (shift date 86400))
-
-let max_range_days = 366
-
-(* Every calendar date from [from_date] to [to_date] inclusive, as YYYY-MM-DD. *)
-let date_range ~from_date ~to_date =
-  match parse_date from_date, parse_date to_date with
-  | Ok first, Ok last ->
-      let days = int_of_float (Ptime.Span.to_float_s (Ptime.diff last first) /. 86400.) + 1 in
-      if days < 1 || days > max_range_days then Error (Error.Invalid_input "invalid date range")
-      else
-        Ok (List.init days (fun index ->
-          date_string_of_triple (Ptime.to_date (shift first (index * 86400)))))
-  | Error e, _ | _, Error e -> Error e
+let local_day_bounds zone date = (local_midnight zone date, local_midnight zone (Date.add_days date 1))

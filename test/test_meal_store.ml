@@ -77,42 +77,22 @@ let test_locked_meal_get_and_update_are_storage_errors () =
       Alcotest.(check bool) "locked update is sanitized" true
         (is_storage_error (Store_sqlite.update_meal store ~user meal.id patch)))
 
-let test_daily_totals_aggregates_meals_within_the_utc_day () =
+let test_meals_between_is_half_open_and_skips_deleted () =
   let store, user = Test_support.store_with_user () in
   let at value = Result.get_ok (Time.parse_offset_datetime value) in
-  let first =
-    Result.get_ok (Store_sqlite.create_meal store ~user (Test_support.meal_input ~eaten_at:(at "2026-09-22T08:00:00Z") ()))
-  in
-  let second =
-    Result.get_ok
-      (Store_sqlite.create_meal store ~user
-         Meal.{ (Test_support.meal_input ~eaten_at:(at "2026-09-22T20:00:00Z") ()) with calories_kcal = 400; protein_g = 30.0; carbs_g = None; fat_g = Some 10.0 })
-  in
-  (* Outside the UTC day on either side; must not be counted. *)
-  ignore (Result.get_ok (Store_sqlite.create_meal store ~user (Test_support.meal_input ~eaten_at:(at "2026-09-23T00:00:00Z") ())));
-  ignore (Result.get_ok (Store_sqlite.create_meal store ~user (Test_support.meal_input ~eaten_at:(at "2026-09-21T23:59:59Z") ())));
-  let day_start, day_end = Time.day_bounds (at "2026-09-22T12:00:00Z") in
-  let totals = Result.get_ok (Store_sqlite.daily_totals store ~user ~day_start ~day_end) in
-  Alcotest.(check int) "meal count" 2 totals.meal_count;
-  Alcotest.(check int) "calories summed" (250 + 400) totals.calories_kcal;
-  Alcotest.(check (float 0.0001)) "protein summed" (12.0 +. 30.0) totals.protein_g;
-  Alcotest.(check (option (float 0.0001))) "carbs summed over present values only" (Some 20.0) totals.carbs_g;
-  Alcotest.(check (option (float 0.0001))) "fat summed over present values only" (Some 15.0) totals.fat_g;
+  let create value = Result.get_ok (Store_sqlite.create_meal store ~user (Test_support.meal_input ~eaten_at:(at value) ())) in
+  let first = create "2026-09-22T00:00:00Z" in
+  let second = create "2026-09-22T20:00:00Z" in
+  (* Just outside [start, stop) on either side; must not be returned. *)
+  ignore (create "2026-09-23T00:00:00Z");
+  ignore (create "2026-09-21T23:59:59Z");
+  let start = at "2026-09-22T00:00:00Z" and stop = at "2026-09-23T00:00:00Z" in
+  let ids () = List.map (fun (meal : Meal.t) -> Meal_id.to_string meal.id) (Result.get_ok (Store_sqlite.meals_between store ~user ~start ~stop)) in
+  Alcotest.(check (list string)) "in range, oldest first" [ Meal_id.to_string first.id; Meal_id.to_string second.id ] (ids ());
   Result.get_ok (Store_sqlite.delete_meal store ~user second.id);
-  let totals_after_delete = Result.get_ok (Store_sqlite.daily_totals store ~user ~day_start ~day_end) in
-  Alcotest.(check int) "deleted meal excluded" 1 totals_after_delete.meal_count;
-  Alcotest.(check int) "deleted meal's calories excluded" 250 totals_after_delete.calories_kcal;
-  ignore first
-
-let test_daily_totals_are_null_and_zero_for_an_empty_day () =
-  let store, user = Test_support.store_with_user () in
-  let day_start, day_end = Time.day_bounds (Result.get_ok (Time.parse_offset_datetime "2026-09-22T12:00:00Z")) in
-  let totals = Result.get_ok (Store_sqlite.daily_totals store ~user ~day_start ~day_end) in
-  Alcotest.(check int) "no meals" 0 totals.meal_count;
-  Alcotest.(check int) "zero calories" 0 totals.calories_kcal;
-  Alcotest.(check (float 0.0001)) "zero protein" 0.0 totals.protein_g;
-  Alcotest.(check (option (float 0.0001))) "no carbs" None totals.carbs_g;
-  Alcotest.(check (option (float 0.0001))) "no fat" None totals.fat_g
+  Alcotest.(check (list string)) "deleted meal excluded" [ Meal_id.to_string first.id ] (ids ());
+  let empty_start = at "2026-09-25T00:00:00Z" and empty_stop = at "2026-09-26T00:00:00Z" in
+  Alcotest.(check int) "empty range" 0 (List.length (Result.get_ok (Store_sqlite.meals_between store ~user ~start:empty_start ~stop:empty_stop)))
 
 let test_rejects_invalid_limit () =
   let store, user = Test_support.store_with_user () in
@@ -141,9 +121,7 @@ let () =
           Alcotest.test_case "locked meal get and update are sanitized" `Quick
             test_locked_meal_get_and_update_are_storage_errors;
           Alcotest.test_case "invalid query limits are rejected" `Quick test_rejects_invalid_limit;
-          Alcotest.test_case "daily totals aggregate meals within the UTC day" `Quick
-            test_daily_totals_aggregates_meals_within_the_utc_day;
-          Alcotest.test_case "daily totals are null and zero for an empty day" `Quick
-            test_daily_totals_are_null_and_zero_for_an_empty_day;
+          Alcotest.test_case "meals between is half-open and skips deleted meals" `Quick
+            test_meals_between_is_half_open_and_skips_deleted;
         ] );
     ]

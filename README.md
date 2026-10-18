@@ -50,6 +50,32 @@ Set `KCAL_LOG_LEVEL` to `debug`, `info` (default), `warning`, `error`, or `quiet
 
 `query_meals` and `query_weights` accept `from`/`to` (RFC 3339 UTC timestamps, inclusive) and `limit` (default 100, max 500) to scope a query instead of relying on `limit` alone; results are ordered oldest first. Every tool's JSON schema (via `tools/list`) now carries a description of its parameters, including this.
 
+Aggregate tools avoid client-side arithmetic over raw records:
+
+- `get_daily_totals(date?, timezone?)` — one day's row: `date`, `meal_count`, summed `calories_kcal`, `protein_g`, `carbs_g`, `fat_g`, plus `weigh_in_count` and `mean_weight_kg` (`date` as `YYYY-MM-DD`; defaults to today in `timezone`). On a day with no meals, `meal_count` is 0 and the intake fields are `null`: nothing logged means unknown, not zero. `carbs_g`/`fat_g` are also `null` when no meal that day recorded that macro, and `mean_weight_kg` is `null` without a weigh-in.
+- `get_daily_series(from_date, to_date?, timezone?)` — that row for every calendar date in a range (up to 366 days, oldest first), with the range and timezone echoed back. This is the time series of intake against weight.
+- `get_summary(from_date, to_date?, timezone?, calorie_target_kcal?, protein_target_g?)` — over a range:
+  - `avg_calories_kcal` / `avg_protein_g` over the `logged_day_count` days with a meal (of `day_count`);
+  - `calorie_target` / `protein_target`, when requested, echo the target with `days_at_or_under` / `days_at_or_over`;
+  - `weight_trend`: `null` without weigh-ins, `kind: "single_reading"` for one, or `kind: "trend"` with `first_kg`, `last_kg`, `change_kg`, `span_days` and a least-squares `slope_kg_per_week`;
+  - `implied_maintenance`: `{"kcal": …}` (average intake minus the energy in the weight trend, at 7700 kcal/kg), or `{"kcal": null, "unavailable_reason": …}` with `no_intake_logged`, `no_weight_trend` or `weigh_in_span_too_short` (first and last weigh-in less than 7 days apart). It is only as reliable as the logging is complete.
+
+These three tools take an optional `timezone` that defines where calendar days begin and end: a fixed UTC offset such as `+02:00`, or an IANA name from a built-in table of European zones with EU summer time (e.g. `Europe/Stockholm`). It defaults to UTC. There is no tz database dependency, so other IANA names are rejected.
+
+Argument mistakes the model can fix — a malformed date, an unsupported timezone (the message lists the supported ones), a reversed or over-long range, a non-positive target — come back as a tool result with `isError: true` and an explanation, rather than a bare JSON-RPC "Invalid params".
+
+- `get_latest_weight()` — the single most recent weigh-in (manual or Withings-imported), instead of paging through `query_weights` to find it.
+
+## Logging
+
+`kcal` logs to stderr through [`logs`](https://erratique.ch/software/logs), with one line per event: a UTC timestamp, level, source name (e.g. `kcal.http`, `kcal.mcp`, `kcal.oidc`, `kcal.withings.sync`, `kcal.withings.transport`, `kcal.store`), and message. HTTP request lines and MCP call outcomes are always logged; OIDC discovery/verification failures, Withings OAuth, transport and sync failures, and unexpected SQLite errors are logged with enough detail to diagnose them without ever including tokens, secrets, or credentials.
+
+Set `KCAL_LOG_LEVEL` to `debug`, `info` (default), `warning`, `error`, or `quiet` to control verbosity.
+
+## MCP tools
+
+`query_meals` and `query_weights` accept `from`/`to` (RFC 3339 UTC timestamps, inclusive) and `limit` (default 100, max 500) to scope a query instead of relying on `limit` alone; results are ordered oldest first. Every tool's JSON schema (via `tools/list`) now carries a description of its parameters, including this.
+
 Two aggregate tools avoid client-side arithmetic over raw records:
 
 - `get_daily_totals(date?)` — summed `calories_kcal`, `protein_g`, `carbs_g`, `fat_g`, and a `meal_count` for all meals on a given calendar day (`date` as `YYYY-MM-DD`; defaults to today in `timezone`, UTC if none). `carbs_g`/`fat_g` are `null` when no matching meal recorded that macro.

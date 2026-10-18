@@ -57,39 +57,62 @@ let meal_json (meal : Meal.t) =
     ("notes", json_option (fun v -> `String v) meal.notes);
     ("created_at", `String (Time.to_utc_string meal.created_at)); ("updated_at", `String (Time.to_utc_string meal.updated_at)) ]
 
-let totals_json ~date (totals : Meal.totals) =
+let float_json value = `Float value
+
+(* One row per local date.  Unlogged days keep meal_count 0 but report null
+   intake, since nothing logged means unknown, not zero. *)
+let day_json (day : Summary.day) =
+  let meals = day.meals and weight = day.weight in
   `Assoc [
-    ("date", `String date); ("meal_count", `Int totals.meal_count);
-    ("calories_kcal", `Int totals.calories_kcal); ("protein_g", `Float totals.protein_g);
-    ("carbs_g", json_option (fun v -> `Float v) totals.carbs_g);
-    ("fat_g", json_option (fun v -> `Float v) totals.fat_g) ]
+    ("date", `String (Date.to_string day.date));
+    ("meal_count", `Int (Option.fold ~none:0 ~some:(fun (totals : Meal.totals) -> totals.meal_count) meals));
+    ("calories_kcal", json_option (fun (totals : Meal.totals) -> `Int totals.calories_kcal) meals);
+    ("protein_g", json_option (fun (totals : Meal.totals) -> `Float totals.protein_g) meals);
+    ("carbs_g", json_option float_json (Option.bind meals (fun (totals : Meal.totals) -> totals.carbs_g)));
+    ("fat_g", json_option float_json (Option.bind meals (fun (totals : Meal.totals) -> totals.fat_g)));
+    ("weigh_in_count", `Int (Option.fold ~none:0 ~some:(fun (w : Summary.daily_weight) -> w.weigh_in_count) weight));
+    ("mean_weight_kg", json_option (fun (w : Summary.daily_weight) -> `Float w.mean_weight_kg) weight) ]
 
-let day_json (day : Summary.day) = totals_json ~date:day.date
-  Meal.{ meal_count = day.meal_count; calories_kcal = day.calories_kcal; protein_g = day.protein_g;
-         carbs_g = day.carbs_g; fat_g = day.fat_g }
-
-let float_option_json = json_option (fun v -> `Float v)
-let int_option_json = json_option (fun v -> `Int v)
+let range_json zone range =
+  [ ("from_date", `String (Date.to_string (Date_range.first range)));
+    ("to_date", `String (Date.to_string (Date_range.last range)));
+    ("timezone", `String (Time.zone_name zone)) ]
 
 let weight_trend_json = function
   | None -> `Null
-  | Some (trend : Summary.weight_trend) ->
-      `Assoc [ ("weigh_in_count", `Int trend.weigh_in_count); ("first_kg", `Float trend.first_kg);
-               ("last_kg", `Float trend.last_kg); ("change_kg", `Float trend.change_kg);
-               ("span_days", `Float trend.span_days);
-               ("slope_kg_per_week", float_option_json trend.slope_kg_per_week) ]
+  | Some (Summary.Single_reading { weight_kg; measured_at }) ->
+      `Assoc [ ("kind", `String "single_reading"); ("weight_kg", `Float weight_kg);
+               ("measured_at", `String (Time.to_utc_string measured_at)) ]
+  | Some (Summary.Trend trend) ->
+      `Assoc [ ("kind", `String "trend"); ("weigh_in_count", `Int trend.weigh_in_count);
+               ("first_kg", `Float trend.first_kg); ("last_kg", `Float trend.last_kg);
+               ("change_kg", `Float trend.change_kg); ("span_days", `Float trend.span_days);
+               ("slope_kg_per_week", `Float trend.slope_kg_per_week) ]
 
-let summary_json ~dates (intake : Summary.intake) trend maintenance =
-  `Assoc [
-    ("from_date", `String (List.hd dates));
-    ("to_date", `String (List.nth dates (List.length dates - 1)));
-    ("days", `Int intake.days); ("logged_days", `Int intake.logged_days);
-    ("avg_calories_kcal", float_option_json intake.avg_calories_kcal);
-    ("avg_protein_g", float_option_json intake.avg_protein_g);
-    ("days_at_or_under_calorie_target", int_option_json intake.days_at_or_under_calorie_target);
-    ("days_at_or_over_protein_target", int_option_json intake.days_at_or_over_protein_target);
-    ("weight", weight_trend_json trend);
-    ("implied_maintenance_kcal", float_option_json maintenance) ]
+(* Always carries "kcal"; when it is null, "unavailable_reason" says why. *)
+let implied_maintenance_json = function
+  | Summary.Estimate { kcal } -> `Assoc [ ("kcal", `Float kcal) ]
+  | Summary.Unavailable reason ->
+      let unavailable name details = `Assoc ([ ("kcal", `Null); ("unavailable_reason", `String name) ] @ details) in
+      (match reason with
+      | Summary.No_intake_logged -> unavailable "no_intake_logged" []
+      | Summary.No_weight_trend -> unavailable "no_weight_trend" []
+      | Summary.Span_too_short { span_days; required_days } ->
+          unavailable "weigh_in_span_too_short" [ ("span_days", `Float span_days); ("required_days", `Float required_days) ])
+
+let summary_json zone range (summary : Summary.t) =
+  let logged = summary.logged_intake in
+  `Assoc (range_json zone range @ [
+    ("day_count", `Int summary.day_count);
+    ("logged_day_count", `Int (Option.fold ~none:0 ~some:(fun (l : Summary.logged_intake) -> l.logged_day_count) logged));
+    ("avg_calories_kcal", json_option (fun (l : Summary.logged_intake) -> `Float l.avg_calories_kcal) logged);
+    ("avg_protein_g", json_option (fun (l : Summary.logged_intake) -> `Float l.avg_protein_g) logged);
+    ("calorie_target", json_option (fun (result : Summary.Calorie_target.t Summary.target_result) ->
+        `Assoc [ ("target_kcal", `Int (result.target :> int)); ("days_at_or_under", `Int result.days_met) ]) summary.calorie_target);
+    ("protein_target", json_option (fun (result : Summary.Protein_target.t Summary.target_result) ->
+        `Assoc [ ("target_g", `Float (result.target :> float)); ("days_at_or_over", `Int result.days_met) ]) summary.protein_target);
+    ("weight_trend", weight_trend_json summary.weight_trend);
+    ("implied_maintenance", implied_maintenance_json summary.implied_maintenance) ])
 
 let weight_json (weight : Weigh_in.t) =
   `Assoc [
@@ -105,7 +128,7 @@ let cacheable fields =
 let text_result value =
   complete [ ("content", `List [ `Assoc [ ("type", `String "text"); ("text", `String (Yojson.Safe.to_string value)) ] ]); ("structuredContent", value) ]
 
-let tool_error = complete [ ("content", `List [ `Assoc [ ("type", `String "text"); ("text", `String "record not found") ] ]); ("isError", `Bool true) ]
+let tool_error message = complete [ ("content", `List [ `Assoc [ ("type", `String "text"); ("text", `String message) ] ]); ("isError", `Bool true) ]
 
 let schema properties required =
   `Assoc [ ("type", `String "object"); ("properties", `Assoc properties); ("required", `List (List.map (fun name -> `String name) required)); ("additionalProperties", `Bool false) ]
@@ -145,20 +168,23 @@ let query_properties = [
 ]
 let timezone_property =
   property "timezone"
-    "Time zone that defines calendar-day boundaries: an IANA name (e.g. Europe/Stockholm; common European zones are supported, with EU daylight saving) or a fixed offset such as +02:00. Defaults to UTC."
+    ("Time zone that defines where calendar days begin and end: a fixed UTC offset such as +02:00 or -05:00, or one of these names (EU summer time applied): "
+     ^ String.concat ", " Time.supported_zone_names ^ ". Defaults to UTC; pass the user's zone so late-evening meals land on the right day.")
     string
 let daily_totals_properties = [
-  property "date" "Calendar date as YYYY-MM-DD, in the given timezone. Defaults to today in that timezone if omitted." string;
+  property "date" "Calendar date as YYYY-MM-DD in the given timezone. Defaults to today there." string;
   timezone_property;
 ]
 let range_properties = [
   property "from_date" "First calendar date as YYYY-MM-DD, inclusive." string;
-  property "to_date" "Last calendar date as YYYY-MM-DD, inclusive. Defaults to today in the given timezone. At most 366 days from from_date." string;
+  property "to_date"
+    (Printf.sprintf "Last calendar date as YYYY-MM-DD, inclusive. Defaults to today in the given timezone. The range may cover at most %d days." Date_range.max_day_count)
+    string;
   timezone_property;
 ]
 let summary_properties = range_properties @ [
-  property "calorie_target" "Daily calorie goal in kcal; when given, days_at_or_under_calorie_target counts logged days with a total at or below it." integer;
-  property "protein_target" "Daily protein goal in grams; when given, days_at_or_over_protein_target counts logged days with a total at or above it." number;
+  property "calorie_target_kcal" "Daily calorie goal in kcal (positive). When given, the result counts logged days at or under it." integer;
+  property "protein_target_g" "Daily protein goal in grams (positive). When given, the result counts logged days at or over it." number;
 ]
 
 let tool ?description name input_schema =
@@ -171,15 +197,15 @@ let withings_tools = [
 let tools = [
   tool "record_meal" ~description:"Record a new meal in the nutrition ledger." (schema meal_properties [ "description"; "calories_kcal"; "protein_g" ]);
   tool "get_meal" ~description:"Fetch a single meal by id." (schema id_properties [ "id" ]);
-  tool "query_meals" ~description:"List meals, oldest first, optionally bounded by from/to. For a day's totals, prefer get_daily_totals, which aggregates server-side instead of requiring client-side summation." (schema query_properties []);
+  tool "query_meals" ~description:"List meals, oldest first, optionally bounded by from/to. For a day's totals, prefer get_daily_totals; for intake over several days, get_daily_series or get_summary. Both aggregate server-side instead of requiring client-side summation." (schema query_properties []);
   tool "update_meal" ~description:"Update fields on an existing meal; omitted fields are left unchanged." (schema (id_properties @ meal_properties) [ "id" ]);
   tool "delete_meal" ~description:"Delete a meal." (schema id_properties [ "id" ]);
-  tool "get_daily_totals" ~description:"Aggregate calories, protein, carbs, and fat for all meals on a given calendar day (default: today, in the given timezone, UTC if none). Prefer this over query_meals plus client-side summation." (schema daily_totals_properties []);
-  tool "get_daily_series" ~description:"Daily totals (calories, protein, carbs, fat, meal count) for every calendar date in a range, in one call; days without meals appear with meal_count 0. Use instead of calling get_daily_totals once per day." (schema range_properties [ "from_date" ]);
-  tool "get_summary" ~description:"Analytics over a date range in one call: average calories and protein over days with meals logged, optional counts of days hitting calorie/protein targets, weight trend (first, last, change, least-squares slope in kg/week) and an implied maintenance estimate (average intake minus the energy in the weight trend; only given with at least 7 days of weigh-ins, and only as reliable as the logging is complete)." (schema summary_properties [ "from_date" ]);
+  tool "get_daily_totals" ~description:"One calendar day's intake and weight: date, meal_count, calories_kcal, protein_g, carbs_g, fat_g, weigh_in_count, mean_weight_kg. On a day with no meals, meal_count is 0 and the intake fields are null (unknown, not zero); mean_weight_kg is null without a weigh-in. Prefer this over query_meals plus client-side summation." (schema daily_totals_properties []);
+  tool "get_daily_series" ~description:"The get_daily_totals row (date, meal_count, calories_kcal, protein_g, carbs_g, fat_g, weigh_in_count, mean_weight_kg) for every calendar date in a range, oldest first, in one call, including days with no meals or weigh-ins. Use it to see intake against weight over time, instead of calling get_daily_totals per day or paging query_meals/query_weights." (schema range_properties [ "from_date" ]);
+  tool "get_summary" ~description:"Analytics over a date range in one call. avg_calories_kcal and avg_protein_g average only the logged days (logged_day_count of day_count). calorie_target/protein_target, when requested, count days meeting the goal. weight_trend is null without weigh-ins, kind single_reading for one, or kind trend with first_kg, last_kg, change_kg, span_days and a least-squares slope_kg_per_week. implied_maintenance.kcal is average intake minus the energy in the weight trend (7700 kcal/kg); when it is null, unavailable_reason is no_intake_logged, no_weight_trend or weigh_in_span_too_short (needs 7 days between first and last weigh-in). It is only as reliable as the logging is complete." (schema summary_properties [ "from_date" ]);
   tool "record_weight" ~description:"Record a manual weigh-in." (schema weight_properties [ "weight_kg" ]);
   tool "get_weight" ~description:"Fetch a single weigh-in by id." (schema id_properties [ "id" ]);
-  tool "query_weights" ~description:"List weigh-ins, oldest first, optionally bounded by from/to. For the current weight, prefer get_latest_weight." (schema query_properties []);
+  tool "query_weights" ~description:"List weigh-ins, oldest first, optionally bounded by from/to. For the current weight, prefer get_latest_weight; for weight over time, get_daily_series (daily mean weight) or get_summary (trend and slope)." (schema query_properties []);
   tool "update_weight" ~description:"Update a manual weigh-in; omitted fields are left unchanged." (schema (id_properties @ weight_properties) [ "id" ]);
   tool "delete_weight" ~description:"Delete a weigh-in." (schema id_properties [ "id" ]);
   tool "get_latest_weight" ~description:"Fetch the single most recent weigh-in (manual or Withings-imported), if any." (schema [] []) ] @ withings_tools
@@ -201,35 +227,54 @@ let query fields =
 
 let now () = Option.get (Ptime.of_float_s (Unix.gettimeofday ()))
 
-let optional_zone fields =
+let parse_zone_argument fields =
   let* name = optional_string "timezone" fields in
   match name with None -> Ok Time.utc | Some value -> Time.parse_zone value
 
-(* The requested local day as (date string, UTC start, UTC stop). *)
-let day_bounds_query fields =
+let parse_date_argument name fields =
+  let* value = optional_string name fields in
+  match value with None -> Ok None | Some value -> Result.map Option.some (Date.of_string value)
+
+type range_request = { zone : Time.zone; range : Date_range.t }
+
+let parse_day_request fields =
   let* fields = only_fields (List.map fst daily_totals_properties) (`Assoc fields) in
-  let* zone = optional_zone fields in
-  let* date = optional_string "date" fields in
-  let* day = match date with
-    | None -> Time.parse_date (Time.local_date_string zone (now ()))
-    | Some value -> Time.parse_date value in
-  let start, stop = Time.local_day_bounds zone day in
-  Ok (Time.to_date_string day, start, stop)
+  let* zone = parse_zone_argument fields in
+  let* date = parse_date_argument "date" fields in
+  let date = Option.value date ~default:(Time.local_date zone (now ())) in
+  let* range = Date_range.make ~first:date ~last:date in
+  Ok { zone; range }
 
-type range = { zone : Time.zone; dates : string list; fetch_from : Ptime.t; fetch_until : Ptime.t }
+let parse_range fields =
+  let* zone = parse_zone_argument fields in
+  let* first = Result.bind (required_string "from_date" fields) Date.of_string in
+  let* last = parse_date_argument "to_date" fields in
+  let last = Option.value last ~default:(Time.local_date zone (now ())) in
+  let* range = Date_range.make ~first ~last in
+  Ok { zone; range }
 
-(* Records are fetched a day either side of the range so that any instant
-   falling on an in-range local date is included, whatever the zone offset. *)
-let range_query allowed fields =
-  let* fields = only_fields allowed (`Assoc fields) in
-  let* zone = optional_zone fields in
-  let* from_date = required_string "from_date" fields in
-  let* to_date = optional_string "to_date" fields in
-  let to_date = match to_date with Some value -> value | None -> Time.local_date_string zone (now ()) in
-  let* dates = Time.date_range ~from_date ~to_date in
-  let* first = Time.parse_date from_date in
-  let* last = Time.parse_date to_date in
-  Ok ({ zone; dates; fetch_from = Time.shift first (-86400); fetch_until = Time.shift last (2 * 86400) }, fields)
+let parse_range_request fields =
+  let* fields = only_fields (List.map fst range_properties) (`Assoc fields) in
+  parse_range fields
+
+type summary_request = {
+  range_request : range_request;
+  calorie_target : Summary.Calorie_target.t option;
+  protein_target : Summary.Protein_target.t option;
+}
+
+let parse_target name of_value parse fields =
+  let* value = parse name fields in
+  match value with
+  | None -> Ok None
+  | Some value -> (match of_value value with Some target -> Ok (Some target) | None -> Error (Error.Nonpositive_argument name))
+
+let parse_summary_request fields =
+  let* fields = only_fields (List.map fst summary_properties) (`Assoc fields) in
+  let* range_request = parse_range fields in
+  let* calorie_target = parse_target "calorie_target_kcal" Summary.Calorie_target.of_kcal optional_int fields in
+  let* protein_target = parse_target "protein_target_g" Summary.Protein_target.of_g optional_float fields in
+  Ok { range_request; calorie_target; protein_target }
 
 type withings = {
   oauth : Withings_oauth.t;
@@ -287,32 +332,34 @@ let call_query_meals service ~user fields =
   Result.map (fun meals -> text_result (`Assoc [ ("meals", `List (List.map meal_json meals)) ]))
     (Service.query_meals service ~user ~from ~to_ ~limit)
 
-let call_get_daily_totals service ~user fields =
-  let* date, day_start, day_end = day_bounds_query fields in
-  Result.map (fun totals -> text_result (totals_json ~date totals))
-    (Service.daily_totals service ~user ~day_start ~day_end)
+let records_in_range service ~user { zone; range } =
+  let start, stop = Date_range.utc_bounds zone range in
+  let* meals = Service.meals_between service ~user ~start ~stop in
+  let* weigh_ins = Service.weigh_ins_between service ~user ~start ~stop in
+  Ok (meals, weigh_ins)
 
-let range_meals service ~user range =
-  Service.meals_between service ~user ~from:range.fetch_from ~until:range.fetch_until
+let daily_series service ~user ({ zone; range } as request) =
+  let* meals, weigh_ins = records_in_range service ~user request in
+  Ok (Summary.daily_series zone range ~meals ~weigh_ins)
+
+let call_get_daily_totals service ~user fields =
+  let* request = parse_day_request fields in
+  let* series = daily_series service ~user request in
+  match series with
+  | [ day ] -> Ok (text_result (day_json day))
+  | _ -> invalid_arg "Mcp.call_get_daily_totals: a one-day range must yield exactly one day"
 
 let call_get_daily_series service ~user fields =
-  let* range, _ = range_query (List.map fst range_properties) fields in
-  Result.map
-    (fun meals ->
-      let series = Summary.daily_series ~zone:range.zone ~dates:range.dates meals in
-      text_result (`Assoc [ ("days", `List (List.map day_json series)) ]))
-    (range_meals service ~user range)
+  let* request = parse_range_request fields in
+  let* series = daily_series service ~user request in
+  Ok (text_result (`Assoc (range_json request.zone request.range @ [ ("days", `List (List.map day_json series)) ])))
 
 let call_get_summary service ~user fields =
-  let* range, fields = range_query (List.map fst summary_properties) fields in
-  let* calorie_target = optional_int "calorie_target" fields in
-  let* protein_target = optional_float "protein_target" fields in
-  let* meals = range_meals service ~user range in
-  let* weights = Service.weigh_ins_between service ~user ~from:range.fetch_from ~until:range.fetch_until in
-  let series = Summary.daily_series ~zone:range.zone ~dates:range.dates meals in
-  let intake = Summary.intake ?calorie_target ?protein_target series in
-  let trend = Summary.weight_trend ~zone:range.zone ~dates:range.dates weights in
-  Ok (text_result (summary_json ~dates:range.dates intake trend (Summary.implied_maintenance_kcal intake trend)))
+  let* { range_request; calorie_target; protein_target } = parse_summary_request fields in
+  let* meals, weigh_ins = records_in_range service ~user range_request in
+  let { zone; range } = range_request in
+  let summary = Summary.summarise ?calorie_target ?protein_target zone range ~meals ~weigh_ins in
+  Ok (text_result (summary_json zone range summary))
 
 let call_update_meal service ~user fields =
   let* fields = only_fields ("id" :: List.map fst meal_properties) (`Assoc fields) in
@@ -414,6 +461,22 @@ let discover_result =
     ]);
   ]
 
+(* Argument errors the model can fix itself come back as tool results, which
+   MCP clients show to the model, rather than as protocol errors. *)
+let argument_error_message = function
+  | Error.Unsupported_timezone _ as error ->
+      Error.to_string error ^ ": use a fixed UTC offset such as +02:00, or one of " ^ String.concat ", " Time.supported_zone_names
+  | error -> Error.to_string error
+
+let call_response ~request_id = function
+  | Ok result -> response ~id:request_id result
+  | Error Error.Not_found -> response ~id:request_id (tool_error "record not found")
+  | Error (Error.Invalid_date _ | Error.Unsupported_timezone _ | Error.Reversed_date_range _
+          | Error.Date_range_too_long _ | Error.Nonpositive_argument _ as error) ->
+      response ~id:request_id (tool_error (argument_error_message error))
+  | Error (Error.Invalid_input _) -> rpc_error ~id:request_id (-32602) "Invalid params"
+  | Error (Error.Unauthorized | Error.Conflict _ | Error.Storage_error _) -> rpc_error ~id:request_id (-32603) "Internal error"
+
 let handle ?withings ~service ~identity request =
   match request with
   | `Assoc fields ->
@@ -437,21 +500,13 @@ let handle ?withings ~service ~identity request =
                   (match required_scope name with
                   | Some scope when not (Auth.has_scope identity scope) -> Error `Forbidden
                   | _ ->
-                      (match call ?withings service identity name arguments with
-                      | Ok result -> Ok (response ~id:request_id result)
-                      | Error Error.Not_found -> Ok (response ~id:request_id tool_error)
-                      | Error (Error.Invalid_input _) -> Ok (rpc_error ~id:request_id (-32602) "Invalid params")
-                      | Error _ -> Ok (rpc_error ~id:request_id (-32603) "Internal error")))
+                      Ok (call_response ~request_id (call ?withings service identity name arguments)))
               | Ok ("query_meals" | "query_weights" | "get_daily_totals" | "get_latest_weight"
                   | "begin_withings_connection" | "get_withings_status" | "disconnect_withings" as name), None ->
                   (match required_scope name with
                   | Some scope when not (Auth.has_scope identity scope) -> Error `Forbidden
                   | _ ->
-                      (match call ?withings service identity name (`Assoc []) with
-                      | Ok result -> Ok (response ~id:request_id result)
-                      | Error Error.Not_found -> Ok (response ~id:request_id tool_error)
-                      | Error (Error.Invalid_input _) -> Ok (rpc_error ~id:request_id (-32602) "Invalid params")
-                      | Error _ -> Ok (rpc_error ~id:request_id (-32603) "Internal error")))
+                      Ok (call_response ~request_id (call ?withings service identity name (`Assoc []))))
               | _ -> Ok (rpc_error ~id:request_id (-32602) "Invalid params"))
           | _ -> Ok (rpc_error ~id:request_id (-32602) "Invalid params"))
       | Some (`String _) when valid_request -> Ok (rpc_error ~id:request_id (-32601) "Method not found")

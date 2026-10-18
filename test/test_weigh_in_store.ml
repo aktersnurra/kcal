@@ -83,6 +83,18 @@ let test_weight_queries_are_ordered_and_bounded () =
     (match Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None ~limit:501 with Error (Error.Invalid_input _) -> true | _ -> false);
   ignore second
 
+let test_weigh_ins_between_is_half_open () =
+  let store, user = Test_support.store_with_user () in
+  let at value = Result.get_ok (Time.parse_offset_datetime value) in
+  let record value weight_kg =
+    Result.get_ok (Store_sqlite.create_manual_weigh_in store ~user Weigh_in.{ measured_at = Some (at value); weight_kg }) in
+  ignore (record "2026-09-21T23:59:59Z" 81.0);
+  let inside = record "2026-09-22T00:00:00Z" 80.0 in
+  ignore (record "2026-09-23T00:00:00Z" 79.0);
+  let weigh_ins = Result.get_ok (Store_sqlite.weigh_ins_between store ~user ~start:(at "2026-09-22T00:00:00Z") ~stop:(at "2026-09-23T00:00:00Z")) in
+  Alcotest.(check (list string)) "only [start, stop)" [ Weigh_in_id.to_string inside.id ]
+    (List.map (fun (weigh_in : Weigh_in.t) -> Weigh_in_id.to_string weigh_in.id) weigh_ins)
+
 let test_latest_weigh_in_returns_the_most_recent () =
   let store, user = Test_support.store_with_user () in
   let earlier = Result.get_ok (Time.parse_offset_datetime "2026-01-01T10:00:00Z") in
@@ -120,6 +132,7 @@ let () =
           Alcotest.test_case "locked weight get and update are sanitized" `Quick
             test_locked_weight_get_and_update_are_storage_errors;
           Alcotest.test_case "weight queries are ordered and bounded" `Quick test_weight_queries_are_ordered_and_bounded;
+          Alcotest.test_case "weigh-ins between is half-open" `Quick test_weigh_ins_between_is_half_open;
           Alcotest.test_case "invalid weight update is rejected" `Quick test_rejects_invalid_weight_update;
           Alcotest.test_case "latest weigh-in returns the most recent" `Quick test_latest_weigh_in_returns_the_most_recent;
           Alcotest.test_case "latest weigh-in is not found when empty" `Quick test_latest_weigh_in_is_not_found_when_empty;

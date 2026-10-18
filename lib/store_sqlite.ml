@@ -182,6 +182,14 @@ let update_meal db ~user id patch =
 let valid_query ~from ~to_ ~limit =
   limit >= 1 && limit <= 500 && match from, to_ with Some lower, Some upper -> Ptime.compare lower upper <= 0 | _ -> true
 
+let decode_all_rows statement decode =
+  let rec rows values =
+    match Sqlite3.step statement with
+    | Sqlite3.Rc.ROW -> (match decode statement with Some value -> rows (value :: values) | None -> Error (storage_error ()))
+    | Sqlite3.Rc.DONE -> Ok (List.rev values)
+    | _ -> Error (storage_error ())
+  in rows []
+
 let query_meals db ~user ~from ~to_ ~limit =
   if not (valid_query ~from ~to_ ~limit) then Error (invalid_input ()) else
   with_statement db
@@ -190,50 +198,16 @@ let query_meals db ~user ~from ~to_ ~limit =
       let from_value = nullable (Option.map timestamp from) and to_value = nullable (Option.map timestamp to_) in
       match bind statement [ Sqlite3.Data.TEXT (User_id.to_string user.User.id); from_value; from_value; to_value; to_value; Sqlite3.Data.INT (Int64.of_int limit) ] with
       | Error _ as error -> error
-      | Ok () ->
-          let rec rows values =
-            match Sqlite3.step statement with
-            | Sqlite3.Rc.ROW -> (match meal_of_row statement with Some meal -> rows (meal :: values) | None -> Error (storage_error ()))
-            | Sqlite3.Rc.DONE -> Ok (List.rev values)
-            | _ -> Error (storage_error ())
-          in rows [])
+      | Ok () -> decode_all_rows statement meal_of_row)
 
-let daily_totals db ~user ~day_start ~day_end =
-  with_statement db
-    "SELECT COUNT(*), COALESCE(SUM(calories_kcal), 0), COALESCE(SUM(protein_g), 0.0), SUM(carbs_g), SUM(fat_g) FROM meals WHERE user_id = ? AND deleted_at IS NULL AND eaten_at >= ? AND eaten_at < ?"
-    (fun statement ->
-      match bind statement [ Sqlite3.Data.TEXT (User_id.to_string user.User.id); Sqlite3.Data.TEXT (timestamp day_start); Sqlite3.Data.TEXT (timestamp day_end) ] with
-      | Error _ as error -> error
-      | Ok () ->
-          (match Sqlite3.step statement with
-          | Sqlite3.Rc.ROW ->
-              Ok
-                Meal.
-                  {
-                    meal_count = int statement 0;
-                    calories_kcal = int statement 1;
-                    protein_g = float statement 2;
-                    carbs_g = optional_float statement 3;
-                    fat_g = optional_float statement 4;
-                  }
-          | _ -> Error (storage_error ())))
-
-let collect statement decode =
-  let rec rows values =
-    match Sqlite3.step statement with
-    | Sqlite3.Rc.ROW -> (match decode statement with Some value -> rows (value :: values) | None -> Error (storage_error ()))
-    | Sqlite3.Rc.DONE -> Ok (List.rev values)
-    | _ -> Error (storage_error ())
-  in rows []
-
-(* Every meal in [from, until), unpaginated, for server-side aggregation. *)
-let meals_between db ~user ~from ~until =
+(* Every meal in [start, stop), unpaginated, for server-side aggregation. *)
+let meals_between db ~user ~start ~stop =
   with_statement db
     ("SELECT " ^ meal_columns ^ " FROM meals WHERE user_id = ? AND deleted_at IS NULL AND eaten_at >= ? AND eaten_at < ? ORDER BY eaten_at ASC")
     (fun statement ->
-      match bind statement [ Sqlite3.Data.TEXT (User_id.to_string user.User.id); Sqlite3.Data.TEXT (timestamp from); Sqlite3.Data.TEXT (timestamp until) ] with
+      match bind statement [ Sqlite3.Data.TEXT (User_id.to_string user.User.id); Sqlite3.Data.TEXT (timestamp start); Sqlite3.Data.TEXT (timestamp stop) ] with
       | Error _ as error -> error
-      | Ok () -> collect statement meal_of_row)
+      | Ok () -> decode_all_rows statement meal_of_row)
 
 let delete_meal db ~user id =
   let current = timestamp (now ()) in
@@ -316,22 +290,16 @@ let query_weigh_ins db ~user ~from ~to_ ~limit =
       let from_value = nullable (Option.map timestamp from) and to_value = nullable (Option.map timestamp to_) in
       match bind statement [ Sqlite3.Data.TEXT (User_id.to_string user.User.id); from_value; from_value; to_value; to_value; Sqlite3.Data.INT (Int64.of_int limit) ] with
       | Error _ as error -> error
-      | Ok () ->
-          let rec rows values =
-            match Sqlite3.step statement with
-            | Sqlite3.Rc.ROW -> (match weigh_in_of_row statement with Some weight -> rows (weight :: values) | None -> Error (storage_error ()))
-            | Sqlite3.Rc.DONE -> Ok (List.rev values)
-            | _ -> Error (storage_error ())
-          in rows [])
+      | Ok () -> decode_all_rows statement weigh_in_of_row)
 
-(* Every weigh-in in [from, until), unpaginated, for server-side aggregation. *)
-let weigh_ins_between db ~user ~from ~until =
+(* Every weigh-in in [start, stop), unpaginated, for server-side aggregation. *)
+let weigh_ins_between db ~user ~start ~stop =
   with_statement db
     ("SELECT " ^ weigh_in_columns ^ " FROM weigh_ins WHERE user_id = ? AND deleted_at IS NULL AND measured_at >= ? AND measured_at < ? ORDER BY measured_at ASC")
     (fun statement ->
-      match bind statement [ Sqlite3.Data.TEXT (User_id.to_string user.User.id); Sqlite3.Data.TEXT (timestamp from); Sqlite3.Data.TEXT (timestamp until) ] with
+      match bind statement [ Sqlite3.Data.TEXT (User_id.to_string user.User.id); Sqlite3.Data.TEXT (timestamp start); Sqlite3.Data.TEXT (timestamp stop) ] with
       | Error _ as error -> error
-      | Ok () -> collect statement weigh_in_of_row)
+      | Ok () -> decode_all_rows statement weigh_in_of_row)
 
 let latest_weigh_in db ~user =
   with_statement db
