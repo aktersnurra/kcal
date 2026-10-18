@@ -52,7 +52,12 @@ Set `KCAL_LOG_LEVEL` to `debug`, `info` (default), `warning`, `error`, or `quiet
 
 Two aggregate tools avoid client-side arithmetic over raw records:
 
-- `get_daily_totals(date?)` — summed `calories_kcal`, `protein_g`, `carbs_g`, `fat_g`, and a `meal_count` for all meals on a given UTC calendar day (`date` as `YYYY-MM-DD`; defaults to today UTC). `carbs_g`/`fat_g` are `null` when no matching meal recorded that macro.
+- `get_daily_totals(date?)` — summed `calories_kcal`, `protein_g`, `carbs_g`, `fat_g`, and a `meal_count` for all meals on a given calendar day (`date` as `YYYY-MM-DD`; defaults to today in `timezone`, UTC if none). `carbs_g`/`fat_g` are `null` when no matching meal recorded that macro.
+- `get_daily_series(from_date, to_date?, timezone?)` — the same daily totals for every calendar date in a range (up to 366 days) in one call; days without meals appear with `meal_count` 0.
+- `get_summary(from_date, to_date?, timezone?, calorie_target?, protein_target?)` — average calories and protein over days with at least one meal logged (unlogged days are unknown, not zero), counts of days at or under the calorie target and at or over the protein target, the weight trend (first, last, change, least-squares slope in kg/week), and `implied_maintenance_kcal` (average intake minus the energy in the weight trend, only with at least 7 days of weigh-ins; it is only as reliable as the logging is complete).
+
+`get_daily_totals`, `get_daily_series` and `get_summary` take an optional `timezone` that defines where calendar days begin and end: a fixed offset such as `+02:00`, or an IANA name from a built-in table of European zones with EU summer time (e.g. `Europe/Stockholm`). It defaults to UTC. There is no tz database dependency, so other IANA names are rejected.
+
 - `get_latest_weight()` — the single most recent weigh-in (manual or Withings-imported), instead of paging through `query_weights` to find it.
 
 ## Logging

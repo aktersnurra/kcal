@@ -91,3 +91,8 @@
  (libraries alcotest sqlite3 kcal hegel)
  (preprocess (pps ppx_hegel_test))
  (deps ../migrations/001_ledger.sql))
+
+(test
+ (name test_summary)
+ (modules test_summary)
+ (libraries alcotest kcal))

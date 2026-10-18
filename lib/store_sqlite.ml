@@ -218,6 +218,23 @@ let daily_totals db ~user ~day_start ~day_end =
                   }
           | _ -> Error (storage_error ())))
 
+let collect statement decode =
+  let rec rows values =
+    match Sqlite3.step statement with
+    | Sqlite3.Rc.ROW -> (match decode statement with Some value -> rows (value :: values) | None -> Error (storage_error ()))
+    | Sqlite3.Rc.DONE -> Ok (List.rev values)
+    | _ -> Error (storage_error ())
+  in rows []
+
+(* Every meal in [from, until), unpaginated, for server-side aggregation. *)
+let meals_between db ~user ~from ~until =
+  with_statement db
+    ("SELECT " ^ meal_columns ^ " FROM meals WHERE user_id = ? AND deleted_at IS NULL AND eaten_at >= ? AND eaten_at < ? ORDER BY eaten_at ASC")
+    (fun statement ->
+      match bind statement [ Sqlite3.Data.TEXT (User_id.to_string user.User.id); Sqlite3.Data.TEXT (timestamp from); Sqlite3.Data.TEXT (timestamp until) ] with
+      | Error _ as error -> error
+      | Ok () -> collect statement meal_of_row)
+
 let delete_meal db ~user id =
   let current = timestamp (now ()) in
   with_statement db
@@ -306,6 +323,15 @@ let query_weigh_ins db ~user ~from ~to_ ~limit =
             | Sqlite3.Rc.DONE -> Ok (List.rev values)
             | _ -> Error (storage_error ())
           in rows [])
+
+(* Every weigh-in in [from, until), unpaginated, for server-side aggregation. *)
+let weigh_ins_between db ~user ~from ~until =
+  with_statement db
+    ("SELECT " ^ weigh_in_columns ^ " FROM weigh_ins WHERE user_id = ? AND deleted_at IS NULL AND measured_at >= ? AND measured_at < ? ORDER BY measured_at ASC")
+    (fun statement ->
+      match bind statement [ Sqlite3.Data.TEXT (User_id.to_string user.User.id); Sqlite3.Data.TEXT (timestamp from); Sqlite3.Data.TEXT (timestamp until) ] with
+      | Error _ as error -> error
+      | Ok () -> collect statement weigh_in_of_row)
 
 let latest_weigh_in db ~user =
   with_statement db

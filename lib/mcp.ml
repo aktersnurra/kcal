@@ -64,6 +64,33 @@ let totals_json ~date (totals : Meal.totals) =
     ("carbs_g", json_option (fun v -> `Float v) totals.carbs_g);
     ("fat_g", json_option (fun v -> `Float v) totals.fat_g) ]
 
+let day_json (day : Summary.day) = totals_json ~date:day.date
+  Meal.{ meal_count = day.meal_count; calories_kcal = day.calories_kcal; protein_g = day.protein_g;
+         carbs_g = day.carbs_g; fat_g = day.fat_g }
+
+let float_option_json = json_option (fun v -> `Float v)
+let int_option_json = json_option (fun v -> `Int v)
+
+let weight_trend_json = function
+  | None -> `Null
+  | Some (trend : Summary.weight_trend) ->
+      `Assoc [ ("weigh_in_count", `Int trend.weigh_in_count); ("first_kg", `Float trend.first_kg);
+               ("last_kg", `Float trend.last_kg); ("change_kg", `Float trend.change_kg);
+               ("span_days", `Float trend.span_days);
+               ("slope_kg_per_week", float_option_json trend.slope_kg_per_week) ]
+
+let summary_json ~dates (intake : Summary.intake) trend maintenance =
+  `Assoc [
+    ("from_date", `String (List.hd dates));
+    ("to_date", `String (List.nth dates (List.length dates - 1)));
+    ("days", `Int intake.days); ("logged_days", `Int intake.logged_days);
+    ("avg_calories_kcal", float_option_json intake.avg_calories_kcal);
+    ("avg_protein_g", float_option_json intake.avg_protein_g);
+    ("days_at_or_under_calorie_target", int_option_json intake.days_at_or_under_calorie_target);
+    ("days_at_or_over_protein_target", int_option_json intake.days_at_or_over_protein_target);
+    ("weight", weight_trend_json trend);
+    ("implied_maintenance_kcal", float_option_json maintenance) ]
+
 let weight_json (weight : Weigh_in.t) =
   `Assoc [
     ("id", `String (Weigh_in_id.to_string weight.id)); ("measured_at", `String (Time.to_utc_string weight.measured_at));
@@ -116,8 +143,22 @@ let query_properties = [
     "Maximum number of records to return (default 100, max 500). Results are ordered oldest first, so once you have more history than limit, pass from/to to scope the query instead of relying on limit alone. For a single day's totals, prefer get_daily_totals; for the current weight, prefer get_latest_weight."
     integer;
 ]
+let timezone_property =
+  property "timezone"
+    "Time zone that defines calendar-day boundaries: an IANA name (e.g. Europe/Stockholm; common European zones are supported, with EU daylight saving) or a fixed offset such as +02:00. Defaults to UTC."
+    string
 let daily_totals_properties = [
-  property "date" "Calendar date as YYYY-MM-DD, interpreted as a UTC day. Defaults to today (UTC) if omitted." string;
+  property "date" "Calendar date as YYYY-MM-DD, in the given timezone. Defaults to today in that timezone if omitted." string;
+  timezone_property;
+]
+let range_properties = [
+  property "from_date" "First calendar date as YYYY-MM-DD, inclusive." string;
+  property "to_date" "Last calendar date as YYYY-MM-DD, inclusive. Defaults to today in the given timezone. At most 366 days from from_date." string;
+  timezone_property;
+]
+let summary_properties = range_properties @ [
+  property "calorie_target" "Daily calorie goal in kcal; when given, days_at_or_under_calorie_target counts logged days with a total at or below it." integer;
+  property "protein_target" "Daily protein goal in grams; when given, days_at_or_over_protein_target counts logged days with a total at or above it." number;
 ]
 
 let tool ?description name input_schema =
@@ -133,7 +174,9 @@ let tools = [
   tool "query_meals" ~description:"List meals, oldest first, optionally bounded by from/to. For a day's totals, prefer get_daily_totals, which aggregates server-side instead of requiring client-side summation." (schema query_properties []);
   tool "update_meal" ~description:"Update fields on an existing meal; omitted fields are left unchanged." (schema (id_properties @ meal_properties) [ "id" ]);
   tool "delete_meal" ~description:"Delete a meal." (schema id_properties [ "id" ]);
-  tool "get_daily_totals" ~description:"Aggregate calories, protein, carbs, and fat for all meals on a given UTC calendar day (default: today). Prefer this over query_meals plus client-side summation." (schema daily_totals_properties []);
+  tool "get_daily_totals" ~description:"Aggregate calories, protein, carbs, and fat for all meals on a given calendar day (default: today, in the given timezone, UTC if none). Prefer this over query_meals plus client-side summation." (schema daily_totals_properties []);
+  tool "get_daily_series" ~description:"Daily totals (calories, protein, carbs, fat, meal count) for every calendar date in a range, in one call; days without meals appear with meal_count 0. Use instead of calling get_daily_totals once per day." (schema range_properties [ "from_date" ]);
+  tool "get_summary" ~description:"Analytics over a date range in one call: average calories and protein over days with meals logged, optional counts of days hitting calorie/protein targets, weight trend (first, last, change, least-squares slope in kg/week) and an implied maintenance estimate (average intake minus the energy in the weight trend; only given with at least 7 days of weigh-ins, and only as reliable as the logging is complete)." (schema summary_properties [ "from_date" ]);
   tool "record_weight" ~description:"Record a manual weigh-in." (schema weight_properties [ "weight_kg" ]);
   tool "get_weight" ~description:"Fetch a single weigh-in by id." (schema id_properties [ "id" ]);
   tool "query_weights" ~description:"List weigh-ins, oldest first, optionally bounded by from/to. For the current weight, prefer get_latest_weight." (schema query_properties []);
@@ -158,12 +201,35 @@ let query fields =
 
 let now () = Option.get (Ptime.of_float_s (Unix.gettimeofday ()))
 
+let optional_zone fields =
+  let* name = optional_string "timezone" fields in
+  match name with None -> Ok Time.utc | Some value -> Time.parse_zone value
+
+(* The requested local day as (date string, UTC start, UTC stop). *)
 let day_bounds_query fields =
   let* fields = only_fields (List.map fst daily_totals_properties) (`Assoc fields) in
+  let* zone = optional_zone fields in
   let* date = optional_string "date" fields in
-  match date with
-  | None -> Ok (Time.day_bounds (now ()))
-  | Some value -> Result.map Time.day_bounds (Time.parse_date value)
+  let* day = match date with
+    | None -> Time.parse_date (Time.local_date_string zone (now ()))
+    | Some value -> Time.parse_date value in
+  let start, stop = Time.local_day_bounds zone day in
+  Ok (Time.to_date_string day, start, stop)
+
+type range = { zone : Time.zone; dates : string list; fetch_from : Ptime.t; fetch_until : Ptime.t }
+
+(* Records are fetched a day either side of the range so that any instant
+   falling on an in-range local date is included, whatever the zone offset. *)
+let range_query allowed fields =
+  let* fields = only_fields allowed (`Assoc fields) in
+  let* zone = optional_zone fields in
+  let* from_date = required_string "from_date" fields in
+  let* to_date = optional_string "to_date" fields in
+  let to_date = match to_date with Some value -> value | None -> Time.local_date_string zone (now ()) in
+  let* dates = Time.date_range ~from_date ~to_date in
+  let* first = Time.parse_date from_date in
+  let* last = Time.parse_date to_date in
+  Ok ({ zone; dates; fetch_from = Time.shift first (-86400); fetch_until = Time.shift last (2 * 86400) }, fields)
 
 type withings = {
   oauth : Withings_oauth.t;
@@ -177,7 +243,7 @@ let withings_status_json = function
                ("token_expires_at", json_option (fun value -> `String (Time.to_utc_string value)) status.token_expires_at) ]
 
 let required_scope = function
-  | "get_meal" | "query_meals" | "get_daily_totals" | "get_weight" | "query_weights" | "get_latest_weight" ->
+  | "get_meal" | "query_meals" | "get_daily_totals" | "get_daily_series" | "get_summary" | "get_weight" | "query_weights" | "get_latest_weight" ->
       Some "ledger:read"
   | "record_meal" | "update_meal" | "delete_meal"
   | "record_weight" | "update_weight" | "delete_weight" ->
@@ -222,9 +288,31 @@ let call_query_meals service ~user fields =
     (Service.query_meals service ~user ~from ~to_ ~limit)
 
 let call_get_daily_totals service ~user fields =
-  let* day_start, day_end = day_bounds_query fields in
-  Result.map (fun totals -> text_result (totals_json ~date:(Time.to_date_string day_start) totals))
+  let* date, day_start, day_end = day_bounds_query fields in
+  Result.map (fun totals -> text_result (totals_json ~date totals))
     (Service.daily_totals service ~user ~day_start ~day_end)
+
+let range_meals service ~user range =
+  Service.meals_between service ~user ~from:range.fetch_from ~until:range.fetch_until
+
+let call_get_daily_series service ~user fields =
+  let* range, _ = range_query (List.map fst range_properties) fields in
+  Result.map
+    (fun meals ->
+      let series = Summary.daily_series ~zone:range.zone ~dates:range.dates meals in
+      text_result (`Assoc [ ("days", `List (List.map day_json series)) ]))
+    (range_meals service ~user range)
+
+let call_get_summary service ~user fields =
+  let* range, fields = range_query (List.map fst summary_properties) fields in
+  let* calorie_target = optional_int "calorie_target" fields in
+  let* protein_target = optional_float "protein_target" fields in
+  let* meals = range_meals service ~user range in
+  let* weights = Service.weigh_ins_between service ~user ~from:range.fetch_from ~until:range.fetch_until in
+  let series = Summary.daily_series ~zone:range.zone ~dates:range.dates meals in
+  let intake = Summary.intake ?calorie_target ?protein_target series in
+  let trend = Summary.weight_trend ~zone:range.zone ~dates:range.dates weights in
+  Ok (text_result (summary_json ~dates:range.dates intake trend (Summary.implied_maintenance_kcal intake trend)))
 
 let call_update_meal service ~user fields =
   let* fields = only_fields ("id" :: List.map fst meal_properties) (`Assoc fields) in
@@ -292,6 +380,8 @@ let call ?withings service (identity : Auth.identity) name arguments =
       | "get_meal" -> call_get_meal service ~user fields
       | "query_meals" -> call_query_meals service ~user fields
       | "get_daily_totals" -> call_get_daily_totals service ~user fields
+      | "get_daily_series" -> call_get_daily_series service ~user fields
+      | "get_summary" -> call_get_summary service ~user fields
       | "update_meal" -> call_update_meal service ~user fields
       | "delete_meal" -> call_delete_meal service ~user fields
       | "record_weight" -> call_record_weight service ~user fields
