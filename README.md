@@ -50,6 +50,16 @@ Set `KCAL_LOG_LEVEL` to `debug`, `info` (default), `warning`, `error`, or `quiet
 
 `query_meals` and `query_weights` accept `from`/`to` (RFC 3339 UTC timestamps, inclusive) and `limit` (default 100, max 500) to scope a query instead of relying on `limit` alone; results are ordered oldest first. Every tool's JSON schema (via `tools/list`) now carries a description of its parameters, including this.
 
+Reusable nutrition references (independent of meal history):
+
+- `save_product(name, basis, calories_kcal, protein_g, source, carbs_g?, fat_g?, id?)` — requires `ledger:write`. Omit `id` to create; supply it to replace your existing reference **in full**, preserving its id and creation time. Omitted optional macros become `null`, not unchanged. Unknown or foreign ids return not found. Ownership and timestamps are server-managed.
+- `search_products(query, limit?)` — requires `ledger:read`; returns `{ "products": [...] }` with full references, ordered by name then id. Default limit 100, range 1–500.
+- `query_meals(from?, to?, limit?, search?)` also accepts text search over description, estimate source, and notes before date bounds and limit; its output remains `{ "meals": [...] }`. `query_weights` does not accept search.
+
+Search is a literal substring match (no wildcard syntax), scoped to the authenticated user. Product search matches name, basis, and source. Blank search text is rejected; no matches returns an empty list. SQLite folds ASCII case only: `bröd` matches `Polarbröd`, but `BRÖD` need not. Omitting meal search keeps the existing query behavior.
+
+For example, save `Whey 100` with `basis: "40 g"`, `calories_kcal: 150`, `protein_g: 31`, and `source: "label"`. Next time, call `search_products(query: "Whey 100")`. For 60 g, the agent scales by 1.5 to 225 kcal and 46.5 g protein, then calls `record_meal` normally with those values and appropriate provenance. The basis is free text: the server performs no quantity arithmetic or unit conversion. Saving/replacing a reference never links to or rewrites past meals or their provenance, and logging meals does not automatically populate the reference library.
+
 Aggregate tools avoid client-side arithmetic over raw records:
 
 - `get_daily_totals(date?, timezone?)` — one day's row: `date`, `meal_count`, summed `calories_kcal`, `protein_g`, `carbs_g`, `fat_g`, plus `weigh_in_count` and `mean_weight_kg` (`date` as `YYYY-MM-DD`; defaults to today in `timezone`). On a day with no meals, `meal_count` is 0 and the intake fields are `null`: nothing logged means unknown, not zero. `carbs_g`/`fat_g` are also `null` when no meal that day recorded that macro, and `mean_weight_kg` is `null` without a weigh-in.
