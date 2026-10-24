@@ -1,29 +1,50 @@
 type t = string
 
-(* Fold Swedish letters as well as ASCII before deduplication, so alternative
-   spellings differing only in case cannot give these words extra BM25 weight.
-   Other UTF-8 text is preserved; unicode61 handles matching case. *)
-let fold_swedish text =
-  String.mapi (fun i c ->
-    if i > 0 && text.[i - 1] = '\195' then
-      match c with '\132' -> '\164' | '\133' -> '\165' | '\150' -> '\182' | _ -> c
-    else c) text
+let with_statement db sql f =
+  let statement = Sqlite3.prepare db sql in
+  Fun.protect
+    ~finally:(fun () -> Sqlite3.Rc.check (Sqlite3.finalize statement))
+    (fun () -> f statement)
 
-let words text =
-  let text = fold_swedish text in
-  let normalized = String.map (fun c ->
-    match c with
-    | 'a'..'z' | 'A'..'Z' | '0'..'9' -> Char.lowercase_ascii c
-    | c when Char.code c >= 128 -> c
-    | _ -> ' ') text in
-  String.split_on_char ' ' normalized |> List.filter (fun word -> word <> "")
-
+(* Use a private, short-lived database so query words and indexed documents use
+   exactly the same tokenizer. No application database or shared state is used. *)
 let of_strings alternatives =
   let invalid () = Error (Error.Invalid_input "search requires nonblank alternatives with searchable words") in
-  let groups = List.map words alternatives in
-  if groups = [] || List.exists (fun group -> group = []) groups then invalid ()
+  if alternatives = [] then invalid ()
   else
-    let words = List.concat groups |> List.sort_uniq String.compare in
-    Ok (String.concat " OR " (List.map (fun word -> "\"" ^ word ^ "\"") words))
+    try
+      let db = Sqlite3.db_open ":memory:" in
+      Fun.protect
+        ~finally:(fun () -> if not (Sqlite3.db_close db) then
+          raise (Sqlite3.SqliteError "query tokenizer close failed"))
+        (fun () ->
+          Sqlite3.Rc.check (Sqlite3.exec db
+            "CREATE VIRTUAL TABLE input USING fts5(text, tokenize='unicode61 remove_diacritics 0'); CREATE VIRTUAL TABLE terms USING fts5vocab(input, 'row')");
+          let words text =
+            Sqlite3.Rc.check (Sqlite3.exec db "DELETE FROM input");
+            with_statement db "INSERT INTO input(text) VALUES (?)" (fun statement ->
+              Sqlite3.Rc.check (Sqlite3.bind statement 1 (Sqlite3.Data.TEXT text));
+              match Sqlite3.step statement with
+              | Sqlite3.Rc.DONE -> ()
+              | _ -> raise (Sqlite3.SqliteError "query tokenizer insert failed"));
+            with_statement db "SELECT term FROM terms ORDER BY term" (fun statement ->
+              let rec collect acc =
+                match Sqlite3.step statement with
+                | Sqlite3.Rc.ROW -> collect (Sqlite3.column_text statement 0 :: acc)
+                | Sqlite3.Rc.DONE -> List.rev acc
+                | _ -> raise (Sqlite3.SqliteError "query tokenizer read failed")
+              in
+              collect [])
+          in
+          let groups = List.map words alternatives in
+          if List.exists (fun group -> group = []) groups then invalid ()
+          else
+            let words = List.concat groups |> List.sort_uniq String.compare in
+            let quote word = "\"" ^ String.concat "\"\"" (String.split_on_char '"' word) ^ "\"" in
+            Ok (String.concat " OR " (List.map quote words)))
+    with
+    | Sqlite3.Error _ | Sqlite3.SqliteError _ | Sqlite3.InternalError _
+    | Sqlite3.RangeError _ | Sqlite3.DataTypeError _ ->
+        Error (Error.Storage_error "search query tokenization failed")
 
 let fts5_match_expression query = query

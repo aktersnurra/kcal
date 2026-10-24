@@ -26,6 +26,24 @@ let test_arrays () =
   check "product singleton equivalent"
     (rows "products" (request db user "search_products" "query" (`String "whey protein") []))
     (rows "products" (request db user "search_products" "query" (alternatives ["whey protein"]) []))
+let test_unicode_separators () =
+  let db,user = Test_support.store_with_user () in
+  List.iter (fun text -> ignore (save db user text); ignore (meal db user text))
+    ["rice chicken"; "chicken"; "rice"; "BRÖD WHEY"; "brod whey"];
+  List.iter (fun (tool,key,result_key) ->
+    let search value = rows result_key (request db user tool key value []) in
+    let expected = search (`String "chicken rice") in
+    check (tool ^ " reversed and partial overlap fixtures") 3 (List.length expected);
+    List.iter (fun text ->
+      check (tool ^ " string " ^ text) expected (search (`String text));
+      check (tool ^ " array " ^ text) expected (search (alternatives [text; "CHICKEN"])))
+      ["chicken—rice"; "chicken rice"; "chicken rice"; "chicken–rice"; "CHICKEN—rice chicken RICE"];
+    check (tool ^ " Swedish and English folding after normalization")
+      (search (`String "bröd whey")) (search (alternatives ["BRÖD—WHEY"; "bröd whey"]));
+    check (tool ^ " diacritics remain distinct") 1 (List.length (search (`String "bröd")));
+    check (tool ^ " unaccented distinct") 1 (List.length (search (`String "brod"))))
+    ["search_products","query","products"; "query_meals","search","meals"]
+
 let test_ranking () =
   let db,user,other = Test_support.store_with_two_users () in
   ignore (save db user "chicken padding padding padding padding");
@@ -114,4 +132,4 @@ let test_meal_stable_ties () =
   check "meal relevance ties use time then id" (List.map Mcp.meal_json expected)
     (rows "meals" (request db user "query_meals" "search" (`String "rice chicken") []))
 
-let () = Alcotest.run "ranked search" ["behavior", List.map (fun (n,t) -> Alcotest.test_case n `Quick t) ["arrays",test_arrays; "ranking",test_ranking; "v3 backfill",test_v3_backfill; "invalid wire forms",test_invalid_wire_forms; "safe plain text and Swedish",test_plain_text_and_swedish; "index lifecycle",test_index_lifecycle; "meal ranked filters",test_meal_ranked_filters; "stable meal ties",test_meal_stable_ties]]
+let () = Alcotest.run "ranked search" ["behavior", List.map (fun (n,t) -> Alcotest.test_case n `Quick t) ["Unicode separators",test_unicode_separators; "arrays",test_arrays; "ranking",test_ranking; "v3 backfill",test_v3_backfill; "invalid wire forms",test_invalid_wire_forms; "safe plain text and Swedish",test_plain_text_and_swedish; "index lifecycle",test_index_lifecycle; "meal ranked filters",test_meal_ranked_filters; "stable meal ties",test_meal_stable_ties]]
