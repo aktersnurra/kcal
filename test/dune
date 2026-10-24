@@ -2,7 +2,7 @@
  (name test_migration)
  (modules test_migration test_support)
  (libraries alcotest sqlite3 kcal)
- (deps ../migrations/001_ledger.sql))
+ (deps ../migrations/001_ledger.sql ../migrations/004_ranked_search.sql))
 
 (test
  (name test_secret)
@@ -96,3 +96,32 @@
  (name test_summary)
  (modules test_summary)
  (libraries alcotest kcal))
+
+(test
+ (name test_product_store)
+ (modules test_product_store test_support)
+ (libraries alcotest sqlite3 kcal))
+
+(test
+ (name test_ranked_search)
+ (modules test_ranked_search test_support)
+ (libraries alcotest sqlite3 yojson kcal))
+
+(test
+ (name test_search_query)
+ (modules test_search_query)
+ (libraries alcotest sqlite3 kcal))
+
+(rule
+ (target search_query_fault_injected.ml)
+ (deps search_query_fault_prefix.ml.inc ../lib/search_query.ml)
+ (action
+  (with-stdout-to %{target}
+   (progn
+    (cat search_query_fault_prefix.ml.inc)
+    (cat ../lib/search_query.ml)))))
+
+(test
+ (name test_search_query_cleanup)
+ (modules test_search_query_cleanup search_query_fault_injected)
+ (libraries alcotest sqlite3 kcal))

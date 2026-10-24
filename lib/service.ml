@@ -12,8 +12,14 @@ let record_meal service ~user input =
 
 let get_meal service ~user id = Store_sqlite.get_meal service.store ~user id
 
-let query_meals service ~user ~from ~to_ ~limit =
-  Store_sqlite.query_meals service.store ~user ~from ~to_ ~limit
+(* The HTTP service runs in one Eio domain. Compilation is synchronous and
+   non-yielding, so its connection-local TEMP work is serialized with store work.
+   The existing store owner remains responsible for closing the connection. *)
+let compile_search_query service alternatives =
+  Search_query.of_strings service.store alternatives
+
+let query_meals ?search service ~user ~from ~to_ ~limit =
+  Store_sqlite.query_meals ?search service.store ~user ~from ~to_ ~limit
 
 let update_meal service ~user id patch =
   Store_sqlite.update_meal service.store ~user id patch
@@ -50,3 +56,9 @@ let consume_withings_authorization_state service ~user ~state =
 
 let get_withings_status service ~user =
   Store_sqlite.get_withings_status service.store ~user
+
+let save_product service ~user ~id input =
+  Store_sqlite.save_product service.store ~user ~id input
+
+let search_products service ~user ~query ~limit =
+  Store_sqlite.search_products service.store ~user ~query ~limit
