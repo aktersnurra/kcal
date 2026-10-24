@@ -369,8 +369,8 @@ let call_save_product service ~user fields =
   Result.map (fun product -> text_result (product_json product))
     (Service.save_product service ~user ~id:product_id input)
 
-let parse_search = function
-  | `String text -> Search_query.of_strings [text]
+let parse_search service = function
+  | `String text -> Service.compile_search_query service [text]
   | `List values ->
       let rec strings = function
         | [] -> Ok []
@@ -378,13 +378,13 @@ let parse_search = function
         | _ -> Error (Error.Invalid_input "search alternatives must be strings")
       in
       let* alternatives = strings values in
-      Search_query.of_strings alternatives
+      Service.compile_search_query service alternatives
   | _ -> Error (Error.Invalid_input "search must be a string or nonempty array of strings")
 
 let call_search_products service ~user fields =
   let* fields = only_fields (List.map fst product_search_properties) (`Assoc fields) in
   let* query = match List.assoc_opt "query" fields with
-    | Some value -> parse_search value
+    | Some value -> parse_search service value
     | None -> Error (Error.Invalid_input "query is required") in
   let* limit = optional_int "limit" fields in
   Result.map (fun products -> text_result (`Assoc [ ("products", `List (List.map product_json products)) ]))
@@ -404,7 +404,7 @@ let call_query_meals service ~user fields =
   let* fields = only_fields (List.map fst meal_query_properties) (`Assoc fields) in
   let* search = match List.assoc_opt "search" fields with
     | None -> Ok None
-    | Some value -> Result.map Option.some (parse_search value) in
+    | Some value -> Result.map Option.some (parse_search service value) in
   let* from, to_, limit = query (List.remove_assoc "search" fields) in
   Result.map (fun meals -> text_result (`Assoc [ ("meals", `List (List.map meal_json meals)) ]))
     (Service.query_meals ?search service ~user ~from ~to_ ~limit)

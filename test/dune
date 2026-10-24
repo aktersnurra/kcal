@@ -110,7 +110,7 @@
 (test
  (name test_search_query)
  (modules test_search_query)
- (libraries alcotest kcal))
+ (libraries alcotest sqlite3 kcal))
 
 (rule
  (target search_query_fault_injected.ml)

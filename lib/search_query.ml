@@ -14,28 +14,26 @@ let with_statement db sql f =
     ~finally:(fun () -> Sqlite3.Rc.check (Sqlite3.finalize statement))
     (fun () -> f statement)
 
-(* Use a private, short-lived database so query words and indexed documents use
-   exactly the same tokenizer. No application database or shared state is used. *)
-let of_strings alternatives =
+(* TEMP resources belong to the caller's connection; only query rows are transient. *)
+let of_strings db alternatives =
   let invalid () = Error (Error.Invalid_input "search requires nonblank alternatives with searchable words") in
   if alternatives = [] then invalid ()
   else
     try
-      let db = Sqlite3.db_open ":memory:" in
       Fun.protect
-        ~finally:(fun () -> if not (Sqlite3.db_close db) then
-          raise (Sqlite3.SqliteError "query tokenizer close failed"))
+        ~finally:(fun () -> Sqlite3.Rc.check (Sqlite3.exec db
+          "DELETE FROM temp.kcal_search_query_input"))
         (fun () ->
           Sqlite3.Rc.check (Sqlite3.exec db
-            "CREATE VIRTUAL TABLE input USING fts5(text, tokenize='unicode61 remove_diacritics 0'); CREATE VIRTUAL TABLE terms USING fts5vocab(input, 'row')");
+            "CREATE VIRTUAL TABLE IF NOT EXISTS temp.kcal_search_query_input USING fts5(text, tokenize='unicode61 remove_diacritics 0'); CREATE VIRTUAL TABLE IF NOT EXISTS temp.kcal_search_query_terms USING fts5vocab('temp', 'kcal_search_query_input', 'row')");
           let words text =
-            Sqlite3.Rc.check (Sqlite3.exec db "DELETE FROM input");
-            with_statement db "INSERT INTO input(text) VALUES (?)" (fun statement ->
+            Sqlite3.Rc.check (Sqlite3.exec db "DELETE FROM temp.kcal_search_query_input");
+            with_statement db "INSERT INTO temp.kcal_search_query_input(text) VALUES (?)" (fun statement ->
               Sqlite3.Rc.check (Sqlite3.bind statement 1 (Sqlite3.Data.TEXT text));
               match Sqlite3.step statement with
               | Sqlite3.Rc.DONE -> ()
               | _ -> raise (Sqlite3.SqliteError "query tokenizer insert failed"));
-            with_statement db "SELECT term FROM terms ORDER BY term" (fun statement ->
+            with_statement db "SELECT term FROM temp.kcal_search_query_terms ORDER BY term" (fun statement ->
               let rec collect acc =
                 match Sqlite3.step statement with
                 | Sqlite3.Rc.ROW -> collect (Sqlite3.column_text statement 0 :: acc)

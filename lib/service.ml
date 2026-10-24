@@ -12,6 +12,12 @@ let record_meal service ~user input =
 
 let get_meal service ~user id = Store_sqlite.get_meal service.store ~user id
 
+(* The HTTP service runs in one Eio domain. Compilation is synchronous and
+   non-yielding, so its connection-local TEMP work is serialized with store work.
+   The existing store owner remains responsible for closing the connection. *)
+let compile_search_query service alternatives =
+  Search_query.of_strings service.store alternatives
+
 let query_meals ?search service ~user ~from ~to_ ~limit =
   Store_sqlite.query_meals ?search service.store ~user ~from ~to_ ~limit
 
