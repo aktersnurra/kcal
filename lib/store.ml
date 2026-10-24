@@ -12,6 +12,7 @@ module type S = sig
   val get_meal : t -> user:User.t -> Meal_id.t -> (Meal.t, Error.t) result
 
   val query_meals :
+    ?search:string ->
     t ->
     user:User.t ->
     from:Ptime.t option ->

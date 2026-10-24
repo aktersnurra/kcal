@@ -104,11 +104,79 @@ let test_rejects_invalid_limit () =
         | _ -> false))
     [ 0; 501 ]
 
+let test_search_matches_literal_text_and_scopes_results () =
+  let store, user, foreign = Test_support.store_with_two_users () in
+  let create user description estimate_source notes =
+    Result.get_ok (Store_sqlite.create_meal store ~user
+      Meal.{ (Test_support.meal_input ()) with description; estimate_source; notes })
+  in
+  let description = create user "WHEY shake" None None in
+  let source = create user "Shake" (Some "whey label") None in
+  let notes = create user "Snack" None (Some "with Whey") in
+  let bread = create user "Polarbröd" None None in
+  let percent = create user "20% protein" None None in
+  let underscore = create user "food_bar" None None in
+  let apostrophe = create user "Baker's loaf" None None in
+  ignore (create user "Unrelated" None None);
+  ignore (create foreign "whey Polarbröd 20% food_bar Baker's" None None);
+  let deleted = create user "whey Polarbröd 20% food_bar Baker's" None None in
+  Result.get_ok (Store_sqlite.delete_meal store ~user deleted.id);
+  List.iter (fun (search, expected) ->
+    let meals = Result.get_ok
+      (Store_sqlite.query_meals ~search store ~user ~from:None ~to_:None ~limit:100) in
+    let ids meals = List.map (fun (meal : Meal.t) -> Meal_id.to_string meal.id) meals |> List.sort String.compare in
+    Alcotest.(check (list string)) search (ids expected) (ids meals))
+    [ "whey", [description; source; notes]; "bröd", [bread]; "%", [percent];
+      "_", [underscore]; "'", [apostrophe]; "missing", [] ]
+
+let test_search_composes_with_dates_order_and_limit () =
+  let store, user = Test_support.store_with_user () in
+  let service = Service.make ~store in
+  let at value = Result.get_ok (Time.parse_offset_datetime value) in
+  let create time description =
+    Result.get_ok (Store_sqlite.create_meal store ~user
+      Meal.{ (Test_support.meal_input ~eaten_at:(at time) ()) with description })
+  in
+  (* Insert out of chronological order to pin ordering, not insertion order. *)
+  let last = create "2026-09-23T00:00:00Z" "whey last" in
+  let unrelated = create "2026-09-21T00:00:00Z" "Soup" in
+  let first = create "2026-09-22T00:00:00Z" "whey first" in
+  let middle = create "2026-09-22T12:00:00Z" "whey middle" in
+  let check label expected result =
+    let ids = List.map (fun (meal : Meal.t) -> Meal_id.to_string meal.id) in
+    Alcotest.(check (list string)) label (ids expected) (ids (Result.get_ok result))
+  in
+  let query ?search ?(from=None) ?(to_=None) limit =
+    Service.query_meals ?search service ~user ~from ~to_ ~limit
+  in
+  check "filter before limit" [first] (query ~search:"whey" 1);
+  check "oldest first" [first; middle; last] (query ~search:"whey" 100);
+  check "inclusive bounds" [first; middle]
+    (query ~search:"whey" ~from:(Some first.eaten_at) ~to_:(Some middle.eaten_at) 100);
+  check "equal inclusive bounds" [middle]
+    (query ~search:"whey" ~from:(Some middle.eaten_at) ~to_:(Some middle.eaten_at) 100);
+  check "omitted search" [unrelated; first; middle; last] (query 100)
+
+let test_search_rejects_blank_text_and_invalid_limits () =
+  let store, user = Test_support.store_with_user () in
+  List.iter (fun (search, limit) ->
+    Alcotest.(check bool) "invalid search query" true
+      (match Store_sqlite.query_meals ~search store ~user ~from:None ~to_:None ~limit with
+       | Error (Error.Invalid_input _) -> true
+       | _ -> false))
+    [ "", 100; " \t\r\n", 100; "whey", 0; "whey", 501 ]
+
 let () =
   Alcotest.run "meal store"
     [
       ( "persistence",
         [
+          Alcotest.test_case "literal search across fields is owner scoped" `Quick
+            test_search_matches_literal_text_and_scopes_results;
+          Alcotest.test_case "search composes with dates ordering and limit" `Quick
+            test_search_composes_with_dates_order_and_limit;
+          Alcotest.test_case "search rejects blank text and invalid limits" `Quick
+            test_search_rejects_blank_text_and_invalid_limits;
           Alcotest.test_case "user resolution is stable" `Quick test_user_resolution_is_stable;
           Alcotest.test_case "users cannot read each other's meals" `Quick
             test_cannot_read_another_users_meal;

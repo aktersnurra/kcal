@@ -12,8 +12,8 @@ let record_meal service ~user input =
 
 let get_meal service ~user id = Store_sqlite.get_meal service.store ~user id
 
-let query_meals service ~user ~from ~to_ ~limit =
-  Store_sqlite.query_meals service.store ~user ~from ~to_ ~limit
+let query_meals ?search service ~user ~from ~to_ ~limit =
+  Store_sqlite.query_meals ?search service.store ~user ~from ~to_ ~limit
 
 let update_meal service ~user id patch =
   Store_sqlite.update_meal service.store ~user id patch

@@ -253,13 +253,22 @@ let search_products db ~user ~query ~limit =
         | Error _ as error -> error
         | Ok () -> decode_all_rows statement product_of_row)
 
-let query_meals db ~user ~from ~to_ ~limit =
-  if not (valid_query ~from ~to_ ~limit) then Error (invalid_input ()) else
+let query_meals ?search db ~user ~from ~to_ ~limit =
+  if not (valid_query ~from ~to_ ~limit)
+     || (match search with Some text -> String.trim text = "" | None -> false)
+  then Error (invalid_input ()) else
+  let search_clause, search_values = match search with
+    | None -> "", []
+    | Some text ->
+        let value = Sqlite3.Data.TEXT text in
+        " AND (instr(lower(description), lower(?)) > 0 OR instr(lower(estimate_source), lower(?)) > 0 OR instr(lower(notes), lower(?)) > 0)",
+        [value; value; value]
+  in
   with_statement db
-    ("SELECT " ^ meal_columns ^ " FROM meals WHERE user_id = ? AND deleted_at IS NULL AND (? IS NULL OR eaten_at >= ?) AND (? IS NULL OR eaten_at <= ?) ORDER BY eaten_at ASC LIMIT ?")
+    ("SELECT " ^ meal_columns ^ " FROM meals WHERE user_id = ? AND deleted_at IS NULL" ^ search_clause ^ " AND (? IS NULL OR eaten_at >= ?) AND (? IS NULL OR eaten_at <= ?) ORDER BY eaten_at ASC LIMIT ?")
     (fun statement ->
       let from_value = nullable (Option.map timestamp from) and to_value = nullable (Option.map timestamp to_) in
-      match bind statement [ Sqlite3.Data.TEXT (User_id.to_string user.User.id); from_value; from_value; to_value; to_value; Sqlite3.Data.INT (Int64.of_int limit) ] with
+      match bind statement ([ Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] @ search_values @ [ from_value; from_value; to_value; to_value; Sqlite3.Data.INT (Int64.of_int limit) ]) with
       | Error _ as error -> error
       | Ok () -> decode_all_rows statement meal_of_row)
 
