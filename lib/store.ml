@@ -2,6 +2,12 @@ module type S = sig
   type t
 
   val resolve_user : t -> issuer:string -> subject:string -> (User.t, Error.t) result
+  val save_product :
+    t -> user:User.t -> id:Product_id.t option -> Product.input -> (Product.t, Error.t) result
+
+  val search_products :
+    t -> user:User.t -> query:string -> limit:int -> (Product.t list, Error.t) result
+
   val create_meal : t -> user:User.t -> Meal.create -> (Meal.t, Error.t) result
   val get_meal : t -> user:User.t -> Meal_id.t -> (Meal.t, Error.t) result
 

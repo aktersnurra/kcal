@@ -50,3 +50,9 @@ let consume_withings_authorization_state service ~user ~state =
 
 let get_withings_status service ~user =
   Store_sqlite.get_withings_status service.store ~user
+
+let save_product service ~user ~id input =
+  Store_sqlite.save_product service.store ~user ~id input
+
+let search_products service ~user ~query ~limit =
+  Store_sqlite.search_products service.store ~user ~query ~limit

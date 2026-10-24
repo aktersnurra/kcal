@@ -40,6 +40,23 @@ CREATE INDEX withings_oauth_states_user_expiry_idx ON withings_oauth_states(user
 ALTER TABLE weigh_ins ADD COLUMN withings_connection_id TEXT REFERENCES withings_connections(id);
 CREATE INDEX weigh_ins_withings_connection_idx ON weigh_ins(withings_connection_id);
 |} );
+    ( 3,
+      {|
+CREATE TABLE products (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  name TEXT NOT NULL,
+  basis TEXT NOT NULL,
+  calories_kcal INTEGER NOT NULL,
+  protein_g REAL NOT NULL,
+  carbs_g REAL,
+  fat_g REAL,
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX products_user_name_id_idx ON products(user_id, name, id);
+|} );
   ]
 
 let log_src = Logs.Src.create "kcal.store" ~doc:"SQLite persistence"
@@ -189,6 +206,52 @@ let decode_all_rows statement decode =
     | Sqlite3.Rc.DONE -> Ok (List.rev values)
     | _ -> Error (storage_error ())
   in rows []
+
+let product_columns =
+  "id, user_id, name, basis, calories_kcal, protein_g, carbs_g, fat_g, source, created_at, updated_at"
+
+let product_of_row statement =
+  match Product_id.of_string (text statement 0), User_id.of_string (text statement 1),
+        parse_time (text statement 9), parse_time (text statement 10) with
+  | Some id, Some user_id, Some created_at, Some updated_at ->
+      Some Product.{ id; user_id; name = text statement 2; basis = text statement 3;
+        calories_kcal = int statement 4; protein_g = float statement 5;
+        carbs_g = optional_float statement 6; fat_g = optional_float statement 7;
+        source = text statement 8; created_at; updated_at }
+  | _ -> None
+
+let save_product db ~user ~id input =
+  match Product.validate_input input with
+  | Error _ as error -> error
+  | Ok () ->
+      let current = Sqlite3.Data.TEXT (timestamp (now ())) in
+      let owner = Sqlite3.Data.TEXT (User_id.to_string user.User.id) in
+      let fields = [ Sqlite3.Data.TEXT input.name; Sqlite3.Data.TEXT input.basis;
+        Sqlite3.Data.INT (Int64.of_int input.calories_kcal); Sqlite3.Data.FLOAT input.protein_g;
+        nullable_float input.carbs_g; nullable_float input.fat_g; Sqlite3.Data.TEXT input.source ] in
+      let sql, values = match id with
+        | None ->
+            "INSERT INTO products (" ^ product_columns ^ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING " ^ product_columns,
+            [Sqlite3.Data.TEXT (Product_id.to_string (Product_id.fresh ())); owner] @ fields @ [current; current]
+        | Some id ->
+            "UPDATE products SET name = ?, basis = ?, calories_kcal = ?, protein_g = ?, carbs_g = ?, fat_g = ?, source = ?, updated_at = ? WHERE id = ? AND user_id = ? RETURNING " ^ product_columns,
+            fields @ [current; Sqlite3.Data.TEXT (Product_id.to_string id); owner]
+      in
+      with_statement db sql (fun statement ->
+        match bind statement values with
+        | Error _ as error -> error
+        | Ok () -> row_or_not_found statement product_of_row)
+
+let search_products db ~user ~query ~limit =
+  if String.trim query = "" || limit < 1 || limit > 500 then Error (invalid_input ())
+  else
+    with_statement db
+      ("SELECT " ^ product_columns ^ " FROM products WHERE user_id = ? AND (instr(lower(name), lower(?)) > 0 OR instr(lower(basis), lower(?)) > 0 OR instr(lower(source), lower(?)) > 0) ORDER BY name ASC, id ASC LIMIT ?")
+      (fun statement ->
+        let query = Sqlite3.Data.TEXT query in
+        match bind statement [Sqlite3.Data.TEXT (User_id.to_string user.User.id); query; query; query; Sqlite3.Data.INT (Int64.of_int limit)] with
+        | Error _ as error -> error
+        | Ok () -> decode_all_rows statement product_of_row)
 
 let query_meals db ~user ~from ~to_ ~limit =
   if not (valid_query ~from ~to_ ~limit) then Error (invalid_input ()) else

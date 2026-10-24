@@ -96,3 +96,8 @@
  (name test_summary)
  (modules test_summary)
  (libraries alcotest kcal))
+
+(test
+ (name test_product_store)
+ (modules test_product_store test_support)
+ (libraries alcotest sqlite3 kcal))
