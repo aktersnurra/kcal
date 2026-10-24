@@ -386,10 +386,123 @@ let test_tool_list_is_exact () =
     | Ok (`Assoc fields) -> (match List.assoc_opt "result" fields with Some (`Assoc result) -> (match List.assoc_opt "tools" result with Some (`List tools) -> List.filter_map (function `Assoc tool -> (match List.assoc_opt "name" tool with Some (`String name) -> Some name | _ -> None) | _ -> None) tools | _ -> []) | _ -> [])
     | Error `Forbidden -> [] in
   Alcotest.(check (list string)) "approved tools"
-    [ "record_meal"; "get_meal"; "query_meals"; "update_meal"; "delete_meal"; "get_daily_totals"; "get_daily_series"; "get_summary"; "record_weight"; "get_weight"; "query_weights"; "update_weight"; "delete_weight"; "get_latest_weight"; "begin_withings_connection"; "get_withings_status"; "disconnect_withings" ] names
+    [ "save_product"; "search_products"; "record_meal"; "get_meal"; "query_meals"; "update_meal"; "delete_meal"; "get_daily_totals"; "get_daily_series"; "get_summary"; "record_weight"; "get_weight"; "query_weights"; "update_weight"; "delete_weight"; "get_latest_weight"; "begin_withings_connection"; "get_withings_status"; "disconnect_withings" ] names
+
+let product_arguments = [
+  ("name", `String "Whey 100"); ("basis", `String "40 g");
+  ("calories_kcal", `Int 150); ("protein_g", `Int 31); ("source", `String "label") ]
+
+let test_product_schemas () =
+  let store, user = Test_support.store_with_user () in
+  let response = Mcp.handle ~service:(Service.make ~store) ~identity:(identity user [])
+    (`Assoc [ ("jsonrpc", `String "2.0"); ("method", `String "tools/list") ]) in
+  let tools = match result_member "tools" response with Some (`List tools) -> tools | _ -> Alcotest.fail "tools" in
+  let schema name =
+    let tool = List.find (function `Assoc fields -> field "name" fields = `String name | _ -> false) tools in
+    match tool with `Assoc fields -> (match field "inputSchema" fields with `Assoc s -> s | _ -> assert false) | _ -> assert false in
+  List.iter (fun (name, required, properties) ->
+    let s = schema name in
+    Alcotest.(check json) "required" (`List (List.map (fun s -> `String s) required)) (field "required" s);
+    Alcotest.(check json) "strict" (`Bool false) (field "additionalProperties" s);
+    let props = match field "properties" s with `Assoc p -> p | _ -> assert false in
+    Alcotest.(check (list string)) "properties" (List.sort String.compare properties) (List.sort String.compare (List.map fst props));
+    List.iter (fun (_, p) -> match p with `Assoc fields -> ignore (field "description" fields) | _ -> Alcotest.fail "property") props)
+    [ "save_product", ["name"; "basis"; "calories_kcal"; "protein_g"; "source"],
+        ["id"; "name"; "basis"; "calories_kcal"; "protein_g"; "carbs_g"; "fat_g"; "source"];
+      "search_products", ["query"], ["query"; "limit"];
+      "query_meals", [], ["from"; "to"; "limit"; "search"];
+      "query_weights", [], ["from"; "to"; "limit"] ];
+  List.iter (fun (name, key) ->
+    let properties = match field "properties" (schema name) with `Assoc p -> p | _ -> assert false in
+    let choices = match field key properties with `Assoc p -> field "oneOf" p | _ -> assert false in
+    Alcotest.(check json) "string or nonempty string array advertised"
+      (`List [`Assoc ["type", `String "string"]; `Assoc ["type", `String "array"; "items", `Assoc ["type", `String "string"]; "minItems", `Int 1]]) choices)
+    ["search_products", "query"; "query_meals", "search"]
+
+let test_product_save_search_replace () =
+  let store, user, other = Test_support.store_with_two_users () in
+  let service = Service.make ~store in
+  let handle user name args = Mcp.handle ~service ~identity:(identity user ["ledger:read"; "ledger:write"]) (call name (`Assoc args)) in
+  let saved = structured_content (handle user "save_product" (("carbs_g", `Float 2.) :: product_arguments)) in
+  List.iter (fun (name, want) -> Alcotest.(check json) name want (field name saved))
+    ["name", `String "Whey 100"; "basis", `String "40 g"; "calories_kcal", `Int 150;
+     "protein_g", `Float 31.; "source", `String "label"; "carbs_g", `Float 2.; "fat_g", `Null];
+  Alcotest.(check bool) "no ownership" false (List.mem_assoc "user_id" saved);
+  List.iter (fun name -> match field name saved with `String s -> ignore (Result.get_ok (Time.parse_offset_datetime s)) | _ -> Alcotest.fail name) ["created_at"; "updated_at"];
+  let id = field "id" saved in
+  let search user = field "products" (structured_content (handle user "search_products" ["query", `String "WHEY"])) in
+  Alcotest.(check json) "search full reference" (`List [`Assoc saved]) (search user);
+  Alcotest.(check json) "owner isolation" (`List []) (search other);
+  check_tool_error "foreign replacement" "record not found" (handle other "save_product" (("id", id) :: product_arguments));
+  check_tool_error "unknown replacement" "record not found"
+    (handle user "save_product" (("id", `String (Product_id.to_string (Product_id.fresh ()))) :: product_arguments));
+  let replaced = structured_content (handle user "save_product" (("id", id) :: product_arguments)) in
+  Alcotest.(check json) "id preserved" id (field "id" replaced);
+  Alcotest.(check json) "creation preserved" (field "created_at" saved) (field "created_at" replaced);
+  List.iter (fun name -> Alcotest.(check json) "omitted macros cleared" `Null (field name replaced)) ["carbs_g"; "fat_g"];
+  Alcotest.(check json) "replacement searchable" (`List [`Assoc replaced]) (search user)
+
+let omitted_call name = `Assoc [ ("jsonrpc", `String "2.0"); ("method", `String "tools/call"); ("params", `Assoc ["name", `String name]) ]
+
+let test_product_argument_validation_and_scopes () =
+  let store, user = Test_support.store_with_user () in
+  let service = Service.make ~store in
+  let handle scopes request = Mcp.handle ~service ~identity:(identity user scopes) request in
+  let invalid name args = Alcotest.(check bool) (name ^ " Invalid_input remains -32602") true
+    (response_has_error_code (-32602) (handle ["ledger:read"; "ledger:write"] (call name (`Assoc args)))) in
+  List.iter (fun name ->
+    let args = if name = "save_product" then product_arguments else ["query", `String "whey"] in
+    List.iter (fun key -> invalid name ((key, `String "forbidden") :: args)) ["user_id"; "created_at"; "updated_at"; "unknown"];
+    List.iter (fun request -> Alcotest.(check bool) "scope before parsing" true (is_forbidden (handle [] request)))
+      [call name (`Assoc args); omitted_call name];
+    Alcotest.(check bool) "omitted required arguments" true
+      (response_has_error_code (-32602) (handle ["ledger:read"; "ledger:write"] (omitted_call name)))) ["save_product"; "search_products"];
+  List.iter (fun key -> invalid "save_product" (List.remove_assoc key product_arguments)) ["name"; "basis"; "calories_kcal"; "protein_g"; "source"];
+  List.iter (fun id -> invalid "save_product" (("id", id) :: product_arguments)) [`String "bad"; `Int 1; `Null];
+  List.iter (fun (key, value) -> invalid "save_product" ((key, value) :: List.remove_assoc key product_arguments))
+    ["name", `String " "; "basis", `String ""; "source", `String ""; "calories_kcal", `Int (-1); "protein_g", `Float (-1.); "carbs_g", `Null; "fat_g", `Float (-1.)];
+  invalid "search_products" [];
+  List.iter (fun value -> invalid "search_products" ["query", value]) [`String " "; `Int 1; `Null];
+  List.iter (fun value -> invalid "search_products" ["query", `String "whey"; "limit", value]) [`Int 0; `Int 501; `Int (-1); `String "2"; `Null];
+  Alcotest.(check bool) "read cannot save" true (is_forbidden (handle ["ledger:read"] (call "save_product" (`Assoc product_arguments))));
+  Alcotest.(check bool) "write cannot search" true (is_forbidden (handle ["ledger:write"] (call "search_products" (`Assoc ["query", `String "whey"]))));
+  Alcotest.(check json) "invalid and unauthorized calls created nothing" (`List [])
+    (field "products" (structured_content (handle ["ledger:read"] (call "search_products" (`Assoc ["query", `String "whey"])))));
+  for _ = 1 to 101 do
+    ignore (structured_content (handle ["ledger:write"] (call "save_product" (`Assoc product_arguments))))
+  done;
+  List.iter (fun (args, count) ->
+    let products = field "products" (structured_content (handle ["ledger:read"] (call "search_products" (`Assoc (("query", `String "whey") :: args))))) in
+    match products with `List rows -> Alcotest.(check int) "limit" count (List.length rows) | _ -> Alcotest.fail "products")
+    [[], 100; ["limit", `Int 1], 1; ["limit", `Int 500], 101]
+
+let test_query_meals_search_composes_with_dates_and_limit () =
+  let store, user = Test_support.store_with_user () in
+  let service = Service.make ~store in
+  List.iter (fun (date, description) ->
+    let eaten_at = Result.get_ok (Time.parse_offset_datetime date) in
+    let input = { (Test_support.meal_input ~eaten_at ()) with description } in
+    ignore (Result.get_ok (Service.record_meal service ~user input)))
+    ["2026-07-01T10:00:00Z", "Whey old"; "2026-07-02T10:00:00Z", "Soup";
+     "2026-07-03T10:00:00Z", "Whey first"; "2026-07-04T10:00:00Z", "Whey second"; "2026-07-05T10:00:00Z", "Whey late"];
+  let handle name args = Mcp.handle ~service ~identity:(read_identity user) (call name (`Assoc args)) in
+  let args = ["from", `String "2026-07-02T00:00:00Z"; "to", `String "2026-07-04T23:59:59Z"; "limit", `Int 1] in
+  let descriptions response = match field "meals" (structured_content response) with
+    | `List rows -> List.map (function `Assoc row -> field "description" row | _ -> assert false) rows | _ -> assert false in
+  Alcotest.(check (list json)) "filter before limit with bounds" [`String "Whey first"]
+    (descriptions (handle "query_meals" (("search", `String "WHEY") :: args)));
+  Alcotest.(check (list json)) "omitted search unchanged" [`String "Soup"] (descriptions (handle "query_meals" args));
+  List.iter (fun value -> Alcotest.(check bool) "invalid meal search" true
+    (response_has_error_code (-32602) (handle "query_meals" ["search", value]))) [`String " "; `Int 1; `Null];
+  Alcotest.(check bool) "weight search rejected" true
+    (response_has_error_code (-32602) (handle "query_weights" ["search", `String "whey"]))
 
 let () = Alcotest.run "mcp" [
   ("boundary", [
+    Alcotest.test_case "product schemas" `Quick test_product_schemas;
+    Alcotest.test_case "product save search replace" `Quick test_product_save_search_replace;
+    Alcotest.test_case "product validation and scopes" `Quick test_product_argument_validation_and_scopes;
+    Alcotest.test_case "meal search dates and limit" `Quick test_query_meals_search_composes_with_dates_and_limit;
     Alcotest.test_case "rejects user id" `Quick test_record_meal_rejects_user_id;
     Alcotest.test_case "rejects bad JSON-RPC and provenance" `Quick test_mcp_rejects_bad_jsonrpc_and_provenance_fields;
     Alcotest.test_case "read scope permits reads only" `Quick test_read_scope_allows_reads_only;

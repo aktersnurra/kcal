@@ -57,6 +57,17 @@ let meal_json (meal : Meal.t) =
     ("notes", json_option (fun v -> `String v) meal.notes);
     ("created_at", `String (Time.to_utc_string meal.created_at)); ("updated_at", `String (Time.to_utc_string meal.updated_at)) ]
 
+let product_json (product : Product.t) =
+  `Assoc [
+    ("id", `String (Product_id.to_string product.id));
+    ("name", `String product.name); ("basis", `String product.basis);
+    ("calories_kcal", `Int product.calories_kcal); ("protein_g", `Float product.protein_g);
+    ("carbs_g", json_option (fun v -> `Float v) product.carbs_g);
+    ("fat_g", json_option (fun v -> `Float v) product.fat_g);
+    ("source", `String product.source);
+    ("created_at", `String (Time.to_utc_string product.created_at));
+    ("updated_at", `String (Time.to_utc_string product.updated_at)) ]
+
 let float_json value = `Float value
 
 (* One row per local date.  Unlogged days keep meal_count 0 but report null
@@ -163,8 +174,27 @@ let query_properties = [
   property "from" "Inclusive lower bound as an RFC 3339 UTC timestamp (e.g. 2026-09-22T00:00:00Z for the start of that day)." string;
   property "to" "Inclusive upper bound as an RFC 3339 UTC timestamp." string;
   property "limit"
-    "Maximum number of records to return (default 100, max 500). Results are ordered oldest first, so once you have more history than limit, pass from/to to scope the query instead of relying on limit alone. For a single day's totals, prefer get_daily_totals; for the current weight, prefer get_latest_weight."
+    "Maximum number of records to return (default 100, max 500). Without text search, results are ordered oldest first, so once you have more history than limit, pass from/to to scope the query instead of relying on limit alone. For a single day's totals, prefer get_daily_totals; for the current weight, prefer get_latest_weight."
     integer;
+]
+let matching_description =
+  "Plain-text string or nonempty array of alternatives. Words are OR-matched in any order and ranked by lexical relevance (BM25), with Swedish case folding and distinct diacritics. No translation, stemming or prefix matching. Blank or ASCII-tokenless alternatives are rejected."
+let search_input = `Assoc ["oneOf", `List [string; `Assoc ["type", `String "array"; "items", string; "minItems", `Int 1]]]
+let meal_query_properties = query_properties @ [
+  property "search" ("Match description, estimate_source or notes before date bounds and limit. " ^ matching_description) search_input;
+]
+let product_properties = [
+  property "name" "Nonblank name of a packaged food or recurring dish." string;
+  property "basis" "Nonblank text amount the nutrition describes, e.g. 40 g or one portion. No unit conversion is performed." string;
+  property "calories_kcal" "Nonnegative energy in kilocalories for the stated basis." integer;
+  property "protein_g" "Nonnegative protein in grams for the stated basis." number;
+  property "source" "Nonblank free-text provenance, e.g. label or estimated from strawberry flavour." string;
+  property "carbs_g" "Nonnegative carbohydrates for the basis, if known; omission on replacement clears to null." number;
+  property "fat_g" "Nonnegative fat for the basis, if known; omission on replacement clears to null." number;
+]
+let product_search_properties = [
+  property "query" ("Match name, basis or source. " ^ matching_description) search_input;
+  property "limit" "Maximum references returned (default 100, range 1–500), ranked by relevance, then name and id." integer;
 ]
 let timezone_property =
   property "timezone"
@@ -195,9 +225,11 @@ let withings_tools = [
   tool "get_withings_status" ~description:"Check whether a Withings account is connected and whether it needs reauthorization." (schema [] []);
   tool "disconnect_withings" ~description:"Unlink the connected Withings account." (schema [] []) ]
 let tools = [
+  tool "save_product" ~description:"Save reusable nutrition for a text basis. Without id, create; with id, full replacement of your reference, not a partial patch (preserves id/created_at). Unknown or foreign ids are not found. The agent scales values and records meals normally; saving never rewrites meals." (schema (product_properties @ id_properties) [ "name"; "basis"; "calories_kcal"; "protein_g"; "source" ]);
+  tool "search_products" ~description:("Find your reusable nutrition references, ranked by relevance, then name and id. Scale values in the agent; references are independent of meals. " ^ matching_description) (schema product_search_properties [ "query" ]);
   tool "record_meal" ~description:"Record a new meal in the nutrition ledger." (schema meal_properties [ "description"; "calories_kcal"; "protein_g" ]);
   tool "get_meal" ~description:"Fetch a single meal by id." (schema id_properties [ "id" ]);
-  tool "query_meals" ~description:"List meals, oldest first, optionally bounded by from/to. For a day's totals, prefer get_daily_totals; for intake over several days, get_daily_series or get_summary. Both aggregate server-side instead of requiring client-side summation." (schema query_properties []);
+  tool "query_meals" ~description:"List meals, ranked by relevance when searching and oldest first otherwise, optionally bounded by from/to and filtered by search. For a day's totals, prefer get_daily_totals; for intake over several days, get_daily_series or get_summary. Both aggregate server-side instead of requiring client-side summation." (schema meal_query_properties []);
   tool "update_meal" ~description:"Update fields on an existing meal; omitted fields are left unchanged." (schema (id_properties @ meal_properties) [ "id" ]);
   tool "delete_meal" ~description:"Delete a meal." (schema id_properties [ "id" ]);
   tool "get_daily_totals" ~description:"One calendar day's intake and weight: date, meal_count, calories_kcal, protein_g, carbs_g, fat_g, weigh_in_count, mean_weight_kg. On a day with no meals, meal_count is 0 and the intake fields are null (unknown, not zero); mean_weight_kg is null without a weigh-in. Prefer this over query_meals plus client-side summation." (schema daily_totals_properties []);
@@ -288,9 +320,9 @@ let withings_status_json = function
                ("token_expires_at", json_option (fun value -> `String (Time.to_utc_string value)) status.token_expires_at) ]
 
 let required_scope = function
-  | "get_meal" | "query_meals" | "get_daily_totals" | "get_daily_series" | "get_summary" | "get_weight" | "query_weights" | "get_latest_weight" ->
+  | "search_products" | "get_meal" | "query_meals" | "get_daily_totals" | "get_daily_series" | "get_summary" | "get_weight" | "query_weights" | "get_latest_weight" ->
       Some "ledger:read"
-  | "record_meal" | "update_meal" | "delete_meal"
+  | "save_product" | "record_meal" | "update_meal" | "delete_meal"
   | "record_weight" | "update_weight" | "delete_weight" ->
       Some "ledger:write"
   | "begin_withings_connection" | "get_withings_status"
@@ -317,6 +349,47 @@ let call_disconnect_withings withings ~user =
   Result.map (fun () -> text_result (`Assoc [ ("disconnected", `Bool true) ]))
     (Store_sqlite.delete_withings_connection withings.oauth.store ~user)
 
+let product_input fields : (Product.input, Error.t) result =
+  let* name = required_string "name" fields in
+  let* basis = required_string "basis" fields in
+  let* calories_kcal = required_int "calories_kcal" fields in
+  let* protein_g = required_float "protein_g" fields in
+  let* source = required_string "source" fields in
+  let* carbs_g = optional_float "carbs_g" fields in
+  let* fat_g = optional_float "fat_g" fields in
+  Ok Product.{ name; basis; calories_kcal; protein_g; source; carbs_g; fat_g }
+
+let call_save_product service ~user fields =
+  let* fields = only_fields ("id" :: List.map fst product_properties) (`Assoc fields) in
+  let* value = optional_string "id" fields in
+  let* product_id = match value with
+    | None -> Ok None
+    | Some value -> Result.map Option.some (id value Product_id.of_string) in
+  let* input = product_input fields in
+  Result.map (fun product -> text_result (product_json product))
+    (Service.save_product service ~user ~id:product_id input)
+
+let parse_search = function
+  | `String text -> Search_query.of_strings [text]
+  | `List values ->
+      let rec strings = function
+        | [] -> Ok []
+        | `String text :: rest -> let* rest = strings rest in Ok (text :: rest)
+        | _ -> Error (Error.Invalid_input "search alternatives must be strings")
+      in
+      let* alternatives = strings values in
+      Search_query.of_strings alternatives
+  | _ -> Error (Error.Invalid_input "search must be a string or nonempty array of strings")
+
+let call_search_products service ~user fields =
+  let* fields = only_fields (List.map fst product_search_properties) (`Assoc fields) in
+  let* query = match List.assoc_opt "query" fields with
+    | Some value -> parse_search value
+    | None -> Error (Error.Invalid_input "query is required") in
+  let* limit = optional_int "limit" fields in
+  Result.map (fun products -> text_result (`Assoc [ ("products", `List (List.map product_json products)) ]))
+    (Service.search_products service ~user ~query ~limit:(Option.value limit ~default:100))
+
 let call_record_meal service ~user fields =
   let* input = meal_create fields in
   Result.map (fun meal -> text_result (meal_json meal)) (Service.record_meal service ~user input)
@@ -328,9 +401,13 @@ let call_get_meal service ~user fields =
   Result.map (fun meal -> text_result (meal_json meal)) (Service.get_meal service ~user meal_id)
 
 let call_query_meals service ~user fields =
-  let* from, to_, limit = query fields in
+  let* fields = only_fields (List.map fst meal_query_properties) (`Assoc fields) in
+  let* search = match List.assoc_opt "search" fields with
+    | None -> Ok None
+    | Some value -> Result.map Option.some (parse_search value) in
+  let* from, to_, limit = query (List.remove_assoc "search" fields) in
   Result.map (fun meals -> text_result (`Assoc [ ("meals", `List (List.map meal_json meals)) ]))
-    (Service.query_meals service ~user ~from ~to_ ~limit)
+    (Service.query_meals ?search service ~user ~from ~to_ ~limit)
 
 let records_in_range service ~user { zone; range } =
   let start, stop = Date_range.utc_bounds zone range in
@@ -423,6 +500,8 @@ let call ?withings service (identity : Auth.identity) name arguments =
       | "begin_withings_connection" -> call_begin_withings_connection withings ~user
       | "get_withings_status" -> call_get_withings_status withings ~user
       | "disconnect_withings" -> call_disconnect_withings withings ~user
+      | "save_product" -> call_save_product service ~user fields
+      | "search_products" -> call_search_products service ~user fields
       | "record_meal" -> call_record_meal service ~user fields
       | "get_meal" -> call_get_meal service ~user fields
       | "query_meals" -> call_query_meals service ~user fields
@@ -501,7 +580,7 @@ let handle ?withings ~service ~identity request =
                   | Some scope when not (Auth.has_scope identity scope) -> Error `Forbidden
                   | _ ->
                       Ok (call_response ~request_id (call ?withings service identity name arguments)))
-              | Ok ("query_meals" | "query_weights" | "get_daily_totals" | "get_latest_weight"
+              | Ok ("save_product" | "search_products" | "query_meals" | "query_weights" | "get_daily_totals" | "get_latest_weight"
                   | "begin_withings_connection" | "get_withings_status" | "disconnect_withings" as name), None ->
                   (match required_scope name with
                   | Some scope when not (Auth.has_scope identity scope) -> Error `Forbidden
