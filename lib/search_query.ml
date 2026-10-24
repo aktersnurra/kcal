@@ -1,5 +1,13 @@
 type t = string
 
+(* Fun.protect wraps cleanup exceptions, including errors reported by finalize
+   after a failed step. Normalize only SQLite failures, not unrelated bugs. *)
+let rec is_sqlite_failure = function
+  | Sqlite3.Error _ | Sqlite3.SqliteError _ | Sqlite3.InternalError _
+  | Sqlite3.RangeError _ | Sqlite3.DataTypeError _ -> true
+  | Fun.Finally_raised error -> is_sqlite_failure error
+  | _ -> false
+
 let with_statement db sql f =
   let statement = Sqlite3.prepare db sql in
   Fun.protect
@@ -43,8 +51,7 @@ let of_strings alternatives =
             let quote word = "\"" ^ String.concat "\"\"" (String.split_on_char '"' word) ^ "\"" in
             Ok (String.concat " OR " (List.map quote words)))
     with
-    | Sqlite3.Error _ | Sqlite3.SqliteError _ | Sqlite3.InternalError _
-    | Sqlite3.RangeError _ | Sqlite3.DataTypeError _ ->
+    | error when is_sqlite_failure error ->
         Error (Error.Storage_error "search query tokenization failed")
 
 let fts5_match_expression query = query
