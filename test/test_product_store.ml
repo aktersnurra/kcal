@@ -1,10 +1,11 @@
+let parsed text = Result.get_ok (Search_query.of_strings [text])
 let input : Product.input =
   { name = "Whey 100"; basis = "40 g"; calories_kcal = 150; protein_g = 31.;
     carbs_g = Some 2.; fat_g = Some 1.; source = "label" }
 
 let save store user ?id value = Result.get_ok (Store_sqlite.save_product store ~user ~id value)
 let search store user ?(limit = 100) query =
-  Result.get_ok (Store_sqlite.search_products store ~user ~query ~limit)
+  Result.get_ok (Store_sqlite.search_products store ~user ~query:(parsed query) ~limit)
 let check_equal label expected actual = Alcotest.(check bool) label true (expected = actual)
 let invalid = function Error (Error.Invalid_input _) -> true | _ -> false
 let hidden = function Error Error.Not_found -> true | _ -> false
@@ -49,9 +50,9 @@ let test_validation () =
     check_equal "save invalid" true (invalid (Store_sqlite.save_product store ~user ~id:None value))) values;
   ignore (save store user { input with calories_kcal = 0; protein_g = 0.; carbs_g = Some 0.; fat_g = Some 0. });
   List.iter (fun query -> check_equal "blank query rejected" true
-    (invalid (Store_sqlite.search_products store ~user ~query ~limit:100))) [""; " \n"];
+    (invalid (Search_query.of_strings [query]))) [""; " \n"];
   List.iter (fun limit -> check_equal "limit rejected" true
-    (invalid (Store_sqlite.search_products store ~user ~query:"whey" ~limit))) [0;501]
+    (invalid (Store_sqlite.search_products store ~user ~query:(parsed "whey") ~limit))) [0;501]
 
 let test_isolation () =
   let store, alice, bob = Test_support.store_with_two_users () in
@@ -75,10 +76,10 @@ let test_literal_search_and_order () =
   List.iter (fun (name, basis, source, query) ->
     let p = save store user { input with name; basis; source } in
     check_equal ("literal " ^ query) [p] (search store user query))
-    ["100% food", "40 g", "label", "%";
-     "under_score", "40 g", "label", "_";
-     "Baker's food", "40 g", "label", "'";
-     "Polarbröd", "40 g", "label", "bröd";
+    ["100% food", "40 g", "label", "100";
+     "under_score", "40 g", "label", "score";
+     "Baker's food", "40 g", "label", "Baker's";
+     "Polarbröd", "40 g", "label", "POLARBRÖD";
      "Basis match", "one portion", "label", "PORTION";
      "Source match", "40 g", "estimated strawberry", "STRAWBERRY"];
   check_equal "no matches" [] (search store user "nonexistent")
@@ -89,7 +90,7 @@ let test_storage_errors () =
       let sanitized = function Error (Error.Storage_error "SQLite operation failed") -> true | _ -> false in
       check_equal "locked insert" true (sanitized (Store_sqlite.save_product store ~user ~id:None input));
       check_equal "locked update" true (sanitized (Store_sqlite.save_product store ~user ~id:(Some product.id) input));
-      check_equal "locked search" true (sanitized (Store_sqlite.search_products store ~user ~query:"whey" ~limit:100)))
+      check_equal "locked search" true (sanitized (Store_sqlite.search_products store ~user ~query:(parsed "whey") ~limit:100)))
 
 let () = Alcotest.run "product store" ["references", List.map (fun (name, test) -> Alcotest.test_case name `Quick test)
   ["save and replace", test_save_and_replace; "validation", test_validation;

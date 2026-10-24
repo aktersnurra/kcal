@@ -1,5 +1,18 @@
 # Nutrition Reference Lookup Implementation Plan
 
+> Search follow-up (2026-10-24): the historical substring-search decisions below
+> are superseded. Product `query` and optional meal `search` accept a string or
+> nonempty array of plain-text alternatives, compiled once to `Search_query.t`.
+> Distinct words are OR-matched through SQLite FTS5 unicode61 (diacritics kept),
+> ranked by BM25 ascending, then product name/id or meal eaten_at/id. Owner,
+> date and deleted filters precede the final limit; no-search meals stay oldest
+> first. Migration 004 backfills indexes and maintains them with triggers.
+> No translation, stemming, prefix expansion, raw FTS syntax or new dependencies.
+> Empty/blank and ASCII-tokenless alternatives are invalid; non-ASCII symbol-only
+> text may return no matches rather than duplicating Unicode tokenization.
+> See README's current API and deployment requirement. All unrelated decisions
+> below remain unchanged.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add reusable food-reference lookup and meal-history text search without changing how meals are logged.

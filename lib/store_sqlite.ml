@@ -57,6 +57,33 @@ CREATE TABLE products (
 );
 CREATE INDEX products_user_name_id_idx ON products(user_id, name, id);
 |} );
+    ( 4,
+      {|
+CREATE VIRTUAL TABLE products_fts USING fts5(name, basis, source, content='products', content_rowid='rowid', tokenize='unicode61 remove_diacritics 0');
+INSERT INTO products_fts(products_fts) VALUES ('rebuild');
+CREATE TRIGGER products_fts_insert AFTER INSERT ON products BEGIN
+  INSERT INTO products_fts(rowid, name, basis, source) VALUES (new.rowid, new.name, new.basis, new.source);
+END;
+CREATE TRIGGER products_fts_update AFTER UPDATE ON products BEGIN
+  INSERT INTO products_fts(products_fts, rowid, name, basis, source) VALUES ('delete', old.rowid, old.name, old.basis, old.source);
+  INSERT INTO products_fts(rowid, name, basis, source) VALUES (new.rowid, new.name, new.basis, new.source);
+END;
+CREATE TRIGGER products_fts_delete AFTER DELETE ON products BEGIN
+  INSERT INTO products_fts(products_fts, rowid, name, basis, source) VALUES ('delete', old.rowid, old.name, old.basis, old.source);
+END;
+CREATE VIRTUAL TABLE meals_fts USING fts5(description, estimate_source, notes, content='meals', content_rowid='rowid', tokenize='unicode61 remove_diacritics 0');
+INSERT INTO meals_fts(meals_fts) VALUES ('rebuild');
+CREATE TRIGGER meals_fts_insert AFTER INSERT ON meals BEGIN
+  INSERT INTO meals_fts(rowid, description, estimate_source, notes) VALUES (new.rowid, new.description, new.estimate_source, new.notes);
+END;
+CREATE TRIGGER meals_fts_update AFTER UPDATE ON meals BEGIN
+  INSERT INTO meals_fts(meals_fts, rowid, description, estimate_source, notes) VALUES ('delete', old.rowid, old.description, old.estimate_source, old.notes);
+  INSERT INTO meals_fts(rowid, description, estimate_source, notes) VALUES (new.rowid, new.description, new.estimate_source, new.notes);
+END;
+CREATE TRIGGER meals_fts_delete AFTER DELETE ON meals BEGIN
+  INSERT INTO meals_fts(meals_fts, rowid, description, estimate_source, notes) VALUES ('delete', old.rowid, old.description, old.estimate_source, old.notes);
+END;
+|} );
   ]
 
 let log_src = Logs.Src.create "kcal.store" ~doc:"SQLite persistence"
@@ -242,30 +269,33 @@ let save_product db ~user ~id input =
         | Error _ as error -> error
         | Ok () -> row_or_not_found statement product_of_row)
 
+let qualified_columns table columns =
+  String.split_on_char ',' columns
+  |> List.map (fun column -> table ^ "." ^ String.trim column)
+  |> String.concat ", "
+
 let search_products db ~user ~query ~limit =
-  if String.trim query = "" || limit < 1 || limit > 500 then Error (invalid_input ())
+  if limit < 1 || limit > 500 then Error (invalid_input ())
   else
     with_statement db
-      ("SELECT " ^ product_columns ^ " FROM products WHERE user_id = ? AND (instr(lower(name), lower(?)) > 0 OR instr(lower(basis), lower(?)) > 0 OR instr(lower(source), lower(?)) > 0) ORDER BY name ASC, id ASC LIMIT ?")
+      ("SELECT " ^ qualified_columns "products" product_columns ^ " FROM products JOIN products_fts ON products.rowid = products_fts.rowid WHERE products.user_id = ? AND products_fts MATCH ? ORDER BY bm25(products_fts), products.name, products.id LIMIT ?")
       (fun statement ->
-        let query = Sqlite3.Data.TEXT query in
-        match bind statement [Sqlite3.Data.TEXT (User_id.to_string user.User.id); query; query; query; Sqlite3.Data.INT (Int64.of_int limit)] with
+        match bind statement [Sqlite3.Data.TEXT (User_id.to_string user.User.id); Sqlite3.Data.TEXT (Search_query.fts5_match_expression query); Sqlite3.Data.INT (Int64.of_int limit)] with
         | Error _ as error -> error
         | Ok () -> decode_all_rows statement product_of_row)
 
 let query_meals ?search db ~user ~from ~to_ ~limit =
-  if not (valid_query ~from ~to_ ~limit)
-     || (match search with Some text -> String.trim text = "" | None -> false)
-  then Error (invalid_input ()) else
-  let search_clause, search_values = match search with
-    | None -> "", []
-    | Some text ->
-        let value = Sqlite3.Data.TEXT text in
-        " AND (instr(lower(description), lower(?)) > 0 OR instr(lower(estimate_source), lower(?)) > 0 OR instr(lower(notes), lower(?)) > 0)",
-        [value; value; value]
+  if not (valid_query ~from ~to_ ~limit) then Error (invalid_input ()) else
+  let join, search_clause, search_values, ordering = match search with
+    | None -> "", "", [], "meals.eaten_at ASC, meals.id ASC"
+    | Some query ->
+        " JOIN meals_fts ON meals.rowid = meals_fts.rowid",
+        " AND meals_fts MATCH ?",
+        [Sqlite3.Data.TEXT (Search_query.fts5_match_expression query)],
+        "bm25(meals_fts), meals.eaten_at ASC, meals.id ASC"
   in
   with_statement db
-    ("SELECT " ^ meal_columns ^ " FROM meals WHERE user_id = ? AND deleted_at IS NULL" ^ search_clause ^ " AND (? IS NULL OR eaten_at >= ?) AND (? IS NULL OR eaten_at <= ?) ORDER BY eaten_at ASC LIMIT ?")
+    ("SELECT " ^ qualified_columns "meals" meal_columns ^ " FROM meals" ^ join ^ " WHERE meals.user_id = ? AND meals.deleted_at IS NULL" ^ search_clause ^ " AND (? IS NULL OR meals.eaten_at >= ?) AND (? IS NULL OR meals.eaten_at <= ?) ORDER BY " ^ ordering ^ " LIMIT ?")
     (fun statement ->
       let from_value = nullable (Option.map timestamp from) and to_value = nullable (Option.map timestamp to_) in
       match bind statement ([ Sqlite3.Data.TEXT (User_id.to_string user.User.id) ] @ search_values @ [ from_value; from_value; to_value; to_value; Sqlite3.Data.INT (Int64.of_int limit) ]) with

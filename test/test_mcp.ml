@@ -411,7 +411,13 @@ let test_product_schemas () =
         ["id"; "name"; "basis"; "calories_kcal"; "protein_g"; "carbs_g"; "fat_g"; "source"];
       "search_products", ["query"], ["query"; "limit"];
       "query_meals", [], ["from"; "to"; "limit"; "search"];
-      "query_weights", [], ["from"; "to"; "limit"] ]
+      "query_weights", [], ["from"; "to"; "limit"] ];
+  List.iter (fun (name, key) ->
+    let properties = match field "properties" (schema name) with `Assoc p -> p | _ -> assert false in
+    let choices = match field key properties with `Assoc p -> field "oneOf" p | _ -> assert false in
+    Alcotest.(check json) "string or nonempty string array advertised"
+      (`List [`Assoc ["type", `String "string"]; `Assoc ["type", `String "array"; "items", `Assoc ["type", `String "string"]; "minItems", `Int 1]]) choices)
+    ["search_products", "query"; "query_meals", "search"]
 
 let test_product_save_search_replace () =
   let store, user, other = Test_support.store_with_two_users () in

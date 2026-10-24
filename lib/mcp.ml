@@ -174,13 +174,14 @@ let query_properties = [
   property "from" "Inclusive lower bound as an RFC 3339 UTC timestamp (e.g. 2026-09-22T00:00:00Z for the start of that day)." string;
   property "to" "Inclusive upper bound as an RFC 3339 UTC timestamp." string;
   property "limit"
-    "Maximum number of records to return (default 100, max 500). Results are ordered oldest first, so once you have more history than limit, pass from/to to scope the query instead of relying on limit alone. For a single day's totals, prefer get_daily_totals; for the current weight, prefer get_latest_weight."
+    "Maximum number of records to return (default 100, max 500). Without text search, results are ordered oldest first, so once you have more history than limit, pass from/to to scope the query instead of relying on limit alone. For a single day's totals, prefer get_daily_totals; for the current weight, prefer get_latest_weight."
     integer;
 ]
 let matching_description =
-  "Literal substring matching: ASCII case-insensitive; SQLite does not fold Swedish/non-ASCII case. Blank text is rejected."
+  "Plain-text string or nonempty array of alternatives. Words are OR-matched in any order and ranked by lexical relevance (BM25), with Swedish case folding and distinct diacritics. No translation, stemming or prefix matching. Blank or ASCII-tokenless alternatives are rejected."
+let search_input = `Assoc ["oneOf", `List [string; `Assoc ["type", `String "array"; "items", string; "minItems", `Int 1]]]
 let meal_query_properties = query_properties @ [
-  property "search" ("Match description, estimate_source or notes before date bounds and limit. " ^ matching_description) string;
+  property "search" ("Match description, estimate_source or notes before date bounds and limit. " ^ matching_description) search_input;
 ]
 let product_properties = [
   property "name" "Nonblank name of a packaged food or recurring dish." string;
@@ -192,8 +193,8 @@ let product_properties = [
   property "fat_g" "Nonnegative fat for the basis, if known; omission on replacement clears to null." number;
 ]
 let product_search_properties = [
-  property "query" ("Match name, basis or source. " ^ matching_description) string;
-  property "limit" "Maximum references returned (default 100, range 1–500), ordered by name then id." integer;
+  property "query" ("Match name, basis or source. " ^ matching_description) search_input;
+  property "limit" "Maximum references returned (default 100, range 1–500), ranked by relevance, then name and id." integer;
 ]
 let timezone_property =
   property "timezone"
@@ -225,10 +226,10 @@ let withings_tools = [
   tool "disconnect_withings" ~description:"Unlink the connected Withings account." (schema [] []) ]
 let tools = [
   tool "save_product" ~description:"Save reusable nutrition for a text basis. Without id, create; with id, full replacement of your reference, not a partial patch (preserves id/created_at). Unknown or foreign ids are not found. The agent scales values and records meals normally; saving never rewrites meals." (schema (product_properties @ id_properties) [ "name"; "basis"; "calories_kcal"; "protein_g"; "source" ]);
-  tool "search_products" ~description:("Find your reusable nutrition references, ordered by name then id. Scale values in the agent; references are independent of meals. " ^ matching_description) (schema product_search_properties [ "query" ]);
+  tool "search_products" ~description:("Find your reusable nutrition references, ranked by relevance, then name and id. Scale values in the agent; references are independent of meals. " ^ matching_description) (schema product_search_properties [ "query" ]);
   tool "record_meal" ~description:"Record a new meal in the nutrition ledger." (schema meal_properties [ "description"; "calories_kcal"; "protein_g" ]);
   tool "get_meal" ~description:"Fetch a single meal by id." (schema id_properties [ "id" ]);
-  tool "query_meals" ~description:"List meals, oldest first, optionally bounded by from/to and filtered by search. For a day's totals, prefer get_daily_totals; for intake over several days, get_daily_series or get_summary. Both aggregate server-side instead of requiring client-side summation." (schema meal_query_properties []);
+  tool "query_meals" ~description:"List meals, ranked by relevance when searching and oldest first otherwise, optionally bounded by from/to and filtered by search. For a day's totals, prefer get_daily_totals; for intake over several days, get_daily_series or get_summary. Both aggregate server-side instead of requiring client-side summation." (schema meal_query_properties []);
   tool "update_meal" ~description:"Update fields on an existing meal; omitted fields are left unchanged." (schema (id_properties @ meal_properties) [ "id" ]);
   tool "delete_meal" ~description:"Delete a meal." (schema id_properties [ "id" ]);
   tool "get_daily_totals" ~description:"One calendar day's intake and weight: date, meal_count, calories_kcal, protein_g, carbs_g, fat_g, weigh_in_count, mean_weight_kg. On a day with no meals, meal_count is 0 and the intake fields are null (unknown, not zero); mean_weight_kg is null without a weigh-in. Prefer this over query_meals plus client-side summation." (schema daily_totals_properties []);
@@ -368,9 +369,23 @@ let call_save_product service ~user fields =
   Result.map (fun product -> text_result (product_json product))
     (Service.save_product service ~user ~id:product_id input)
 
+let parse_search = function
+  | `String text -> Search_query.of_strings [text]
+  | `List values ->
+      let rec strings = function
+        | [] -> Ok []
+        | `String text :: rest -> let* rest = strings rest in Ok (text :: rest)
+        | _ -> Error (Error.Invalid_input "search alternatives must be strings")
+      in
+      let* alternatives = strings values in
+      Search_query.of_strings alternatives
+  | _ -> Error (Error.Invalid_input "search must be a string or nonempty array of strings")
+
 let call_search_products service ~user fields =
   let* fields = only_fields (List.map fst product_search_properties) (`Assoc fields) in
-  let* query = required_string "query" fields in
+  let* query = match List.assoc_opt "query" fields with
+    | Some value -> parse_search value
+    | None -> Error (Error.Invalid_input "query is required") in
   let* limit = optional_int "limit" fields in
   Result.map (fun products -> text_result (`Assoc [ ("products", `List (List.map product_json products)) ]))
     (Service.search_products service ~user ~query ~limit:(Option.value limit ~default:100))
@@ -387,7 +402,9 @@ let call_get_meal service ~user fields =
 
 let call_query_meals service ~user fields =
   let* fields = only_fields (List.map fst meal_query_properties) (`Assoc fields) in
-  let* search = optional_string "search" fields in
+  let* search = match List.assoc_opt "search" fields with
+    | None -> Ok None
+    | Some value -> Result.map Option.some (parse_search value) in
   let* from, to_, limit = query (List.remove_assoc "search" fields) in
   Result.map (fun meals -> text_result (`Assoc [ ("meals", `List (List.map meal_json meals)) ]))
     (Service.query_meals ?search service ~user ~from ~to_ ~limit)

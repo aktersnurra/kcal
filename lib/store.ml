@@ -6,13 +6,13 @@ module type S = sig
     t -> user:User.t -> id:Product_id.t option -> Product.input -> (Product.t, Error.t) result
 
   val search_products :
-    t -> user:User.t -> query:string -> limit:int -> (Product.t list, Error.t) result
+    t -> user:User.t -> query:Search_query.t -> limit:int -> (Product.t list, Error.t) result
 
   val create_meal : t -> user:User.t -> Meal.create -> (Meal.t, Error.t) result
   val get_meal : t -> user:User.t -> Meal_id.t -> (Meal.t, Error.t) result
 
   val query_meals :
-    ?search:string ->
+    ?search:Search_query.t ->
     t ->
     user:User.t ->
     from:Ptime.t option ->

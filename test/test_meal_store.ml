@@ -1,3 +1,4 @@
+let parsed text = Result.get_ok (Search_query.of_strings [text])
 let test_user_resolution_is_stable () =
   let store, first = Test_support.store_with_user () in
   let second =
@@ -123,11 +124,11 @@ let test_search_matches_literal_text_and_scopes_results () =
   Result.get_ok (Store_sqlite.delete_meal store ~user deleted.id);
   List.iter (fun (search, expected) ->
     let meals = Result.get_ok
-      (Store_sqlite.query_meals ~search store ~user ~from:None ~to_:None ~limit:100) in
+      (Store_sqlite.query_meals ~search:(parsed search) store ~user ~from:None ~to_:None ~limit:100) in
     let ids meals = List.map (fun (meal : Meal.t) -> Meal_id.to_string meal.id) meals |> List.sort String.compare in
     Alcotest.(check (list string)) search (ids expected) (ids meals))
-    [ "whey", [description; source; notes]; "bröd", [bread]; "%", [percent];
-      "_", [underscore]; "'", [apostrophe]; "missing", [] ]
+    [ "whey", [description; source; notes]; "POLARBRÖD", [bread]; "20", [percent];
+      "bar", [underscore]; "Baker's", [apostrophe]; "missing", [] ]
 
 let test_search_composes_with_dates_order_and_limit () =
   let store, user = Test_support.store_with_user () in
@@ -147,7 +148,7 @@ let test_search_composes_with_dates_order_and_limit () =
     Alcotest.(check (list string)) label (ids expected) (ids (Result.get_ok result))
   in
   let query ?search ?(from=None) ?(to_=None) limit =
-    Service.query_meals ?search service ~user ~from ~to_ ~limit
+    Service.query_meals ?search:(Option.map parsed search) service ~user ~from ~to_ ~limit
   in
   check "filter before limit" [first] (query ~search:"whey" 1);
   check "oldest first" [first; middle; last] (query ~search:"whey" 100);
@@ -161,7 +162,7 @@ let test_search_rejects_blank_text_and_invalid_limits () =
   let store, user = Test_support.store_with_user () in
   List.iter (fun (search, limit) ->
     Alcotest.(check bool) "invalid search query" true
-      (match Store_sqlite.query_meals ~search store ~user ~from:None ~to_:None ~limit with
+      (match (match Search_query.of_strings [search] with Error e -> Error e | Ok search -> Store_sqlite.query_meals ~search store ~user ~from:None ~to_:None ~limit) with
        | Error (Error.Invalid_input _) -> true
        | _ -> false))
     [ "", 100; " \t\r\n", 100; "whey", 0; "whey", 501 ]

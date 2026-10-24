@@ -2,7 +2,7 @@
  (name test_migration)
  (modules test_migration test_support)
  (libraries alcotest sqlite3 kcal)
- (deps ../migrations/001_ledger.sql))
+ (deps ../migrations/001_ledger.sql ../migrations/004_ranked_search.sql))
 
 (test
  (name test_secret)
@@ -101,3 +101,13 @@
  (name test_product_store)
  (modules test_product_store test_support)
  (libraries alcotest sqlite3 kcal))
+
+(test
+ (name test_ranked_search)
+ (modules test_ranked_search test_support)
+ (libraries alcotest sqlite3 yojson kcal))
+
+(test
+ (name test_search_query)
+ (modules test_search_query)
+ (libraries alcotest kcal))
