@@ -1,4 +1,5 @@
 open Base
+open Hegel
 
 let check = Alcotest.check
 
@@ -394,6 +395,113 @@ let test_meal_stable_ties () =
         (rows "meals"
            (request db user "query_meals" "search" (`String "rice chicken") [])))
 
+let vocabulary = [ "alpha"; "beta"; "gamma"; "delta" ]
+let meal_id id = Option.value_exn (Meal_id.of_string id)
+let product_id id = Option.value_exn (Product_id.of_string id)
+
+let ids_of rows =
+  List.sort ~compare:String.compare
+    (List.map rows ~f:(function
+      | `Assoc fields -> (
+          match List.Assoc.find fields ~equal:String.equal "id" with
+          | Some (`String id) -> id
+          | _ -> Alcotest.fail "row without id")
+      | _ -> Alcotest.fail "row is not an object"))
+
+(* Independent model: an id -> words map per record kind. After every create,
+   replace, update or delete, a one-word search must return exactly the live
+   records whose words include it. *)
+let%hegel_test search_index_follows_record_lifecycle tc =
+  Test_support.with_store (fun db user ->
+      let text () =
+        String.concat ~sep:" "
+          (List.map ~f:(List.nth_exn vocabulary)
+             (draw tc
+                (lists
+                   (integers ~min_value:0
+                      ~max_value:(List.length vocabulary - 1)
+                      ())
+                   ~min_size:1 ~max_size:3 ())))
+      in
+      let words text = String.split text ~on:' ' in
+      let meals = Hashtbl.create (module String) in
+      let products = Hashtbl.create (module String) in
+      let expected table word =
+        Hashtbl.fold table ~init:[] ~f:(fun ~key ~data acc ->
+            if List.mem data word ~equal:String.equal then key :: acc else acc)
+        |> List.sort ~compare:String.compare
+      in
+      let check_indexes () =
+        List.iter vocabulary ~f:(fun word ->
+            assert (
+              List.equal String.equal (expected meals word)
+                (ids_of
+                   (rows "meals"
+                      (request db user "query_meals" "search" (`String word) []))));
+            assert (
+              List.equal String.equal (expected products word)
+                (ids_of
+                   (rows "products"
+                      (request db user "search_products" "query" (`String word)
+                         [])))))
+      in
+      for _ = 1 to draw tc (integers ~min_value:1 ~max_value:12 ()) do
+        let live table =
+          Hashtbl.keys table |> List.sort ~compare:String.compare
+        in
+        let pick table = draw_silent tc (sampled_from (live table)) in
+        let operation =
+          draw_silent tc
+            (sampled_from
+               (List.concat
+                  [
+                    [ `Create_meal; `Save_product ];
+                    (if Hashtbl.is_empty meals then []
+                     else [ `Update_meal; `Delete_meal ]);
+                    (if Hashtbl.is_empty products then []
+                     else [ `Replace_product ]);
+                  ]))
+        in
+        (match operation with
+        | `Create_meal ->
+            let description = text () in
+            let created = meal db user description in
+            Hashtbl.set meals
+              ~key:(Meal_id.to_string created.id)
+              ~data:(words description)
+        | `Update_meal ->
+            let id = pick meals in
+            let description = text () in
+            ignore
+              (Option.value_exn
+                 (Result.ok
+                    (Test_support.update_meal_raw db ~user (meal_id id)
+                       Meal.{ empty_patch with description = Some description })));
+            Hashtbl.set meals ~key:id ~data:(words description)
+        | `Delete_meal ->
+            let id = pick meals in
+            Option.value_exn
+              (Result.ok (Store_sqlite.delete_meal db ~user (meal_id id)));
+            Hashtbl.remove meals id
+        | `Save_product ->
+            let name = text () in
+            let saved = save db user name in
+            Hashtbl.set products
+              ~key:(Product_id.to_string saved.id)
+              ~data:(words name)
+        | `Replace_product ->
+            let id = pick products in
+            let name = text () in
+            ignore
+              (Option.value_exn
+                 (Result.ok
+                    (Test_support.save_product_raw db ~user
+                       ~id:(Some (product_id id))
+                       (product name))));
+            Hashtbl.set products ~key:id ~data:(words name));
+        check_indexes ()
+      done)
+
 let () =
   Alcotest.run "ranked search"
     [
@@ -411,4 +519,9 @@ let () =
             ("meal ranked filters", test_meal_ranked_filters);
             ("stable meal ties", test_meal_stable_ties);
           ] );
+      ( "properties",
+        [
+          Alcotest.test_case "index follows record lifecycle" `Quick
+            search_index_follows_record_lifecycle;
+        ] );
     ]

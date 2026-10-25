@@ -1,4 +1,5 @@
 open Base
+open Hegel
 
 let key =
   Option.value_exn (Result.ok (Secret.Key.of_bytes (Bytes.make 32 '\001')))
@@ -49,6 +50,29 @@ let test_key_is_validated_and_immutable () =
     "caller mutation cannot change validated key" "token"
     (Option.value_exn (Result.ok (Secret.decrypt ~key encrypted)))
 
+let%hegel_test any_plaintext_round_trips tc =
+  let plaintext = draw tc (binary ()) in
+  let ciphertext =
+    Option.value_exn (Result.ok (Secret.encrypt ~key plaintext))
+  in
+  assert (
+    String.equal plaintext
+      (Option.value_exn (Result.ok (Secret.decrypt ~key ciphertext))))
+
+let%hegel_test any_changed_byte_is_rejected tc =
+  let plaintext = draw tc (binary ()) in
+  let ciphertext =
+    Option.value_exn (Result.ok (Secret.encrypt ~key plaintext))
+  in
+  let index =
+    draw tc (integers ~min_value:0 ~max_value:(String.length ciphertext - 1) ())
+  in
+  let flip = draw tc (integers ~min_value:1 ~max_value:255 ()) in
+  let changed = Bytes.of_string ciphertext in
+  Bytes.set changed index
+    (Char.of_int_exn (Char.to_int (Bytes.get changed index) lxor flip));
+  assert (Result.is_error (Secret.decrypt ~key (Bytes.to_string changed)))
+
 let () =
   Alcotest.run "secret"
     [
@@ -60,5 +84,9 @@ let () =
           Alcotest.test_case "changed ciphertext" `Quick
             test_rejects_changed_ciphertext;
           Alcotest.test_case "wrong key" `Quick test_rejects_wrong_key;
+          Alcotest.test_case "any plaintext round trips" `Quick
+            any_plaintext_round_trips;
+          Alcotest.test_case "any changed byte is rejected" `Quick
+            any_changed_byte_is_rejected;
         ] );
     ]

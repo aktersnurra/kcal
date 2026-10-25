@@ -53,12 +53,12 @@
 - Add explicit `equal`, `compare`, and safe sexp support to `Id.S` while preserving distinct abstract ID types.
 - Replace open-ended test fixtures with `with_store : (Store_sqlite.t -> User.t -> 'a) -> 'a` and `with_two_users : (Store_sqlite.t -> User.t -> User.t -> 'a) -> 'a` (initially with the existing store representation).
 
-- [ ] Add lifecycle tests proving fixtures close SQLite handles on success and exceptions. Run the focused test and observe failure before implementing brackets.
-- [ ] Add Base/Core/Core_unix/ppx_jane dependencies, check the installed Command_unix package/API and supported compiler constraints, and configure formatting and development-only warning policy.
-- [ ] Implement bracketed test fixtures; convert existing test call sites without weakening assertions. Every Hegel case must release its database before replay/shrink.
-- [ ] Add explicit ID comparison/printing and replace generic record/ID/JSON test equality with typed comparators, derived equality, or field assertions. Retain explicit float tolerance where appropriate.
-- [ ] Run `dune build @all` and `dune runtest --force`; both must succeed. Check all new fixture exception paths.
-- [ ] Review the diff and create a focused jj change/checkpoint only under the selected execution workflow.
+- [x] Add lifecycle tests proving fixtures close SQLite handles on success and exceptions. Run the focused test and observe failure before implementing brackets.
+- [x] Add Base/Core/Core_unix/ppx_jane dependencies, check the installed Command_unix package/API and supported compiler constraints, and configure formatting and development-only warning policy.
+- [x] Implement bracketed test fixtures; convert existing test call sites without weakening assertions. Every Hegel case must release its database before replay/shrink.
+- [x] Add explicit ID comparison/printing and replace generic record/ID/JSON test equality with typed comparators, derived equality, or field assertions. Retain explicit float tolerance where appropriate.
+- [x] Run `dune build @all` and `dune runtest --force`; both must succeed. Check all new fixture exception paths.
+- [x] Review the diff and create a focused jj change/checkpoint only under the selected execution workflow.
 
 ## Task 2: Enforce numeric/domain invariants and safe summaries
 
@@ -72,13 +72,13 @@
 - `Summary.daily_series : Time.zone -> Date_range.t -> meals:Meal.t list -> weigh_ins:Weigh_in.t list -> (day list, Error.t) result`; `summarise` similarly returns `(t, Error.t) result`.
 - Error ADTs include structured invalid-field, numeric-overflow, and unrepresentable-result conditions; rendering remains at boundaries.
 
-- [ ] Add failing HTTP tests for `1e309` meal macros and weight: error response, zero rows persisted, subsequent reads succeed. Add nonfinite create/patch/target tests and `max_int + 1` summary regression.
-- [ ] Add Hegel properties in domain/summary test files for arbitrary integers/floats, optional macros, and checked totals. Do not cap generators at normal meal sizes.
-- [ ] Run focused tests and record expected failures against current production functions.
-- [ ] Implement scalar/input constructors, immutable private record reconstruction, shared create/patch invariants, checked aggregation, and typed error mapping. Update store/MCP/service call sites.
-- [ ] Restrict JSON parse-error handling to `Yojson.Safe.from_string`; response errors must not be presented as request parse failures.
-- [ ] Verify valid nutrition cases preserve existing successful JSON payloads and patch semantics; run all tests.
-- [ ] Review the diff/checkpoint.
+- [x] Add failing HTTP tests for `1e309` meal macros and weight: error response, zero rows persisted, subsequent reads succeed. Add nonfinite create/patch/target tests and `max_int + 1` summary regression.
+- [x] Add Hegel properties in domain/summary test files for arbitrary integers/floats, optional macros, and checked totals. Do not cap generators at normal meal sizes.
+- [x] Run focused tests and record expected failures against current production functions.
+- [x] Implement scalar/input constructors, immutable private record reconstruction, shared create/patch invariants, checked aggregation, and typed error mapping. Update store/MCP/service call sites.
+- [x] Restrict JSON parse-error handling to `Yojson.Safe.from_string`; response errors must not be presented as request parse failures.
+- [x] Verify valid nutrition cases preserve existing successful JSON payloads and patch semantics; run all tests.
+- [x] Review the diff/checkpoint.
 
 ## Task 3: Make calendar boundaries total and restore broad time properties
 
@@ -90,12 +90,12 @@
 - `Date_range.utc_bounds : Time.zone -> t -> (Ptime.t * Ptime.t, Error.t) result`.
 - Where local-date conversion cannot represent a result, expose an explicit result rather than an undocumented exception.
 
-- [ ] Add failing tool regressions for `9999-12-31` in UTC and `0000-01-01` in `+02:00`; require actionable tool errors without uncaught exceptions.
-- [ ] Add full-calendar date parsing/roundtrip and date/zone bounds properties, including leap days, month ends, DST changes, both calendar endpoints, and fixed offsets through +/-14 hours.
-- [ ] Run focused tests, then implement fallible arithmetic/bounds and propagate errors before queries.
-- [ ] Move time/summary properties from the catch-all properties file into their owning test files; remove the incorrect year/formatting restriction comment and register the PPX where needed.
-- [ ] Verify ordinary DST 23/24/25-hour behavior, inclusive ranges, local bucketing, and endpoint errors; run all tests.
-- [ ] Review the diff/checkpoint.
+- [x] Add failing tool regressions for `9999-12-31` in UTC and `0000-01-01` in `+02:00`; require actionable tool errors without uncaught exceptions.
+- [x] Add full-calendar date parsing/roundtrip and date/zone bounds properties, including leap days, month ends, DST changes, both calendar endpoints, and fixed offsets through +/-14 hours.
+- [x] Run focused tests, then implement fallible arithmetic/bounds and propagate errors before queries.
+- [x] Move time/summary properties from the catch-all properties file into their owning test files; remove the incorrect year/formatting restriction comment and register the PPX where needed.
+- [x] Verify ordinary DST 23/24/25-hour behavior, inclusive ranges, local bucketing, and endpoint errors; run all tests.
+- [x] Review the diff/checkpoint.
 
 ## Task 4: Preserve upstream pagination, errors, and batch freshness
 
@@ -108,13 +108,13 @@
 - `Withings_sync.imports` accepts a connected account identity rather than optional identity; manual/imported origin uses a variant carrying the imported identity.
 - Provider failures use variants, including credential rejection, API status, transport HTTP status, and malformed response; remove exact-message matching.
 
-- [ ] Add a full-sync regression: stored cursor 100/weight 80, received cursor 99/weight 70, expected state remains 100/80. Keep the existing store-level stale test.
-- [ ] Add a multi-page request fixture (`more=1`, returned offset) and a failure on page two; assert all pages are requested and no partial batch/cursor is persisted on failure.
-- [ ] Add repeated-offset/missing-offset malformed-page tests, raw missing-watermark tests, and equal-watermark correction tests.
-- [ ] Run failing tests, then implement continuation decoding/fetching, explicit upstream errors, injected time, and raw watermark forwarding.
-- [ ] In the persistence transaction check account identity and current watermark; for missing watermarks require equality with the fetch baseline. Preserve tombstones and existing timestamps.
-- [ ] Add Hegel page-partition equivalence and sync-state properties against a simple independent map/cursor model. Cover duplicate observations and out-of-order batches.
-- [ ] Verify all Withings suites and the full suite; review the diff/checkpoint.
+- [x] Add a full-sync regression: stored cursor 100/weight 80, received cursor 99/weight 70, expected state remains 100/80. Keep the existing store-level stale test.
+- [x] Add a multi-page request fixture (`more=1`, returned offset) and a failure on page two; assert all pages are requested and no partial batch/cursor is persisted on failure.
+- [x] Add repeated-offset/missing-offset malformed-page tests, raw missing-watermark tests, and equal-watermark correction tests.
+- [x] Run failing tests, then implement continuation decoding/fetching, explicit upstream errors, injected time, and raw watermark forwarding.
+- [x] In the persistence transaction check account identity and current watermark; for missing watermarks require equality with the fetch baseline. Preserve tombstones and existing timestamps.
+- [x] Add Hegel page-partition equivalence and sync-state properties against a simple independent map/cursor model. Cover duplicate observations and out-of-order batches.
+- [x] Verify all Withings suites and the full suite; review the diff/checkpoint.
 
 ## Task 5: Make connection transitions and database integrity explicit
 
@@ -128,14 +128,14 @@
 - `Service.connect_withings`, `disconnect_withings`, and `withings_status` own application operations; adapters no longer access `oauth.store`.
 - `Secret.Key.of_bytes` validates once and returns an opaque immutable key; encryption/decryption consume this key.
 
-- [ ] Add failing relink-save regression using a failing SQL trigger: old identity/tokens/cursor remain intact. Test refresh scoping after account replacement.
-- [ ] Add a v4 database fixture with imported rows and dangling connection references. After migration/disconnect assert preserved observation IDs/values/timestamps/tombstones, null linkage, and empty `foreign_key_check`.
-- [ ] Add explicit disconnected/status and incomplete-connection decoding tests.
-- [ ] Run the regressions, then generate embedded migrations from numbered SQL files and remove the duplicated string definitions from Store_sqlite.
-- [ ] Implement the forward-only reference migration, centralized connection lifecycle, explicit migration bookkeeping bootstrap, typed connection/key boundaries, and atomic lifecycle operations. Never hold a database transaction across upstream HTTP calls.
-- [ ] Update all application entry points and fixtures to use initialized stores; retain deliberate `For_testing` access for SQL fault injection/migration assertions.
-- [ ] Add a Hegel connection/import state machine covering failed relink, disconnect/reconnect, deletion tombstones, and refresh/account changes. Assert invariants after each successful step.
-- [ ] Run migration fixtures, connection/sync suites, and all tests; review the diff/checkpoint.
+- [x] Add failing relink-save regression using a failing SQL trigger: old identity/tokens/cursor remain intact. Test refresh scoping after account replacement.
+- [x] Add a v4 database fixture with imported rows and dangling connection references. After migration/disconnect assert preserved observation IDs/values/timestamps/tombstones, null linkage, and empty `foreign_key_check`.
+- [x] Add explicit disconnected/status and incomplete-connection decoding tests.
+- [x] Run the regressions, then generate embedded migrations from numbered SQL files and remove the duplicated string definitions from Store_sqlite.
+- [x] Implement the forward-only reference migration, centralized connection lifecycle, explicit migration bookkeeping bootstrap, typed connection/key boundaries, and atomic lifecycle operations. Never hold a database transaction across upstream HTTP calls.
+- [x] Update all application entry points and fixtures to use initialized stores; retain deliberate `For_testing` access for SQL fault injection/migration assertions.
+- [x] Add a Hegel connection/import state machine covering failed relink, disconnect/reconnect, deletion tombstones, and refresh/account changes. Assert invariants after each successful step.
+- [x] Run migration fixtures, connection/sync suites, and all tests; review the diff/checkpoint.
 
 ## Task 6: Finish protocol fixes and cohesive application boundaries
 
@@ -148,13 +148,13 @@
 - Shared HTTPS setup constructs trust/authentication configuration for the existing clients; HTTP transport keeps its current injected contract.
 - OIDC discovery URI construction appends `/.well-known/openid-configuration` to the issuer path without dropping that path.
 
-- [ ] Add failing wire-framing test asserting a 502 response stays 502. Add unknown-field rejection tests for every zero-argument tool and path-based issuer discovery tests.
-- [ ] Strengthen existing MCP tests to assert successful tool results, not merely outer `Ok`; test both omitted arguments and explicit empty objects.
-- [ ] Implement protocol corrections and shared HTTPS setup. Restrict dependency exception catches and preserve Eio cancellation; include failing-transport/malformed-document tests.
-- [ ] Extract cohesive MCP responsibilities and move aggregate/Withings application operations into Service. Remove unused Store.S and dead forwarding/duplicate OAuth entry points after checking references.
-- [ ] Add narrow `.mli` files for remaining modules; remove accidental public helpers and keep only needed, named test seams. Compile after each boundary change.
-- [ ] Finish Base migration across library/test code, explicit comparators/derived equality, meaningful predicate/action naming, and labeled ambiguous arguments. Format changed files.
-- [ ] Run protocol/auth/HTTP suites and full tests; review the diff/checkpoint.
+- [x] Add failing wire-framing test asserting a 502 response stays 502. Add unknown-field rejection tests for every zero-argument tool and path-based issuer discovery tests.
+- [x] Strengthen existing MCP tests to assert successful tool results, not merely outer `Ok`; test both omitted arguments and explicit empty objects.
+- [x] Implement protocol corrections and shared HTTPS setup. Restrict dependency exception catches and preserve Eio cancellation; include failing-transport/malformed-document tests.
+- [x] Extract cohesive MCP responsibilities and move aggregate/Withings application operations into Service. Remove unused Store.S and dead forwarding/duplicate OAuth entry points after checking references.
+- [x] Add narrow `.mli` files for remaining modules; remove accidental public helpers and keep only needed, named test seams. Compile after each boundary change.
+- [x] Finish Base migration across library/test code, explicit comparators/derived equality, meaningful predicate/action naming, and labeled ambiguous arguments. Format changed files.
+- [x] Run protocol/auth/HTTP suites and full tests; review the diff/checkpoint.
 
 ## Task 7: Migrate CLI and configuration without breaking deployment
 
@@ -166,25 +166,25 @@
 - Keep existing `KCAL_*` and `WITHINGS_*` names; typed flags override environment inputs. Required-field errors identify names but not values.
 - Public protected resource is validated `public_base_url + /mcp`; token audience remains independent. Metadata URL derives from resource, not audience.
 
-- [ ] Add failing tests for opaque audience `kcal`, malformed URL/listener/key, migrate with database-only settings, serve with no integration settings, and partially configured Withings.
-- [ ] Add CLI subprocess tests for help/subcommands, invalid configuration exit status, environment-only migration, flag overrides, and secret redaction. Execute without live network.
-- [ ] Implement typed configuration and Command wiring. Keep stdout/stderr and exit behavior deliberate; no nested `exit` inside command term construction.
-- [ ] Use secret-safe sexp printers and test that token/key/client-secret values cannot appear in serialized configuration/errors.
-- [ ] Verify command help and environment compatibility; run all tests and build executable.
-- [ ] Review the diff/checkpoint.
+- [x] Add failing tests for opaque audience `kcal`, malformed URL/listener/key, migrate with database-only settings, serve with no integration settings, and partially configured Withings.
+- [x] Add CLI subprocess tests for help/subcommands, invalid configuration exit status, environment-only migration, flag overrides, and secret redaction. Execute without live network.
+- [x] Implement typed configuration and Command wiring. Keep stdout/stderr and exit behavior deliberate; no nested `exit` inside command term construction.
+- [x] Use secret-safe sexp printers and test that token/key/client-secret values cannot appear in serialized configuration/errors.
+- [x] Verify command help and environment compatibility; run all tests and build executable.
+- [x] Review the diff/checkpoint.
 
 ## Task 8: Complete PBT coverage, documentation, and release verification
 
 **Files:** existing domain/store/search/summary/secret tests, `test/dune`, `.github/workflows/ci.yml`, `README.md`, `.env.example`, `.ocamlformat`, plan/spec checklists.
 
-- [ ] Add colocated Hegel properties for arbitrary valid secret plaintext roundtrip/tampering, generated patch field subsets, and stateful product/meal search-index lifecycle against an independent record model.
-- [ ] Ensure no property calls the production computation to produce its expected answer. Use full valid numeric/calendar domains and explicit boundary examples; keep exact JSON/schema examples as ordinary tests.
-- [ ] Remove the catch-all properties executable only after all its existing properties are preserved alongside their owners. Check that failed generated cases leave no SQLite resources open.
-- [ ] Consolidate README into single authoritative Logging/MCP sections; document actual status/error/configuration behavior, field names, migration/backups, CLI commands, and the distinction between audience and resource.
-- [ ] Align README/opam/CI compiler requirements and dependency installation. Linux CI must run both `dune build @all` and `dune runtest`; add formatting verification with the pinned formatter.
-- [ ] Run `dune build @all`, `dune runtest --force`, formatting verification, CLI subprocess checks, and migration fixtures. Probe changed paths with LSP when available and report tool coverage honestly.
-- [ ] Review every final diff against the spec's acceptance criteria; confirm no secrets, accidental behavior changes, unrelated edits, or untested interface assumptions.
-- [ ] Report pass/fail/not-run evidence, explicitly distinguishing local Linux checks from unrun FreeBSD/live-provider checks. Final review follows the user-selected execution approach.
+- [x] Add colocated Hegel properties for arbitrary valid secret plaintext roundtrip/tampering, generated patch field subsets, and stateful product/meal search-index lifecycle against an independent record model.
+- [x] Ensure no property calls the production computation to produce its expected answer. Use full valid numeric/calendar domains and explicit boundary examples; keep exact JSON/schema examples as ordinary tests.
+- [x] Remove the catch-all properties executable only after all its existing properties are preserved alongside their owners. Check that failed generated cases leave no SQLite resources open.
+- [x] Consolidate README into single authoritative Logging/MCP sections; document actual status/error/configuration behavior, field names, migration/backups, CLI commands, and the distinction between audience and resource.
+- [x] Align README/opam/CI compiler requirements and dependency installation. Linux CI must run both `dune build @all` and `dune runtest`; add formatting verification with the pinned formatter.
+- [x] Run `dune build @all`, `dune runtest --force`, formatting verification, CLI subprocess checks, and migration fixtures. Probe changed paths with LSP when available and report tool coverage honestly. (LSP probe not run.)
+- [x] Review every final diff against the spec's acceptance criteria; confirm no secrets, accidental behavior changes, unrelated edits, or untested interface assumptions.
+- [x] Report pass/fail/not-run evidence, explicitly distinguishing local Linux checks from unrun FreeBSD/live-provider checks. Final review follows the user-selected execution approach.
 
 ## Self-review and execution notes
 

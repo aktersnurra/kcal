@@ -35,7 +35,7 @@ depends: [
   "uuidm"
   "logs"
   "alcotest" {with-test}
-  "hegel" {with-test}
-  "ppx_hegel_test" {with-test}
+  "hegel" {with-test & >= "0.25.0"}
+  "ppx_hegel_test" {with-test & >= "0.25.0"}
 ]
 build: [ ["dune" "build" "-p" name] ]

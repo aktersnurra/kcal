@@ -62,7 +62,11 @@
 (test
  (name test_meal_store)
  (modules test_meal_store test_support)
- (libraries alcotest sqlite3 kcal base)
+ (libraries alcotest sqlite3 kcal hegel base)
+ (preprocess
+  (per_module
+   ((pps ppx_jane ppx_hegel_test)
+    test_meal_store)))
  (deps ../migrations/001_ledger.sql))
 
 (test
@@ -99,14 +103,6 @@
  (name test_config)
  (modules test_config)
  (libraries alcotest kcal base))
-
-(test
- (name test_properties)
- (modules test_properties test_support)
- (libraries alcotest sqlite3 kcal hegel base)
- (preprocess
-  (pps ppx_jane ppx_hegel_test))
- (deps ../migrations/001_ledger.sql))
 
 (test
  (name test_summary)

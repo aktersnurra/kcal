@@ -10,22 +10,34 @@ Personal project, running in production for a single user. The design is documen
 
 ## Building
 
-Requires OCaml 5.5 and [opam](https://opam.ocaml.org). The build targets a native FreeBSD jail using `eio_posix`; Linux works for development and tests.
+Requires OCaml 5.2 or newer (developed on 5.5) and [opam](https://opam.ocaml.org). The build targets a native FreeBSD jail using `eio_posix`; Linux works for development and tests and is the only platform CI verifies.
 
 ```sh
-opam install --deps-only .
-dune build
-dune build @test/runtest
+opam install --deps-only --with-test .
+dune build @all
+dune runtest
+dune build @fmt   # needs ocamlformat 0.29.0 (opam install --deps-only --with-dev-setup .)
 ```
 
 ## Running
 
 ```sh
-kcal migrate   # apply SQL migrations
-kcal serve     # start the HTTP listener
+kcal migrate        # apply SQL migrations
+kcal serve          # start the HTTP listener
+kcal sync-withings  # reconcile connected Withings accounts
 ```
 
-Configuration is environment-based; copy `.env.example` and fill it in. `KCAL_LISTEN_ADDRESS` is a private listener — a reverse proxy such as Caddy is expected to own public TLS, and the service is expected to run under a supervisor such as FreeBSD `rc.d`. Provisioning and deployment live outside this repository.
+Settings come from the environment (copy `.env.example`); a command-line flag of the same name (e.g. `--database-path`) overrides its environment variable. Each command requires only what it uses:
+
+- `migrate`: `KCAL_DATABASE_PATH`.
+- `serve`: additionally `KCAL_PUBLIC_BASE_URL`, `KCAL_OIDC_ISSUER`, `KCAL_OIDC_AUDIENCE`; `KCAL_LISTEN_ADDRESS` defaults to `127.0.0.1:8080`. Withings is disabled when all three Withings settings are empty; a partial set is rejected.
+- `sync-withings`: the database path plus all three Withings settings.
+
+Configuration errors name the offending setting but never print its value.
+
+`KCAL_PUBLIC_BASE_URL` is an absolute HTTPS URL, optionally with a deployment path; the protected MCP resource is `BASE/mcp`. `KCAL_OIDC_AUDIENCE` is the expected token audience and is independent of that URL, so an opaque ID such as `kcal` is valid. `KCAL_LISTEN_ADDRESS` is a private listener — a reverse proxy such as Caddy is expected to own public TLS, and the service is expected to run under a supervisor such as FreeBSD `rc.d`. Provisioning and deployment live outside this repository.
+
+Migrations are forward-only and run when the database is opened. Back up the SQLite file before upgrading.
 
 ## Architecture
 
@@ -38,7 +50,7 @@ Domain logic is kept free of I/O: the Withings HTTP transport is injected as a r
 
 ## OAuth discovery
 
-`GET $KCAL_PUBLIC_BASE_URL/.well-known/oauth-protected-resource` publishes RFC 9728 protected-resource metadata. It advertises the `ledger:read`, `ledger:write`, and `withings:manage` scopes. MCP clients use this metadata to discover the authorization server.
+`GET /.well-known/oauth-protected-resource` (and, for a deployment path, `/.well-known/oauth-protected-resource/<path>/mcp`) publishes RFC 9728 protected-resource metadata for the resource `$KCAL_PUBLIC_BASE_URL/mcp`. It advertises the `ledger:read`, `ledger:write`, and `withings:manage` scopes. MCP clients use this metadata to discover the authorization server.
 
 ## Logging
 
@@ -80,35 +92,9 @@ Argument mistakes the model can fix — a malformed date, an unsupported timezon
 
 - `get_latest_weight()` — the single most recent weigh-in (manual or Withings-imported), instead of paging through `query_weights` to find it.
 
-## Logging
-
-`kcal` logs to stderr through [`logs`](https://erratique.ch/software/logs), with one line per event: a UTC timestamp, level, source name (e.g. `kcal.http`, `kcal.mcp`, `kcal.oidc`, `kcal.withings.sync`, `kcal.withings.transport`, `kcal.store`), and message. HTTP request lines and MCP call outcomes are always logged; OIDC discovery/verification failures, Withings OAuth, transport and sync failures, and unexpected SQLite errors are logged with enough detail to diagnose them without ever including tokens, secrets, or credentials.
-
-Set `KCAL_LOG_LEVEL` to `debug`, `info` (default), `warning`, `error`, or `quiet` to control verbosity.
-
-## MCP tools
-
-`query_meals` and `query_weights` accept `from`/`to` (RFC 3339 UTC timestamps, inclusive) and `limit` (default 100, max 500) to scope a query instead of relying on `limit` alone; results are ordered oldest first. Every tool's JSON schema (via `tools/list`) now carries a description of its parameters, including this.
-
-Two aggregate tools avoid client-side arithmetic over raw records:
-
-- `get_daily_totals(date?)` — summed `calories_kcal`, `protein_g`, `carbs_g`, `fat_g`, and a `meal_count` for all meals on a given calendar day (`date` as `YYYY-MM-DD`; defaults to today in `timezone`, UTC if none). `carbs_g`/`fat_g` are `null` when no matching meal recorded that macro.
-- `get_daily_series(from_date, to_date?, timezone?)` — the same daily totals for every calendar date in a range (up to 366 days) in one call; days without meals appear with `meal_count` 0.
-- `get_summary(from_date, to_date?, timezone?, calorie_target?, protein_target?)` — average calories and protein over days with at least one meal logged (unlogged days are unknown, not zero), counts of days at or under the calorie target and at or over the protein target, the weight trend (first, last, change, least-squares slope in kg/week), and `implied_maintenance_kcal` (average intake minus the energy in the weight trend, only with at least 7 days of weigh-ins; it is only as reliable as the logging is complete).
-
-`get_daily_totals`, `get_daily_series` and `get_summary` take an optional `timezone` that defines where calendar days begin and end: a fixed offset such as `+02:00`, or an IANA name from a built-in table of European zones with EU summer time (e.g. `Europe/Stockholm`). It defaults to UTC. There is no tz database dependency, so other IANA names are rejected.
-
-- `get_latest_weight()` — the single most recent weigh-in (manual or Withings-imported), instead of paging through `query_weights` to find it.
-
-## Logging
-
-`kcal` logs to stderr through [`logs`](https://erratique.ch/software/logs), with one line per event: a UTC timestamp, level, source name (e.g. `kcal.http`, `kcal.mcp`, `kcal.oidc`, `kcal.withings.sync`, `kcal.store`), and message. HTTP request lines and MCP call outcomes are always logged; OIDC discovery/verification failures, Withings OAuth and sync failures, and unexpected SQLite errors are logged with enough detail to diagnose them without ever including tokens, secrets, or credentials.
-
-Set `KCAL_LOG_LEVEL` to `debug`, `info` (default), `warning`, `error`, or `quiet` to control verbosity.
-
 ## Withings
 
-Set `WITHINGS_CLIENT_ID`, `WITHINGS_CLIENT_SECRET`, and `KCAL_TOKEN_ENCRYPTION_KEY` before `kcal serve` or `kcal sync-withings`. The encryption key is exactly 64 hexadecimal characters (32 bytes); keep it secret and stable, since it encrypts access and refresh tokens at rest.
+Set `WITHINGS_CLIENT_ID`, `WITHINGS_CLIENT_SECRET`, and `KCAL_TOKEN_ENCRYPTION_KEY` to enable Withings in `kcal serve`; `kcal sync-withings` requires all three. The encryption key is exactly 64 hexadecimal characters (32 bytes); keep it secret and stable, since it encrypts access and refresh tokens at rest.
 
 Configure the Withings callback URL as `$KCAL_PUBLIC_BASE_URL/withings/callback` and webhook URL as `$KCAL_PUBLIC_BASE_URL/withings/webhook`. OAuth requests only `user.metrics`. Credentials are never returned in MCP or HTTP responses.
 
