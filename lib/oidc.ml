@@ -229,66 +229,57 @@ let discovery_uri issuer =
 
 let client_of_get get =
   let get uri =
-    match Https_transport.catch_transport_failure (fun () -> get uri) with
-    | Ok result -> result
-    | Error _ -> Error ()
+    match Https_transport.endpoint_host (Uri.of_string uri) with
+    | Error () -> Error ()
+    | Ok _ -> (
+        match Https_transport.catch_transport_failure (fun () -> get uri) with
+        | Ok result -> result
+        | Error _ -> Error ())
   in
   {
     discover =
       (fun ~issuer ->
-        if
-          not
-            (Option.equal String.equal
-               (Uri.scheme (Uri.of_string issuer))
-               (Some "https"))
-        then (
-          Log.err (fun m ->
-              m "refusing OIDC discovery for issuer=%s: only https is allowed"
-                issuer);
-          Error ())
-        else
-          match get (discovery_uri issuer) with
-          | Error () -> Error ()
-          | Ok (body, headers) -> (
-              try
-                match Yojson.Safe.from_string body with
-                | `Assoc fields -> (
-                    match
-                      ( List.Assoc.find fields ~equal:String.equal "issuer",
-                        List.Assoc.find fields ~equal:String.equal "jwks_uri" )
-                    with
-                    | Some (`String discovered_issuer), Some (`String jwks_uri)
-                      when Option.equal String.equal
-                             (Uri.scheme (Uri.of_string jwks_uri))
-                             (Some "https") ->
-                        Ok
-                          {
-                            issuer = discovered_issuer;
-                            jwks_uri;
-                            max_age_s = max_age headers;
-                          }
-                    | _ ->
-                        Log.err (fun m ->
-                            m
-                              "OIDC discovery document for issuer=%s is \
-                               missing issuer/jwks_uri or jwks_uri is not \
-                               https"
-                              issuer);
-                        Error ())
-                | _ ->
-                    Log.err (fun m ->
-                        m
-                          "OIDC discovery document for issuer=%s is not a JSON \
-                           object"
-                          issuer);
-                    Error ()
-              with Yojson.Json_error message ->
-                Log.err (fun m ->
-                    m
-                      "OIDC discovery document for issuer=%s is not valid \
-                       JSON: %s"
-                      issuer message);
-                Error ()));
+        match get (discovery_uri issuer) with
+        | Error () -> Error ()
+        | Ok (body, headers) -> (
+            try
+              match Yojson.Safe.from_string body with
+              | `Assoc fields -> (
+                  match
+                    ( List.Assoc.find fields ~equal:String.equal "issuer",
+                      List.Assoc.find fields ~equal:String.equal "jwks_uri" )
+                  with
+                  | Some (`String discovered_issuer), Some (`String jwks_uri)
+                    when Option.equal String.equal
+                           (Uri.scheme (Uri.of_string jwks_uri))
+                           (Some "https") ->
+                      Ok
+                        {
+                          issuer = discovered_issuer;
+                          jwks_uri;
+                          max_age_s = max_age headers;
+                        }
+                  | _ ->
+                      Log.err (fun m ->
+                          m
+                            "OIDC discovery document for issuer=%s is missing \
+                             issuer/jwks_uri or jwks_uri is not https"
+                            issuer);
+                      Error ())
+              | _ ->
+                  Log.err (fun m ->
+                      m
+                        "OIDC discovery document for issuer=%s is not a JSON \
+                         object"
+                        issuer);
+                  Error ()
+            with Yojson.Json_error message ->
+              Log.err (fun m ->
+                  m
+                    "OIDC discovery document for issuer=%s is not valid JSON: \
+                     %s"
+                    issuer message);
+              Error ()));
     fetch_jwks =
       (fun ~uri ->
         match get uri with
@@ -316,26 +307,19 @@ let https_client env =
   | Ok client ->
       let get uri =
         let uri = Uri.of_string uri in
-        if not (Option.equal String.equal (Uri.scheme uri) (Some "https")) then (
-          Log.err (fun m ->
-              m "refusing to fetch %s: only https is allowed"
-                (Uri.to_string uri));
+        Eio.Switch.run @@ fun sw ->
+        let response, body = Cohttp_eio.Client.get client ~sw uri in
+        if
+          not
+            (match Cohttp.Response.status response with
+            | `OK -> true
+            | _ -> false)
+        then (
+          Log.warn (fun m ->
+              m "GET %s returned %s" (Uri.to_string uri)
+                (Cohttp.Code.string_of_status (Cohttp.Response.status response)));
           Error ())
-        else
-          Eio.Switch.run @@ fun sw ->
-          let response, body = Cohttp_eio.Client.get client ~sw uri in
-          if
-            not
-              (match Cohttp.Response.status response with
-              | `OK -> true
-              | _ -> false)
-          then (
-            Log.warn (fun m ->
-                m "GET %s returned %s" (Uri.to_string uri)
-                  (Cohttp.Code.string_of_status
-                     (Cohttp.Response.status response)));
-            Error ())
-          else Ok (Eio.Flow.read_all body, Cohttp.Response.headers response)
+        else Ok (Eio.Flow.read_all body, Cohttp.Response.headers response)
       in
       client_of_get get
 

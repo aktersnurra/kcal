@@ -178,6 +178,55 @@ let test_transport_error_names_the_http_status () =
       Alcotest.(check int) "HTTP status" 502 status
   | _ -> Alcotest.fail "expected a structured HTTP status"
 
+let test_transport_does_not_read_error_body () =
+  let reads = ref 0 in
+  let transport =
+    Withings_transport.For_testing.of_post (fun _ _ ->
+        let status = 502 in
+        let body =
+          Withings_transport.For_testing.read_success_body ~status
+            ~read_body:(fun () ->
+              Int.incr reads;
+              failwith "error body must not be read")
+        in
+        (status, body))
+  in
+  (match transport.post_form ~uri:"https://example.test" ~fields:[] with
+  | Error (Error.Withings_failure (Http_status status)) ->
+      Alcotest.(check int) "HTTP status retained" 502 status
+  | _ -> Alcotest.fail "expected HTTP 502 without consuming the body");
+  Alcotest.(check int) "body not read" 0 !reads
+
+let test_transport_reads_success_body () =
+  let reads = ref 0 in
+  let transport =
+    Withings_transport.For_testing.of_post (fun _ _ ->
+        let status = 200 in
+        ( status,
+          Withings_transport.For_testing.read_success_body ~status
+            ~read_body:(fun () ->
+              Int.incr reads;
+              "successful body") ))
+  in
+  (match transport.post_form ~uri:"https://example.test" ~fields:[] with
+  | Ok body -> Alcotest.(check string) "body returned" "successful body" body
+  | Error _ -> Alcotest.fail "expected successful body");
+  Alcotest.(check int) "body read once" 1 !reads
+
+let test_transport_rejects_invalid_endpoint uri () =
+  let calls = ref 0 in
+  let transport =
+    Withings_transport.For_testing.of_post (fun _ _ ->
+        Int.incr calls;
+        (200, "unexpected"))
+  in
+  Alcotest.(check bool)
+    "controlled failure" true
+    (match transport.post_form ~uri ~fields:[] with
+    | Error (Error.Withings_failure (Transport_failure _)) -> true
+    | _ -> false);
+  Alcotest.(check int) "no connection attempted" 0 !calls
+
 let test_transport_error_names_the_exception () =
   let transport =
     Withings_transport.For_testing.of_post (fun _ _ ->
@@ -191,14 +240,17 @@ let test_transport_error_names_the_exception () =
 
 let test_transport_preserves_cancellation_and_bugs () =
   let cancelled = Eio.Cancel.Cancelled Stdlib.Exit in
-  List.iter
-    ~f:(fun exn ->
-      let transport =
-        Withings_transport.For_testing.of_post (fun _ _ -> raise exn)
+  List.iter [ cancelled; Invalid_argument "programming bug" ] ~f:(fun exn ->
+      let check post =
+        let transport = Withings_transport.For_testing.of_post post in
+        Alcotest.check_raises "not swallowed" exn (fun () ->
+            ignore (transport.post_form ~uri:"https://example.test" ~fields:[]))
       in
-      Alcotest.check_raises "not swallowed" exn (fun () ->
-          ignore (transport.post_form ~uri:"https://example.test" ~fields:[])))
-    [ cancelled; Invalid_argument "programming bug" ]
+      check (fun _ _ -> raise exn);
+      check (fun _ _ ->
+          ( 200,
+            Withings_transport.For_testing.read_success_body ~status:200
+              ~read_body:(fun () -> raise exn) )))
 
 let test_complete_pagination () =
   let calls = ref [] in
@@ -581,6 +633,18 @@ let () =
             test_upstream_status_is_preserved_in_error;
           Alcotest.test_case "transport error names HTTP status" `Quick
             test_transport_error_names_the_http_status;
+          Alcotest.test_case "non-success body remains unread" `Quick
+            test_transport_does_not_read_error_body;
+          Alcotest.test_case "successful body read once" `Quick
+            test_transport_reads_success_body;
+          Alcotest.test_case "missing HTTPS host" `Quick
+            (test_transport_rejects_invalid_endpoint "https:///keys");
+          Alcotest.test_case "invalid HTTPS host" `Quick
+            (test_transport_rejects_invalid_endpoint
+               "https://-invalid.example/keys");
+          Alcotest.test_case "numeric HTTPS host" `Quick
+            (test_transport_rejects_invalid_endpoint
+               "https://127.0.0.1:443/keys");
           Alcotest.test_case "transport error names exception" `Quick
             test_transport_error_names_the_exception;
           Alcotest.test_case "transport preserves cancellation and bugs" `Quick

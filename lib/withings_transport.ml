@@ -9,18 +9,21 @@ let of_post post =
     Withings.post_form =
       (fun ~uri ~fields ->
         let target = Uri.of_string uri in
-        if not (Option.equal String.equal (Uri.scheme target) (Some "https"))
-        then Error (unavailable "non-https endpoint")
-        else
-          match
-            Https_transport.catch_transport_failure (fun () ->
-                post target fields)
-          with
-          | Error exn -> Error (unavailable (Stdlib.Printexc.to_string exn))
-          | Ok (status, body) ->
-              if status / 100 = 2 then Ok body
-              else Error (Error.Withings_failure (Http_status status)));
+        match Https_transport.endpoint_host target with
+        | Error () -> Error (unavailable "invalid HTTPS endpoint")
+        | Ok _ -> (
+            match
+              Https_transport.catch_transport_failure (fun () ->
+                  post target fields)
+            with
+            | Error exn -> Error (unavailable (Stdlib.Printexc.to_string exn))
+            | Ok (status, body) ->
+                if status / 100 = 2 then Ok body
+                else Error (Error.Withings_failure (Http_status status))));
   }
+
+let read_success_body ~status ~read_body =
+  if status / 100 = 2 then read_body () else ""
 
 (* Reconciliation constructs this transport without visiting the OAuth flow. *)
 let make env =
@@ -50,9 +53,14 @@ let make env =
           let response, response_body =
             Cohttp_eio.Client.post client ~sw ~headers ~body target
           in
-          ( Cohttp.Code.code_of_status (Cohttp.Response.status response),
-            Eio.Flow.read_all response_body ))
+          let status =
+            Cohttp.Code.code_of_status (Cohttp.Response.status response)
+          in
+          ( status,
+            read_success_body ~status ~read_body:(fun () ->
+                Eio.Flow.read_all response_body) ))
 
 module For_testing = struct
   let of_post = of_post
+  let read_success_body = read_success_body
 end

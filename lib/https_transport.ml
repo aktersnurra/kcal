@@ -22,6 +22,17 @@ let trust_bundle () =
   in
   read [ "/etc/ssl/cert.pem"; "/etc/ssl/certs/ca-certificates.crt" ]
 
+let endpoint_host uri =
+  match (Uri.scheme uri, Uri.host uri) with
+  | Some "https", Some name when not (String.is_empty name) -> (
+      match Domain_name.of_string name with
+      | Ok domain when Domain_name.count_labels domain > 0 -> (
+          match Domain_name.host domain with
+          | Ok host -> Ok host
+          | Error _ -> Error ())
+      | Ok _ | Error _ -> Error ())
+  | _ -> Error ()
+
 let make_client ~net =
   Mirage_crypto_rng_unix.use_default ();
   match trust_bundle () with
@@ -36,15 +47,9 @@ let make_client ~net =
       | Error _ -> Error Invalid_tls_configuration
       | Ok tls_config ->
           let https uri flow =
-            match Uri.host uri with
-            | None -> invalid_arg "missing HTTPS host"
-            | Some host -> (
-                match Domain_name.of_string host with
-                | Error _ -> invalid_arg "invalid HTTPS host"
-                | Ok host ->
-                    Tls_eio.client_of_flow tls_config
-                      ~host:(Domain_name.host_exn host)
-                      flow)
+            match endpoint_host uri with
+            | Error () -> failwith "invalid HTTPS endpoint"
+            | Ok host -> Tls_eio.client_of_flow tls_config ~host flow
           in
           Ok (Cohttp_eio.Client.make ~https:(Some https) net))
 

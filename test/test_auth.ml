@@ -258,6 +258,41 @@ let test_oidc_transport_failures_and_cancellation () =
           ignore (client.fetch_jwks ~uri:"https://example.test/keys")))
     [ Eio.Cancel.Cancelled Stdlib.Exit; Invalid_argument "programming bug" ]
 
+let test_oidc_rejects_invalid_endpoint uri () =
+  let calls = ref 0 in
+  let client =
+    Oidc.For_testing.client_of_get (fun _ ->
+        Int.incr calls;
+        Error ())
+  in
+  Alcotest.(check bool)
+    "controlled discovery failure" true
+    (Result.is_error (client.discover ~issuer:uri));
+  Alcotest.(check bool)
+    "controlled keys failure" true
+    (Result.is_error (client.fetch_jwks ~uri));
+  Alcotest.(check int) "no connection attempted" 0 !calls;
+  let document_calls = ref 0 in
+  let issuer = "https://issuer.example" in
+  let client =
+    Oidc.For_testing.client_of_get (fun _ ->
+        Int.incr document_calls;
+        Ok
+          ( Yojson.Safe.to_string
+              (`Assoc [ ("issuer", `String issuer); ("jwks_uri", `String uri) ]),
+            Cohttp.Header.init () ))
+  in
+  let verify =
+    Oidc.make ~issuer ~audience:"kcal-client"
+      ~clock:(fun () -> time 1_000.)
+      ~client ()
+  in
+  Alcotest.(check bool)
+    "provider-controlled key URL rejected" true
+    (Result.is_error (verify (signed_token ())));
+  Alcotest.(check int)
+    "only valid discovery endpoint contacted" 1 !document_calls
+
 let () =
   Alcotest.run "auth"
     [
@@ -275,6 +310,12 @@ let () =
             test_oidc_rejects_malformed_ec_key;
           Alcotest.test_case "OIDC transport failures and cancellation" `Quick
             test_oidc_transport_failures_and_cancellation;
+          Alcotest.test_case "missing HTTPS host" `Quick
+            (test_oidc_rejects_invalid_endpoint "https:///keys");
+          Alcotest.test_case "invalid HTTPS host" `Quick
+            (test_oidc_rejects_invalid_endpoint "https://-invalid.example/keys");
+          Alcotest.test_case "numeric HTTPS host" `Quick
+            (test_oidc_rejects_invalid_endpoint "https://127.0.0.1:443/keys");
           Alcotest.test_case "OIDC preserves validated scopes" `Quick
             test_oidc_preserves_validated_scopes;
           Alcotest.test_case "OIDC preserves array scopes" `Quick
