@@ -125,6 +125,7 @@ module type S = sig
     user:User.t ->
     connection:Withings_connection.t ->
     rows:Weigh_in.Import.t list ->
+    expected_cursor:int64 option ->
     cursor:int64 option ->
     (unit, Error.t) result
 end

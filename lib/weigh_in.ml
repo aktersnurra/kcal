@@ -2,7 +2,21 @@ module Domain_error = Error
 open Base
 module Error = Domain_error
 
-type source = Manual | Withings
+module Imported_identity = struct
+  type t = { account_id : string; group_id : string }
+
+  let of_external_id value =
+    match String.lsplit2 value ~on:':' with
+    | Some (account_id, group_id)
+      when (not (String.is_empty account_id)) && not (String.is_empty group_id)
+      ->
+        Ok { account_id; group_id }
+    | _ -> Error (Error.Invalid_field { field = External_id; reason = Blank })
+
+  let external_id identity = identity.account_id ^ ":" ^ identity.group_id
+end
+
+type source = Manual | Withings of Imported_identity.t
 type manual_create = { measured_at : Ptime.t option; weight_kg : float }
 type patch = { measured_at : Ptime.t option; weight_kg : float option }
 type import = { external_id : string; measured_at : Ptime.t; weight_kg : float }
@@ -25,7 +39,7 @@ let optional f = function
   | None -> Ok ()
   | Some value -> Result.map (f value) ~f:(fun _ -> ())
 
-let source_to_string = function Manual -> "manual" | Withings -> "withings"
+let source_to_string = function Manual -> "manual" | Withings _ -> "withings"
 
 let validate_weight weight_kg =
   Result.map (Nutrition.Kilograms.of_float weight_kg) ~f:(fun _ -> ())
@@ -36,11 +50,7 @@ let validate_patch (input : patch) =
   optional Nutrition.Kilograms.of_float input.weight_kg
 
 let validate_import (input : import) =
-  let* () =
-    if String.is_empty input.external_id then
-      Error (Error.Invalid_field { field = External_id; reason = Blank })
-    else Ok ()
-  in
+  let* _identity = Imported_identity.of_external_id input.external_id in
   validate_weight input.weight_kg
 
 let empty_patch = { measured_at = None; weight_kg = None }
@@ -78,8 +88,8 @@ module Import = struct
   let to_raw input = input
 end
 
-let of_storage ~id ~user_id ~measured_at ~weight_kg ~source ~external_id
-    ~created_at ~updated_at ~deleted_at =
+let of_storage ~id ~user_id ~measured_at ~weight_kg ~source ~created_at
+    ~updated_at ~deleted_at =
   let* () = validate_weight weight_kg in
   Ok
     {
@@ -88,7 +98,10 @@ let of_storage ~id ~user_id ~measured_at ~weight_kg ~source ~external_id
       measured_at;
       weight_kg;
       source;
-      external_id;
+      external_id =
+        (match source with
+        | Manual -> None
+        | Withings identity -> Some (Imported_identity.external_id identity));
       created_at;
       updated_at;
       deleted_at;

@@ -1,4 +1,11 @@
-type source = Manual | Withings
+module Imported_identity : sig
+  type t = private { account_id : string; group_id : string }
+
+  val of_external_id : string -> (t, Error.t) result
+  val external_id : t -> string
+end
+
+type source = Manual | Withings of Imported_identity.t
 type manual_create = { measured_at : Ptime.t option; weight_kg : float }
 type patch = { measured_at : Ptime.t option; weight_kg : float option }
 type import = { external_id : string; measured_at : Ptime.t; weight_kg : float }
@@ -45,7 +52,6 @@ val of_storage :
   measured_at:Ptime.t ->
   weight_kg:float ->
   source:source ->
-  external_id:string option ->
   created_at:Ptime.t ->
   updated_at:Ptime.t ->
   deleted_at:Ptime.t option ->

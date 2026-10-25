@@ -1,3 +1,7 @@
+module Domain_error = Error
+open Base
+module Error = Domain_error
+
 let log_src =
   Logs.Src.create "kcal.withings.sync"
     ~doc:"Withings measurement synchronization"
@@ -15,22 +19,19 @@ let make ~store ~client ~token_key ~now = { store; client; token_key; now }
 
 let kg measurement =
   let value =
-    Int64.to_float measurement.Withings.value
-    *. (10. ** float_of_int measurement.unit_)
+    Float.(
+      Int64.to_float measurement.Withings.value
+      * (10. ** of_int measurement.unit_))
   in
-  if
-    classify_float value = FP_nan
-    || classify_float value = FP_infinite
-    || value <= 0.0
-  then None
+  if (not (Float.is_finite value)) || Float.(value <= 0.0) then None
   else Some value
 
-let imports connection measurements =
+let imports account measurements =
   let rec collect values = function
     | [] ->
         Ok
-          (List.sort_uniq
-             (fun left right ->
+          (List.dedup_and_sort
+             ~compare:(fun left right ->
                String.compare (Weigh_in.Import.to_raw left).external_id
                  (Weigh_in.Import.to_raw right).external_id)
              values)
@@ -41,10 +42,10 @@ let imports connection measurements =
           ( kg measurement,
             Ptime.of_float_s (Int64.to_float measurement.measured_at) )
         with
-        | Some weight_kg, Some measured_at when measurement.group_id <> "" -> (
+        | Some weight_kg, Some measured_at
+          when not (String.is_empty measurement.group_id) -> (
             let withings_user_id =
-              Option.value connection.Withings_connection.withings_user_id
-                ~default:"unknown"
+              Withings_connection.Account.to_string account
             in
             match
               Weigh_in.Import.of_raw
@@ -57,18 +58,11 @@ let imports connection measurements =
             with
             | Ok row -> collect (row :: values) rest
             | Error _ as error -> error)
-        | _ -> Error (Error.Invalid_input "invalid Withings weight measurement")
-        )
+        | _ -> Error (Error.Withings_failure Malformed_response))
   in
   collect [] measurements
 
-let cursor previous received =
-  match (previous, received) with
-  | Some left, Some right -> Some (Int64.max left right)
-  | Some value, None | None, Some value -> Some value
-  | None, None -> None
-
-let ( let* ) = Result.bind
+let ( let* ) result f = Result.bind result ~f
 
 let load_credentials t ~user ~connection ~user_id =
   match
@@ -106,10 +100,9 @@ let refresh_credentials t ~user ~connection ~user_id credentials =
     | Ok credentials ->
         Log.info (fun m -> m "user=%s refreshed Withings access token" user_id);
         Result.map
-          (fun connection -> (credentials, connection))
           (Store_sqlite.save_withings_credentials t.store ~user ~key:t.token_key
-             credentials)
-    | Error error when Withings.is_permanent_refresh_error error ->
+             credentials) ~f:(fun connection -> (credentials, connection))
+    | Error (Error.Withings_failure (Credential_rejection _)) ->
         require_reauthorization t ~user ~connection ~user_id
     | Error error as result ->
         Log.err (fun m ->
@@ -130,8 +123,8 @@ let fetch_measurements t ~connection ~user_id credentials =
             (Error.to_string error));
       result
 
-let normalize_measurements ~connection ~user_id batch =
-  match imports connection batch.Withings.measurements with
+let normalize_measurements ~account ~user_id batch =
+  match imports account batch.Withings.measurements with
   | Ok rows -> Ok rows
   | Error error as result ->
       Log.err (fun m ->
@@ -141,7 +134,8 @@ let normalize_measurements ~connection ~user_id batch =
 
 let persist_imports t ~user ~connection ~user_id ~cursor rows =
   match
-    Store_sqlite.persist_withings_import t.store ~user ~connection ~rows ~cursor
+    Store_sqlite.persist_withings_import t.store ~user ~connection ~rows
+      ~expected_cursor:connection.Withings_connection.sync_cursor ~cursor
   with
   | Ok () as result ->
       Log.info (fun m ->
@@ -160,7 +154,8 @@ let sync t ~user ~connection =
   let* credentials, connection =
     refresh_credentials t ~user ~connection ~user_id credentials
   in
+  let* account = Withings_connection.connected_account connection in
   let* batch = fetch_measurements t ~connection ~user_id credentials in
-  let* rows = normalize_measurements ~connection ~user_id batch in
-  let cursor = cursor connection.sync_cursor batch.lastupdate in
+  let* rows = normalize_measurements ~account ~user_id batch in
+  let cursor = batch.lastupdate in
   persist_imports t ~user ~connection ~user_id ~cursor rows

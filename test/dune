@@ -30,7 +30,8 @@
 (test
  (name test_withings_sync)
  (modules test_withings_sync test_support)
- (libraries alcotest sqlite3 kcal)
+ (libraries alcotest sqlite3 kcal hegel base)
+ (preprocess (per_module ((pps ppx_jane ppx_hegel_test) test_withings_sync)))
  (deps ../migrations/001_ledger.sql ../migrations/002_withings.sql))
 
 (test

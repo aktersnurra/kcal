@@ -23,8 +23,8 @@ let weigh_in at weight_kg : Weigh_in.t =
   let at = time at in
   Result.get_ok
     (Weigh_in.of_storage ~id:(Weigh_in_id.fresh ()) ~user_id:(User_id.fresh ())
-       ~measured_at:at ~weight_kg ~source:Weigh_in.Manual ~external_id:None
-       ~created_at:at ~updated_at:at ~deleted_at:None)
+       ~measured_at:at ~weight_kg ~source:Weigh_in.Manual ~created_at:at
+       ~updated_at:at ~deleted_at:None)
 
 let range first last =
   Result.get_ok (Date_range.make ~first:(date first) ~last:(date last))

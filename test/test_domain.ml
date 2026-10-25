@@ -89,7 +89,10 @@ let test_source_strings () =
     (Weigh_in.source_to_string Weigh_in.Manual);
   Alcotest.(check string)
     "withings model" "withings"
-    (Weigh_in.source_to_string Weigh_in.Withings)
+    (Weigh_in.source_to_string
+       (Weigh_in.Withings
+          (Result.get_ok
+             (Weigh_in.Imported_identity.of_external_id "account:group"))))
 
 let test_parses_offset_datetime_as_utc () =
   match Time.parse_offset_datetime "2026-01-02T03:04:05+02:00" with

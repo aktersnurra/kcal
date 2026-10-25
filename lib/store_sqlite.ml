@@ -602,16 +602,19 @@ let weigh_in_of_row statement =
       let source =
         match text statement 4 with
         | "manual" -> Some Weigh_in.Manual
-        | "withings" -> Some Weigh_in.Withings
+        | "withings" ->
+            Option.bind (optional_text statement 5) (fun external_id ->
+                Result.to_option
+                  (Result.map
+                     (fun identity -> Weigh_in.Withings identity)
+                     (Weigh_in.Imported_identity.of_external_id external_id)))
         | _ -> None
       in
       match source with
       | Some source ->
           Result.to_option
             (Weigh_in.of_storage ~id ~user_id ~measured_at
-               ~weight_kg:(float statement 3) ~source
-               ~external_id:(optional_text statement 5)
-               ~created_at ~updated_at
+               ~weight_kg:(float statement 3) ~source ~created_at ~updated_at
                ~deleted_at:(Option.bind (optional_text statement 8) parse_time))
       | None -> None)
   | _ -> None
@@ -1063,7 +1066,8 @@ let mark_withings_reauthorization db ~user ~connection =
           then Ok ()
           else Error Error.Not_found)
 
-let persist_withings_import db ~user ~connection ~rows ~cursor =
+let persist_withings_import db ~user ~connection ~rows ~expected_cursor ~cursor
+    =
   let rows = List.map Weigh_in.Import.to_raw rows in
   if Sqlite3.exec db "BEGIN IMMEDIATE" <> Sqlite3.Rc.OK then
     Error (storage_error ())
@@ -1072,30 +1076,45 @@ let persist_withings_import db ~user ~connection ~rows ~cursor =
     let result =
       try
         let stale =
-          match cursor with
-          | None -> Ok false
-          | Some received ->
-              with_statement db
-                "SELECT sync_cursor FROM withings_connections WHERE id = ? AND \
-                 user_id = ?" (fun statement ->
-                  match
-                    bind statement
-                      [
-                        Sqlite3.Data.TEXT connection.Withings_connection.id;
-                        Sqlite3.Data.TEXT (User_id.to_string user.User.id);
-                      ]
-                  with
-                  | Error _ as error -> error
-                  | Ok () -> (
-                      match Sqlite3.step statement with
-                      | Sqlite3.Rc.ROW ->
-                          Ok
-                            ((not (Sqlite3.column_is_null statement 0))
-                            && Int64.compare received
-                                 (Sqlite3.column_int64 statement 0)
-                               < 0)
-                      | Sqlite3.Rc.DONE -> Error Error.Not_found
-                      | _ -> Error (storage_error ())))
+          with_statement db
+            "SELECT sync_cursor, withings_user_id FROM withings_connections \
+             WHERE id = ? AND user_id = ?" (fun statement ->
+              match
+                bind statement
+                  [
+                    Sqlite3.Data.TEXT connection.Withings_connection.id;
+                    Sqlite3.Data.TEXT (User_id.to_string user.User.id);
+                  ]
+              with
+              | Error _ as error -> error
+              | Ok () -> (
+                  match Sqlite3.step statement with
+                  | Sqlite3.Rc.ROW ->
+                      let current_cursor =
+                        if Sqlite3.column_is_null statement 0 then None
+                        else Some (Sqlite3.column_int64 statement 0)
+                      in
+                      if
+                        (not
+                           (Option.equal String.equal
+                              (optional_text statement 1)
+                              connection.withings_user_id))
+                        || Option.is_none connection.withings_user_id
+                      then Error Error.Not_found
+                      else
+                        Ok
+                          (match cursor with
+                          | None ->
+                              not
+                                (Option.equal Int64.equal current_cursor
+                                   expected_cursor)
+                          | Some received -> (
+                              match current_cursor with
+                              | None -> false
+                              | Some current ->
+                                  Int64.compare received current < 0))
+                  | Sqlite3.Rc.DONE -> Error Error.Not_found
+                  | _ -> Error (storage_error ())))
         in
         let current = timestamp (now ()) in
         let persist (row : Weigh_in.import) =

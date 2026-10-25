@@ -30,7 +30,15 @@ type calculation =
   | Weight_regression
   | Implied_maintenance
 
+type provider_failure =
+  | Credential_rejection of int
+  | Api_status of int
+  | Http_status of int
+  | Malformed_response
+  | Transport_failure of string
+
 type t =
+  | Withings_failure of provider_failure
   | Invalid_field of { field : field; reason : invalid_field_reason }
   | Numeric_overflow of numeric_field
   | Unrepresentable_result of calculation

@@ -22,7 +22,9 @@ let test_exchange_and_refresh_response_are_sanitized () =
       }
   in
   let module Client =
-    (val Withings.make ~request
+    (val Withings.make
+           ~now:(fun () -> expires)
+           ~request
            ~config:Withings.{ client_id = "id"; client_secret = "secret" })
   in
   let exchanged =
@@ -45,7 +47,9 @@ let test_measurement_fixture_accepts_withings_numbers () =
   in
   let request = Withings.{ post_form = (fun ~uri:_ ~fields:_ -> Ok fixture) } in
   let module Client =
-    (val Withings.make ~request
+    (val Withings.make
+           ~now:(fun () -> expires)
+           ~request
            ~config:Withings.{ client_id = "id"; client_secret = "secret" })
   in
   match
@@ -102,7 +106,9 @@ let test_exchange_code_sends_redirect_uri () =
       }
   in
   let module Client =
-    (val Withings.make ~request
+    (val Withings.make
+           ~now:(fun () -> expires)
+           ~request
            ~config:Withings.{ client_id = "id"; client_secret = "secret" })
   in
   ignore
@@ -127,7 +133,9 @@ let test_upstream_status_is_preserved_in_error () =
       }
   in
   let module Client =
-    (val Withings.make ~request
+    (val Withings.make
+           ~now:(fun () -> expires)
+           ~request
            ~config:Withings.{ client_id = "id"; client_secret = "secret" })
   in
   match
@@ -135,52 +143,240 @@ let test_upstream_status_is_preserved_in_error () =
       ~redirect_uri:"https://kcal.example.com/withings/callback" ~code:"code"
   with
   | Ok _ -> Alcotest.fail "expected the exchange to fail"
-  | Error (Error.Invalid_input message) ->
-      let contains needle haystack =
-        let n = String.length needle and h = String.length haystack in
-        let rec scan i =
-          i + n <= h && (String.sub haystack i n = needle || scan (i + 1))
-        in
-        scan 0
-      in
-      Alcotest.(check bool)
-        "error names the upstream status" true (contains "503" message)
-  | Error _ -> Alcotest.fail "expected an Invalid_input error"
+  | Error (Error.Withings_failure (Api_status status)) ->
+      Alcotest.(check int) "API status" 503 status
+  | Error _ -> Alcotest.fail "expected a structured API status"
 
 let test_transport_error_names_the_http_status () =
   match Withings_transport.error_of_status `Bad_gateway with
-  | Error.Invalid_input message ->
-      let contains needle haystack =
-        let n = String.length needle and h = String.length haystack in
-        let rec scan i =
-          i + n <= h && (String.sub haystack i n = needle || scan (i + 1))
-        in
-        scan 0
-      in
-      Alcotest.(check bool)
-        "names the HTTP status" true (contains "502" message)
-  | _ -> Alcotest.fail "expected an Invalid_input error"
+  | Error.Withings_failure (Http_status status) ->
+      Alcotest.(check int) "HTTP status" 502 status
+  | _ -> Alcotest.fail "expected a structured HTTP status"
 
 let test_transport_error_names_the_exception () =
   match Withings_transport.error_of_exn (Failure "connection reset") with
-  | Error.Invalid_input message ->
-      let contains needle haystack =
-        let n = String.length needle and h = String.length haystack in
-        let rec scan i =
-          i + n <= h && (String.sub haystack i n = needle || scan (i + 1))
-        in
-        scan 0
+  | Error.Withings_failure (Transport_failure message) ->
+      Alcotest.(check string)
+        "exception retained" {|Failure("connection reset")|} message
+  | _ -> Alcotest.fail "expected a structured transport failure"
+
+let test_complete_pagination () =
+  let calls = ref [] in
+  let request =
+    Withings.
+      {
+        post_form =
+          (fun ~uri:_ ~fields ->
+            calls := fields :: !calls;
+            match List.assoc_opt "offset" fields with
+            | None ->
+                Ok
+                  {|{"status":0,"body":{"lastupdate":100,"more":1,"offset":42,"measuregrps":[]}}|}
+            | Some "42" ->
+                Ok
+                  {|{"status":0,"body":{"lastupdate":100,"more":0,"measuregrps":[]}}|}
+            | _ -> Alcotest.fail "unexpected continuation");
+      }
+  in
+  let module Client =
+    (val Withings.make
+           ~now:(fun () -> expires)
+           ~request
+           ~config:Withings.{ client_id = "id"; client_secret = "secret" })
+  in
+  ignore
+    (Result.get_ok
+       (Client.get_measurements ~access_token:"token" ~lastupdate:(Some 90L)));
+  Alcotest.(check int) "all pages fetched" 2 (List.length !calls);
+  List.iter
+    (fun fields ->
+      Alcotest.(check (option string))
+        "original query watermark" (Some "90")
+        (List.assoc_opt "lastupdate" fields))
+    !calls
+
+let test_second_page_failure () =
+  let request =
+    Withings.
+      {
+        post_form =
+          (fun ~uri:_ ~fields ->
+            if List.mem_assoc "offset" fields then
+              Error (Error.Invalid_input "page two")
+            else
+              Ok
+                {|{"status":0,"body":{"lastupdate":100,"more":1,"offset":42,"measuregrps":[]}}|});
+      }
+  in
+  let module Client =
+    (val Withings.make
+           ~now:(fun () -> expires)
+           ~request
+           ~config:Withings.{ client_id = "id"; client_secret = "secret" })
+  in
+  Alcotest.(check bool)
+    "no partial batch" true
+    (Result.is_error
+       (Client.get_measurements ~access_token:"token" ~lastupdate:None))
+
+let test_malformed_continuations () =
+  List.iter
+    (fun fixture ->
+      let calls = ref 0 in
+      let request =
+        Withings.
+          {
+            post_form =
+              (fun ~uri:_ ~fields:_ ->
+                incr calls;
+                if !calls > 2 then
+                  Error (Error.Withings_failure (Http_status 502))
+                else Ok fixture);
+          }
+      in
+      let module Client =
+        (val Withings.make
+               ~now:(fun () -> expires)
+               ~request
+               ~config:Withings.{ client_id = "id"; client_secret = "secret" })
       in
       Alcotest.(check bool)
-        "names the exception" true
-        (contains "connection reset" message)
-  | _ -> Alcotest.fail "expected an Invalid_input error"
+        "malformed continuation rejected" true
+        (match
+           Client.get_measurements ~access_token:"token" ~lastupdate:None
+         with
+        | Error (Error.Withings_failure Malformed_response) -> true
+        | _ -> false))
+    [
+      {|{"status":0,"body":{"more":1,"measuregrps":[]}}|};
+      {|{"status":0,"body":{"more":1,"offset":42,"measuregrps":[]}}|};
+      {|{"status":0,"body":{"more":1,"offset":0,"measuregrps":[]}}|};
+      {|{"status":0,"body":{"more":1,"offset":-1,"measuregrps":[]}}|};
+      {|{"status":0,"body":{"more":1,"offset":1e300,"measuregrps":[]}}|};
+    ]
+
+let test_credentials_use_injected_clock () =
+  let body =
+    {|{"status":0,"body":{"access_token":"access","refresh_token":"refresh","expires_in":3600,"userid":"42"}}|}
+  in
+  let first =
+    Result.get_ok (Withings.credentials_of_response ~now:expires body)
+  in
+  let second_now =
+    Option.get (Ptime.add_span expires (Ptime.Span.of_int_s 90))
+  in
+  let request = Withings.{ post_form = (fun ~uri:_ ~fields:_ -> Ok body) } in
+  let module Client =
+    (val Withings.make
+           ~now:(fun () -> second_now)
+           ~request
+           ~config:Withings.{ client_id = "id"; client_secret = "secret" })
+  in
+  let second = Result.get_ok (Client.refresh ~refresh_token:"refresh") in
+  Alcotest.(check bool)
+    "pure expiry" true
+    (Ptime.equal first.expires_at
+       (Option.get (Ptime.add_span expires (Ptime.Span.of_int_s 3600))));
+  Alcotest.(check bool)
+    "injected client expiry" true
+    (Ptime.equal second.expires_at
+       (Option.get (Ptime.add_span second_now (Ptime.Span.of_int_s 3600))))
+
+let test_final_page_raw_watermark () =
+  List.iter
+    (fun (last_page, expected) ->
+      let request =
+        Withings.
+          {
+            post_form =
+              (fun ~uri:_ ~fields ->
+                Ok
+                  (if List.mem_assoc "offset" fields then last_page
+                   else
+                     {|{"status":0,"body":{"more":1,"offset":42,"lastupdate":101,"measuregrps":[]}}|}));
+          }
+      in
+      let module Client =
+        (val Withings.make
+               ~now:(fun () -> expires)
+               ~request
+               ~config:Withings.{ client_id = "id"; client_secret = "secret" })
+      in
+      let batch =
+        Result.get_ok
+          (Client.get_measurements ~access_token:"token" ~lastupdate:(Some 100L))
+      in
+      Alcotest.(check (option int64))
+        "final page raw watermark" expected batch.lastupdate)
+    [
+      ( {|{"status":0,"body":{"more":0,"lastupdate":99,"measuregrps":[]}}|},
+        Some 99L );
+      ({|{"status":0,"body":{"more":0,"measuregrps":[]}}|}, None);
+    ]
+
+let test_structured_failures () =
+  let rejected = {|{"status":401}|} in
+  Alcotest.(check bool)
+    "refresh credential rejection" true
+    (match
+       Withings.credentials_of_response ~now:expires ~refresh:true rejected
+     with
+    | Error (Error.Withings_failure (Credential_rejection 401)) -> true
+    | _ -> false);
+  Alcotest.(check bool)
+    "exchange API status" true
+    (match Withings.credentials_of_response ~now:expires rejected with
+    | Error (Error.Withings_failure (Api_status 401)) -> true
+    | _ -> false);
+  List.iter
+    (fun body ->
+      Alcotest.(check bool)
+        "malformed response variant" true
+        (match Withings.measurements_of_response body with
+        | Error (Error.Withings_failure Malformed_response) -> true
+        | _ -> false))
+    [
+      "not json";
+      {|{"status":0,"body":{}}|};
+      {|{"status":0,"body":{"more":1,"measuregrps":[]}}|};
+    ];
+  let request =
+    Withings.
+      {
+        post_form =
+          (fun ~uri:_ ~fields:_ ->
+            Error (Error.Withings_failure (Http_status 503)));
+      }
+  in
+  let module Client =
+    (val Withings.make
+           ~now:(fun () -> expires)
+           ~request
+           ~config:Withings.{ client_id = "id"; client_secret = "secret" })
+  in
+  Alcotest.(check bool)
+    "HTTP failure preserved through client" true
+    (match Client.get_measurements ~access_token:"token" ~lastupdate:None with
+    | Error (Error.Withings_failure (Http_status 503)) -> true
+    | _ -> false)
 
 let () =
   Alcotest.run "withings client"
     [
       ( "credentials",
         [
+          Alcotest.test_case "pure credentials and injected clock" `Quick
+            test_credentials_use_injected_clock;
+          Alcotest.test_case "final page raw watermark" `Quick
+            test_final_page_raw_watermark;
+          Alcotest.test_case "structured provider failures" `Quick
+            test_structured_failures;
+          Alcotest.test_case "complete pagination" `Quick
+            test_complete_pagination;
+          Alcotest.test_case "second page failure" `Quick
+            test_second_page_failure;
+          Alcotest.test_case "malformed continuations" `Quick
+            test_malformed_continuations;
           Alcotest.test_case "exchange and refresh" `Quick
             test_exchange_and_refresh_response_are_sanitized;
           Alcotest.test_case "realistic numeric measurement fixture" `Quick

@@ -1029,7 +1029,7 @@ let call_response ~request_id = function
       response ~id:request_id (tool_error (Error.to_string error))
   | Error
       ( Error.Unauthorized | Error.Conflict _ | Error.Storage_error _
-      | Error.Storage_decoding _ ) ->
+      | Error.Storage_decoding _ | Error.Withings_failure _ ) ->
       rpc_error ~id:request_id (-32603) "Internal error"
 
 let handle ?withings ~service ~identity request =

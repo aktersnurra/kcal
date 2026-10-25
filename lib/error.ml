@@ -32,7 +32,15 @@ type calculation =
   | Weight_regression
   | Implied_maintenance
 
+type provider_failure =
+  | Credential_rejection of int
+  | Api_status of int
+  | Http_status of int
+  | Malformed_response
+  | Transport_failure of string
+
 type t =
+  | Withings_failure of provider_failure
   | Invalid_field of { field : field; reason : invalid_field_reason }
   | Numeric_overflow of numeric_field
   | Unrepresentable_result of calculation
@@ -70,6 +78,16 @@ let field_name = function
   | External_id -> "external_id"
 
 let to_string = function
+  | Withings_failure failure -> (
+      match failure with
+      | Credential_rejection status ->
+          Printf.sprintf "Withings authorization rejected (status %d)" status
+      | Api_status status ->
+          Printf.sprintf "Withings request failed (status %d)" status
+      | Http_status status ->
+          Printf.sprintf "Withings request failed (HTTP %d)" status
+      | Malformed_response -> "malformed Withings response"
+      | Transport_failure reason -> "Withings transport failed: " ^ reason)
   | Invalid_field { field; reason } ->
       let reason =
         match reason with

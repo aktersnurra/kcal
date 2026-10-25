@@ -111,7 +111,8 @@ let persist_withings_import_raw store ~user ~connection ~rows ~cursor =
             Result.map (fun rest -> row :: rest) (parse rest))
   in
   Result.bind (parse rows) (fun rows ->
-      Store_sqlite.persist_withings_import store ~user ~connection ~rows ~cursor)
+      Store_sqlite.persist_withings_import store ~user ~connection ~rows
+        ~expected_cursor:connection.Withings_connection.sync_cursor ~cursor)
 
 let record_meal_raw service ~user raw =
   Result.bind (Meal.Create.of_raw raw) (Service.record_meal service ~user)
