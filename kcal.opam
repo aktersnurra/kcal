@@ -11,6 +11,11 @@ dev-repo: "git+https://github.com/aktersnurra/kcal.git"
 depends: [
   "ocaml" {>= "5.2"}
   "dune" {>= "3.24"}
+  "base" {>= "v0.17" & < "v0.18~"}
+  "core" {>= "v0.17" & < "v0.18~"}
+  "core_unix" {>= "v0.17" & < "v0.18~"}
+  "ppx_jane" {>= "v0.17" & < "v0.18~"}
+  "ocamlformat" {= "0.29.0" & with-dev-setup}
   "eio"
   "eio_main"
   "eio_posix"

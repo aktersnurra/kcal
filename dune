@@ -1,1 +1,8 @@
 (data_only_dirs migrations)
+
+; Warning 70 is staged only until Task 6 seals all library interfaces.
+
+(env
+ (dev
+  (flags
+   (:standard -w @A-4-33-40-41-42-43-34-44-70))))

@@ -1,4 +1,11 @@
-let open_temporary_database () = Sqlite3.db_open ":memory:"
+let close_database store =
+  Alcotest.(check bool)
+    "SQLite database closes without outstanding statements" true
+    (Sqlite3.db_close store)
+
+let with_database f =
+  let store = Sqlite3.db_open ":memory:" in
+  Fun.protect ~finally:(fun () -> close_database store) (fun () -> f store)
 
 let table_exists_bool db name =
   let statement =
@@ -11,46 +18,53 @@ let table_exists_bool db name =
   exists
 
 let table_exists db name =
-  Alcotest.(check bool) ("table " ^ name ^ " exists") true (table_exists_bool db name)
+  Alcotest.(check bool)
+    ("table " ^ name ^ " exists")
+    true
+    (table_exists_bool db name)
 
-let store_with_user () =
-  let store = open_temporary_database () in
-  Result.get_ok (Migration.apply_all store);
-  let user =
-    Result.get_ok
-      (Store_sqlite.resolve_user store ~issuer:"https://issuer.example" ~subject:"alice")
-  in
-  (store, user)
+let with_store (f : Store_sqlite.t -> User.t -> 'a) : 'a =
+  with_database (fun store ->
+      Result.get_ok (Migration.apply_all store);
+      let user =
+        Result.get_ok
+          (Store_sqlite.resolve_user store ~issuer:"https://issuer.example"
+             ~subject:"alice")
+      in
+      f store user)
 
-let store_with_two_users () =
-  let store, alice = store_with_user () in
-  let bob =
-    Result.get_ok
-      (Store_sqlite.resolve_user store ~issuer:"https://issuer.example" ~subject:"bob")
-  in
-  (store, alice, bob)
+let with_two_users (f : Store_sqlite.t -> User.t -> User.t -> 'a) : 'a =
+  with_store (fun store alice ->
+      let bob =
+        Result.get_ok
+          (Store_sqlite.resolve_user store ~issuer:"https://issuer.example"
+             ~subject:"bob")
+      in
+      f store alice bob)
 
 let with_exclusive_lock setup f =
   let path = Filename.temp_file "kcal-store" ".sqlite" in
   let store = Sqlite3.db_open path in
   Fun.protect
     ~finally:(fun () ->
-      ignore (Sqlite3.db_close store);
+      close_database store;
       Sys.remove path)
     (fun () ->
       Result.get_ok (Migration.apply_all store);
       let user =
         Result.get_ok
-          (Store_sqlite.resolve_user store ~issuer:"https://issuer.example" ~subject:"alice")
+          (Store_sqlite.resolve_user store ~issuer:"https://issuer.example"
+             ~subject:"alice")
       in
       let value = setup store user in
       let locker = Sqlite3.db_open path in
       Fun.protect
         ~finally:(fun () ->
           ignore (Sqlite3.exec locker "ROLLBACK");
-          ignore (Sqlite3.db_close locker))
+          close_database locker)
         (fun () ->
-          Alcotest.(check bool) "exclusive lock acquired" true
+          Alcotest.(check bool)
+            "exclusive lock acquired" true
             (Sqlite3.exec locker "BEGIN EXCLUSIVE" = Sqlite3.Rc.OK);
           f store user value))
 
@@ -75,3 +89,59 @@ let create_weight store user =
   Result.get_ok
     (Store_sqlite.create_manual_weigh_in store ~user
        Weigh_in.{ measured_at = None; weight_kg = 79.6 })
+
+let equal_product (left : Product.t) (right : Product.t) =
+  Product_id.equal left.id right.id
+  && User_id.equal left.user_id right.user_id
+  && String.equal left.name right.name
+  && String.equal left.basis right.basis
+  && Int.equal left.calories_kcal right.calories_kcal
+  && Float.equal left.protein_g right.protein_g
+  && Option.equal Float.equal left.carbs_g right.carbs_g
+  && Option.equal Float.equal left.fat_g right.fat_g
+  && String.equal left.source right.source
+  && Ptime.equal left.created_at right.created_at
+  && Ptime.equal left.updated_at right.updated_at
+
+let equal_meal (left : Meal.t) (right : Meal.t) =
+  Meal_id.equal left.id right.id
+  && User_id.equal left.user_id right.user_id
+  && Ptime.equal left.eaten_at right.eaten_at
+  && String.equal left.description right.description
+  && Int.equal left.calories_kcal right.calories_kcal
+  && Float.equal left.protein_g right.protein_g
+  && Option.equal Float.equal left.carbs_g right.carbs_g
+  && Option.equal Float.equal left.fat_g right.fat_g
+  && Option.equal Float.equal left.confidence right.confidence
+  && Option.equal String.equal left.estimate_source right.estimate_source
+  && Option.equal String.equal left.notes right.notes
+  && Ptime.equal left.created_at right.created_at
+  && Ptime.equal left.updated_at right.updated_at
+  && Option.equal Ptime.equal left.deleted_at right.deleted_at
+
+let user_id =
+  Alcotest.testable
+    (fun fmt id -> Format.pp_print_string fmt (User_id.to_string id))
+    User_id.equal
+
+let product_id =
+  Alcotest.testable
+    (fun fmt id -> Format.pp_print_string fmt (Product_id.to_string id))
+    Product_id.equal
+
+let timestamp =
+  Alcotest.testable
+    (fun fmt time -> Format.pp_print_string fmt (Time.to_utc_string time))
+    Ptime.equal
+
+let product =
+  Alcotest.testable
+    (fun fmt value -> Yojson.Safe.pretty_print fmt (Mcp.product_json value))
+    equal_product
+
+let meal =
+  Alcotest.testable
+    (fun fmt value -> Yojson.Safe.pretty_print fmt (Mcp.meal_json value))
+    equal_meal
+
+let exact_float = Alcotest.testable Format.pp_print_float Float.equal
