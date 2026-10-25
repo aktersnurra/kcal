@@ -230,7 +230,9 @@ let test_corrupt_weight_is_not_repaired () =
       let weight = Test_support.create_weight store user in
       Alcotest.(check bool)
         "inject infinity" true
-        (Sqlite3.exec store "UPDATE weigh_ins SET weight_kg = 1e309"
+        (Sqlite3.exec
+           (Store_sqlite.For_testing.raw_database store)
+           "UPDATE weigh_ins SET weight_kg = 1e309"
         = Sqlite3.Rc.OK);
       Alcotest.(check bool)
         "query rejects corrupt weight" true

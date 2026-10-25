@@ -131,8 +131,7 @@ let test_rejects_expired_token () =
         | _ -> false))
 
 let test_resolves_verified_identity_stably () =
-  Test_support.with_database (fun store ->
-      Result.get_ok (Migration.apply_all store);
+  Test_support.with_store (fun store _ ->
       let auth =
         Auth.make
           ~resolve_user:(Store_sqlite.resolve_user store)

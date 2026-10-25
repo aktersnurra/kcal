@@ -1,4 +1,5 @@
-let parsed store text = Result.get_ok (Search_query.of_strings store [ text ])
+let parsed store text =
+  Result.get_ok (Store_sqlite.compile_search_query store [ text ])
 
 let test_user_resolution_is_stable () =
   Test_support.with_store (fun store first ->
@@ -270,7 +271,7 @@ let test_search_rejects_blank_text_and_invalid_limits () =
           Alcotest.(check bool)
             "invalid search query" true
             (match
-               match Search_query.of_strings store [ search ] with
+               match Store_sqlite.compile_search_query store [ search ] with
                | Error e -> Error e
                | Ok search ->
                    Store_sqlite.query_meals ~search store ~user ~from:None
@@ -285,7 +286,10 @@ let test_invalid_durable_numeric_row () =
       let meal = Test_support.create_meal store user in
       Alcotest.(check bool)
         "inject infinity" true
-        (Sqlite3.exec store "UPDATE meals SET protein_g = 1e309" = Sqlite3.Rc.OK);
+        (Sqlite3.exec
+           (Store_sqlite.For_testing.raw_database store)
+           "UPDATE meals SET protein_g = 1e309"
+        = Sqlite3.Rc.OK);
       Alcotest.(check bool)
         "corrupt row rejected" true
         (match Store_sqlite.get_meal store ~user meal.id with
@@ -301,7 +305,8 @@ let test_invalid_durable_numeric_row () =
         | _ -> false);
       let protein = ref 0.0 in
       ignore
-        (Sqlite3.exec store
+        (Sqlite3.exec
+           (Store_sqlite.For_testing.raw_database store)
            ~cb:(fun row _ -> protein := float_of_string (Option.get row.(0)))
            "SELECT protein_g FROM meals");
       Alcotest.(check bool)
@@ -315,7 +320,9 @@ let test_durable_calories_are_not_coerced () =
           let meal = Test_support.create_meal store user in
           Alcotest.(check bool)
             "inject invalid durable calories" true
-            (Sqlite3.exec store ("UPDATE meals SET calories_kcal = " ^ value)
+            (Sqlite3.exec
+               (Store_sqlite.For_testing.raw_database store)
+               ("UPDATE meals SET calories_kcal = " ^ value)
             = Sqlite3.Rc.OK);
           Alcotest.(check bool)
             "storage decoding error" true

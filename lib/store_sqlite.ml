@@ -1,94 +1,34 @@
 type t = Sqlite3.db
 
-(* The application schema is embedded here so the installed executable does not
-   depend on its current working directory.  Migration executes these versions
-   transactionally. *)
-let migrations =
-  [
-    ( 1,
-      {|
-CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
-CREATE TABLE users (id TEXT PRIMARY KEY, oidc_issuer TEXT NOT NULL, oidc_subject TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE (oidc_issuer, oidc_subject));
-CREATE TABLE meals (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), eaten_at TEXT NOT NULL, description TEXT NOT NULL, calories_kcal INTEGER NOT NULL, protein_g REAL NOT NULL, carbs_g REAL, fat_g REAL, confidence REAL, estimate_source TEXT, notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT);
-CREATE INDEX meals_user_eaten_at_idx ON meals(user_id, eaten_at);
-CREATE TABLE weigh_ins (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), measured_at TEXT NOT NULL, weight_kg REAL NOT NULL, source TEXT NOT NULL CHECK (source IN ('manual', 'withings')), external_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT, UNIQUE(source, external_id));
-CREATE INDEX weigh_ins_user_measured_at_idx ON weigh_ins(user_id, measured_at);
-|}
-    );
-    ( 2,
-      {|
-CREATE TABLE withings_connections (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL UNIQUE REFERENCES users(id),
-  withings_user_id TEXT UNIQUE,
-  access_token_encrypted TEXT,
-  refresh_token_encrypted TEXT,
-  token_expires_at TEXT,
-  sync_cursor INTEGER,
-  requires_reauthorization INTEGER NOT NULL DEFAULT 0 CHECK (requires_reauthorization IN (0, 1)),
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX withings_connections_user_idx ON withings_connections(user_id);
-CREATE TABLE withings_oauth_states (
-  state_hash TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL REFERENCES users(id),
-  expires_at TEXT NOT NULL,
-  consumed_at TEXT,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX withings_oauth_states_user_expiry_idx ON withings_oauth_states(user_id, expires_at);
-ALTER TABLE weigh_ins ADD COLUMN withings_connection_id TEXT REFERENCES withings_connections(id);
-CREATE INDEX weigh_ins_withings_connection_idx ON weigh_ins(withings_connection_id);
-|}
-    );
-    ( 3,
-      {|
-CREATE TABLE products (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL REFERENCES users(id),
-  name TEXT NOT NULL,
-  basis TEXT NOT NULL,
-  calories_kcal INTEGER NOT NULL,
-  protein_g REAL NOT NULL,
-  carbs_g REAL,
-  fat_g REAL,
-  source TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX products_user_name_id_idx ON products(user_id, name, id);
-|}
-    );
-    ( 4,
-      {|
-CREATE VIRTUAL TABLE products_fts USING fts5(name, basis, source, content='products', content_rowid='rowid', tokenize='unicode61 remove_diacritics 0');
-INSERT INTO products_fts(products_fts) VALUES ('rebuild');
-CREATE TRIGGER products_fts_insert AFTER INSERT ON products BEGIN
-  INSERT INTO products_fts(rowid, name, basis, source) VALUES (new.rowid, new.name, new.basis, new.source);
-END;
-CREATE TRIGGER products_fts_update AFTER UPDATE ON products BEGIN
-  INSERT INTO products_fts(products_fts, rowid, name, basis, source) VALUES ('delete', old.rowid, old.name, old.basis, old.source);
-  INSERT INTO products_fts(rowid, name, basis, source) VALUES (new.rowid, new.name, new.basis, new.source);
-END;
-CREATE TRIGGER products_fts_delete AFTER DELETE ON products BEGIN
-  INSERT INTO products_fts(products_fts, rowid, name, basis, source) VALUES ('delete', old.rowid, old.name, old.basis, old.source);
-END;
-CREATE VIRTUAL TABLE meals_fts USING fts5(description, estimate_source, notes, content='meals', content_rowid='rowid', tokenize='unicode61 remove_diacritics 0');
-INSERT INTO meals_fts(meals_fts) VALUES ('rebuild');
-CREATE TRIGGER meals_fts_insert AFTER INSERT ON meals BEGIN
-  INSERT INTO meals_fts(rowid, description, estimate_source, notes) VALUES (new.rowid, new.description, new.estimate_source, new.notes);
-END;
-CREATE TRIGGER meals_fts_update AFTER UPDATE ON meals BEGIN
-  INSERT INTO meals_fts(meals_fts, rowid, description, estimate_source, notes) VALUES ('delete', old.rowid, old.description, old.estimate_source, old.notes);
-  INSERT INTO meals_fts(rowid, description, estimate_source, notes) VALUES (new.rowid, new.description, new.estimate_source, new.notes);
-END;
-CREATE TRIGGER meals_fts_delete AFTER DELETE ON meals BEGIN
-  INSERT INTO meals_fts(meals_fts, rowid, description, estimate_source, notes) VALUES ('delete', old.rowid, old.description, old.estimate_source, old.notes);
-END;
-|}
-    );
-  ]
+let close db =
+  try
+    if Sqlite3.db_close db then Ok ()
+    else Error (Error.Storage_error "SQLite close failed")
+  with Sqlite3.Error _ | Sqlite3.SqliteError _ ->
+    Error (Error.Storage_error "SQLite close failed")
+
+let open_database ~path =
+  try
+    let db = Sqlite3.db_open path in
+    let initialize () =
+      if Sqlite3.exec db "PRAGMA foreign_keys = ON" <> Sqlite3.Rc.OK then
+        Error (Error.Storage_error "SQLite initialization failed")
+      else Result.map (fun () -> db) (Migration.apply_all db)
+    in
+    match initialize () with
+    | Ok _ as result -> result
+    | Error _ as error ->
+        ignore (close db);
+        error
+    | exception exn ->
+        ignore (close db);
+        raise exn
+  with Sqlite3.Error _ | Sqlite3.SqliteError _ ->
+    Error (Error.Storage_error "SQLite initialization failed")
+
+module For_testing = struct
+  let raw_database db = db
+end
 
 let log_src = Logs.Src.create "kcal.store" ~doc:"SQLite persistence"
 
@@ -745,20 +685,17 @@ let latest_weigh_in db ~user =
       | Ok () -> row_or_not_found statement weigh_in_of_row)
 
 let withings_connection_of_row statement =
-  match User_id.of_string (text statement 1) with
-  | None -> None
-  | Some user_id ->
-      Some
-        Withings_connection.
-          {
-            id = text statement 0;
-            user_id;
-            withings_user_id = optional_text statement 2;
-            token_expires_at =
-              Option.bind (optional_text statement 3) parse_time;
-            sync_cursor = optional_int64 statement 4;
-            requires_reauthorization = int statement 5 <> 0;
-          }
+  match
+    ( User_id.of_string (text statement 1),
+      optional_text statement 2,
+      Option.bind (optional_text statement 3) parse_time )
+  with
+  | Some user_id, Some withings_user_id, Some token_expires_at ->
+      Result.to_option
+        (Withings_connection.decode ~id:(text statement 0) ~user_id
+           ~withings_user_id ~token_expires_at
+           ~sync_cursor:(optional_int64 statement 4))
+  | _ -> None
 
 let create_withings_oauth_state db ~user ~state_hash ~expires_at =
   let created_at = timestamp (now ()) in
@@ -824,82 +761,30 @@ let consume_withings_oauth_state_for_callback db ~state_hash ~now:current_time =
           | Sqlite3.Rc.DONE -> Error Error.Not_found
           | _ -> Error (storage_error ())))
 
-let create_withings_connection db ~user ~withings_user_id =
-  let current = timestamp (now ()) in
-  let columns =
-    "id, user_id, withings_user_id, access_token_encrypted, \
-     refresh_token_encrypted, token_expires_at, sync_cursor, \
-     requires_reauthorization, created_at, updated_at"
-  in
-  let returned =
-    "id, user_id, withings_user_id, token_expires_at, sync_cursor, \
-     requires_reauthorization"
-  in
-  with_statement db
-    ("INSERT INTO withings_connections (" ^ columns
-   ^ ") VALUES (?, ?, ?, NULL, NULL, NULL, NULL, 0, ?, ?) RETURNING " ^ returned
-    )
-    (fun statement ->
-      match
-        bind statement
-          [
-            Sqlite3.Data.TEXT
-              (Withings_connection_id.to_string
-                 (Withings_connection_id.fresh ()));
-            Sqlite3.Data.TEXT (User_id.to_string user.User.id);
-            Sqlite3.Data.TEXT withings_user_id;
-            Sqlite3.Data.TEXT current;
-            Sqlite3.Data.TEXT current;
-          ]
-      with
-      | Error _ as error -> error
-      | Ok () ->
-          if Sqlite3.step statement = Sqlite3.Rc.ROW then
-            match withings_connection_of_row statement with
-            | Some connection -> Ok connection
-            | None -> Error (storage_error ())
-          else Error (storage_error ()))
-
 let get_withings_status db ~user =
   with_statement db
     "SELECT id, user_id, withings_user_id, token_expires_at, sync_cursor, \
-     requires_reauthorization FROM withings_connections WHERE user_id = ?"
-    (fun statement ->
+     requires_reauthorization, access_token_encrypted, refresh_token_encrypted \
+     FROM withings_connections WHERE user_id = ?" (fun statement ->
       match
         bind statement [ Sqlite3.Data.TEXT (User_id.to_string user.User.id) ]
       with
       | Error _ as error -> error
       | Ok () -> (
-          match row_or_not_found statement withings_connection_of_row with
-          | Ok connection -> Ok (Withings_connection.status connection)
-          | Error _ as error -> error))
-
-let ensure_withings_connection db ~user ~withings_user_id =
-  let current = timestamp (now ()) in
-  with_statement db
-    "INSERT INTO withings_connections (id, user_id, withings_user_id, \
-     access_token_encrypted, refresh_token_encrypted, token_expires_at, \
-     sync_cursor, requires_reauthorization, created_at, updated_at) VALUES (?, \
-     ?, ?, NULL, NULL, NULL, NULL, 0, ?, ?) ON CONFLICT(user_id) DO UPDATE SET \
-     sync_cursor = CASE WHEN withings_connections.withings_user_id IS NOT \
-     excluded.withings_user_id THEN NULL ELSE withings_connections.sync_cursor \
-     END, withings_user_id = excluded.withings_user_id, updated_at = \
-     excluded.updated_at RETURNING id, user_id, withings_user_id, \
-     token_expires_at, sync_cursor, requires_reauthorization" (fun statement ->
-      match
-        bind statement
-          [
-            Sqlite3.Data.TEXT
-              (Withings_connection_id.to_string
-                 (Withings_connection_id.fresh ()));
-            Sqlite3.Data.TEXT (User_id.to_string user.User.id);
-            Sqlite3.Data.TEXT withings_user_id;
-            Sqlite3.Data.TEXT current;
-            Sqlite3.Data.TEXT current;
-          ]
-      with
-      | Error _ as error -> error
-      | Ok () -> row_or_not_found statement withings_connection_of_row)
+          match Sqlite3.step statement with
+          | Sqlite3.Rc.DONE -> Ok Withings_connection.Disconnected
+          | Sqlite3.Rc.ROW -> (
+              match withings_connection_of_row statement with
+              | Some connection
+                when not
+                       (Sqlite3.column_is_null statement 6
+                       || Sqlite3.column_is_null statement 7) ->
+                  Ok
+                    (if int statement 5 = 0 then
+                       Withings_connection.Connected connection
+                     else Reauthorization_required connection)
+              | _ -> Error (Error.Storage_decoding "Withings connection"))
+          | _ -> Error (storage_error ())))
 
 let delete_withings_connection db ~user =
   with_statement db "DELETE FROM withings_connections WHERE user_id = ?"
@@ -914,16 +799,22 @@ let delete_withings_connection db ~user =
 
 let withings_connection_for_identity db ~withings_user_id =
   with_statement db
-    "SELECT c.id, c.user_id, c.withings_user_id, c.token_expires_at, \
-     c.sync_cursor, c.requires_reauthorization, u.oidc_issuer, u.oidc_subject, \
-     u.created_at FROM withings_connections c JOIN users u ON u.id = c.user_id \
-     WHERE c.withings_user_id = ?" (fun statement ->
+    "SELECT c.id, c.user_id, c.withings_user_id, CASE WHEN \
+     c.access_token_encrypted IS NULL OR c.refresh_token_encrypted IS NULL \
+     THEN NULL ELSE c.token_expires_at END, c.sync_cursor, \
+     c.requires_reauthorization, u.oidc_issuer, u.oidc_subject, u.created_at \
+     FROM withings_connections c JOIN users u ON u.id = c.user_id WHERE \
+     c.withings_user_id = ?" (fun statement ->
       match bind statement [ Sqlite3.Data.TEXT withings_user_id ] with
       | Error _ as error -> error
       | Ok () -> (
-          match
-            (Sqlite3.step statement, withings_connection_of_row statement)
-          with
+          let step = Sqlite3.step statement in
+          let connection =
+            match step with
+            | Sqlite3.Rc.ROW -> withings_connection_of_row statement
+            | _ -> None
+          in
+          match (step, connection) with
           | Sqlite3.Rc.ROW, Some connection -> (
               match
                 ( User_id.of_string (text statement 1),
@@ -944,11 +835,13 @@ let withings_connection_for_identity db ~withings_user_id =
 
 let withings_connections db =
   with_statement db
-    "SELECT c.id, c.user_id, c.withings_user_id, c.token_expires_at, \
-     c.sync_cursor, c.requires_reauthorization, u.oidc_issuer, u.oidc_subject, \
-     u.created_at FROM withings_connections c JOIN users u ON u.id = c.user_id \
-     WHERE c.access_token_encrypted IS NOT NULL AND c.refresh_token_encrypted \
-     IS NOT NULL" (fun statement ->
+    "SELECT c.id, c.user_id, c.withings_user_id, CASE WHEN \
+     c.access_token_encrypted IS NULL OR c.refresh_token_encrypted IS NULL \
+     THEN NULL ELSE c.token_expires_at END, c.sync_cursor, \
+     c.requires_reauthorization, u.oidc_issuer, u.oidc_subject, u.created_at \
+     FROM withings_connections c JOIN users u ON u.id = c.user_id WHERE \
+     c.access_token_encrypted IS NOT NULL AND c.refresh_token_encrypted IS NOT \
+     NULL" (fun statement ->
       let rec rows values =
         match Sqlite3.step statement with
         | Sqlite3.Rc.ROW -> (
@@ -973,46 +866,101 @@ let withings_connections db =
       in
       rows [])
 
-let save_withings_credentials db ~user ~key credentials =
+(* A single UPSERT is SQLite-atomic, including trigger failures. Encryption is
+   complete before entering that implicit write transaction. *)
+let replace_withings_connection db ~user ~key credentials =
   match
     ( Secret.encrypt ~key credentials.Withings.access_token,
       Secret.encrypt ~key credentials.refresh_token )
   with
-  | Ok access_token_encrypted, Ok refresh_token_encrypted ->
-      let current = timestamp (now ()) in
-      with_statement db
-        "UPDATE withings_connections SET withings_user_id = ?, \
-         access_token_encrypted = ?, refresh_token_encrypted = ?, \
-         token_expires_at = ?, requires_reauthorization = 0, updated_at = ? \
-         WHERE user_id = ? RETURNING id, user_id, withings_user_id, \
-         token_expires_at, sync_cursor, requires_reauthorization"
-        (fun statement ->
-          match
-            bind statement
-              [
-                Sqlite3.Data.TEXT credentials.withings_user_id;
-                Sqlite3.Data.TEXT access_token_encrypted;
-                Sqlite3.Data.TEXT refresh_token_encrypted;
-                Sqlite3.Data.TEXT (timestamp credentials.expires_at);
-                Sqlite3.Data.TEXT current;
-                Sqlite3.Data.TEXT (User_id.to_string user.User.id);
-              ]
-          with
-          | Error _ as error -> error
-          | Ok () -> row_or_not_found statement withings_connection_of_row)
-  | (Error _ as error), _ -> error
-  | _, (Error _ as error) -> error
+  | Ok access, Ok refresh ->
+      if String.length credentials.withings_user_id = 0 then
+        Error (Error.Invalid_input "Withings account identity required")
+      else
+        let current = timestamp (now ()) in
+        with_statement db
+          "INSERT INTO withings_connections \
+           (id,user_id,withings_user_id,access_token_encrypted,refresh_token_encrypted,token_expires_at,sync_cursor,requires_reauthorization,created_at,updated_at) \
+           VALUES (?,?,?,?,?,?,NULL,0,?,?) ON CONFLICT(user_id) DO UPDATE SET \
+           sync_cursor = CASE WHEN withings_connections.withings_user_id IS \
+           NOT excluded.withings_user_id THEN NULL ELSE \
+           withings_connections.sync_cursor END, \
+           withings_user_id=excluded.withings_user_id, \
+           access_token_encrypted=excluded.access_token_encrypted, \
+           refresh_token_encrypted=excluded.refresh_token_encrypted, \
+           token_expires_at=excluded.token_expires_at, \
+           requires_reauthorization=0, updated_at=excluded.updated_at \
+           RETURNING \
+           id,user_id,withings_user_id,token_expires_at,sync_cursor,requires_reauthorization"
+          (fun statement ->
+            match
+              bind statement
+                [
+                  Sqlite3.Data.TEXT
+                    (Withings_connection_id.to_string
+                       (Withings_connection_id.fresh ()));
+                  Sqlite3.Data.TEXT (User_id.to_string user.User.id);
+                  Sqlite3.Data.TEXT credentials.withings_user_id;
+                  Sqlite3.Data.TEXT access;
+                  Sqlite3.Data.TEXT refresh;
+                  Sqlite3.Data.TEXT (timestamp credentials.expires_at);
+                  Sqlite3.Data.TEXT current;
+                  Sqlite3.Data.TEXT current;
+                ]
+            with
+            | Error _ as error -> error
+            | Ok () -> row_or_not_found statement withings_connection_of_row)
+  | Error error, _ | _, Error error -> Error error
+
+let refresh_withings_credentials db ~user ~connection ~key credentials =
+  if
+    not
+      (String.equal credentials.Withings.withings_user_id
+         (Withings_connection.Account.to_string
+            connection.Withings_connection.account))
+  then Error (Error.Withings_failure Malformed_response)
+  else
+    match
+      ( Secret.encrypt ~key credentials.access_token,
+        Secret.encrypt ~key credentials.refresh_token )
+    with
+    | Ok access, Ok refresh ->
+        with_statement db
+          "UPDATE withings_connections SET \
+           access_token_encrypted=?,refresh_token_encrypted=?,token_expires_at=?,requires_reauthorization=0,updated_at=? \
+           WHERE id=? AND user_id=? AND withings_user_id=? RETURNING \
+           id,user_id,withings_user_id,token_expires_at,sync_cursor,requires_reauthorization"
+          (fun statement ->
+            match
+              bind statement
+                [
+                  Sqlite3.Data.TEXT access;
+                  Sqlite3.Data.TEXT refresh;
+                  Sqlite3.Data.TEXT (timestamp credentials.expires_at);
+                  Sqlite3.Data.TEXT (timestamp (now ()));
+                  Sqlite3.Data.TEXT connection.id;
+                  Sqlite3.Data.TEXT (User_id.to_string user.User.id);
+                  Sqlite3.Data.TEXT
+                    (Withings_connection.Account.to_string connection.account);
+                ]
+            with
+            | Error _ as error -> error
+            | Ok () -> row_or_not_found statement withings_connection_of_row)
+    | Error error, _ | _, Error error -> Error error
 
 let withings_credentials db ~user ~connection ~key =
   with_statement db
     "SELECT access_token_encrypted, refresh_token_encrypted, token_expires_at, \
      withings_user_id FROM withings_connections WHERE id = ? AND user_id = ? \
-     AND requires_reauthorization = 0" (fun statement ->
+     AND requires_reauthorization = 0 AND withings_user_id = ?"
+    (fun statement ->
       match
         bind statement
           [
             Sqlite3.Data.TEXT connection.Withings_connection.id;
             Sqlite3.Data.TEXT (User_id.to_string user.User.id);
+            Sqlite3.Data.TEXT
+              (Withings_connection.Account.to_string connection.account);
           ]
       with
       | Error _ as error -> error
@@ -1044,20 +992,23 @@ let withings_credentials db ~user ~connection ~key =
                           }
                   | (Error _ as error), _ -> error
                   | _, (Error _ as error) -> error)
-              | _ -> Error Error.Not_found)
+              | _ -> Error (Error.Storage_decoding "Withings credentials"))
           | Sqlite3.Rc.DONE -> Error Error.Not_found
           | _ -> Error (storage_error ())))
 
 let mark_withings_reauthorization db ~user ~connection =
   with_statement db
     "UPDATE withings_connections SET requires_reauthorization = 1, updated_at \
-     = ? WHERE id = ? AND user_id = ?" (fun statement ->
+     = ? WHERE id = ? AND user_id = ? AND withings_user_id = ?"
+    (fun statement ->
       match
         bind statement
           [
             Sqlite3.Data.TEXT (timestamp (now ()));
             Sqlite3.Data.TEXT connection.Withings_connection.id;
             Sqlite3.Data.TEXT (User_id.to_string user.User.id);
+            Sqlite3.Data.TEXT
+              (Withings_connection.Account.to_string connection.account);
           ]
       with
       | Error _ as error -> error
@@ -1095,11 +1046,12 @@ let persist_withings_import db ~user ~connection ~rows ~expected_cursor ~cursor
                         else Some (Sqlite3.column_int64 statement 0)
                       in
                       if
-                        (not
-                           (Option.equal String.equal
-                              (optional_text statement 1)
-                              connection.withings_user_id))
-                        || Option.is_none connection.withings_user_id
+                        not
+                          (Option.equal String.equal
+                             (optional_text statement 1)
+                             (Some
+                                (Withings_connection.Account.to_string
+                                   connection.account)))
                       then Error Error.Not_found
                       else
                         Ok
@@ -1255,3 +1207,5 @@ let delete_weigh_in db ~user id =
                     | Error _ as error -> error
                     | Ok () -> tombstone_or_not_found tombstone)
           | _ -> Error (storage_error ())))
+
+let compile_search_query = Search_query.of_strings

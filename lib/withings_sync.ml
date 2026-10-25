@@ -11,7 +11,7 @@ module Log = (val Logs.src_log log_src : Logs.LOG)
 type t = {
   store : Store_sqlite.t;
   client : (module Withings.S);
-  token_key : bytes;
+  token_key : Secret.Key.t;
   now : unit -> Ptime.t;
 }
 
@@ -100,8 +100,9 @@ let refresh_credentials t ~user ~connection ~user_id credentials =
     | Ok credentials ->
         Log.info (fun m -> m "user=%s refreshed Withings access token" user_id);
         Result.map
-          (Store_sqlite.save_withings_credentials t.store ~user ~key:t.token_key
-             credentials) ~f:(fun connection -> (credentials, connection))
+          (Store_sqlite.refresh_withings_credentials t.store ~user ~connection
+             ~key:t.token_key credentials) ~f:(fun connection ->
+            (credentials, connection))
     | Error (Error.Withings_failure (Credential_rejection _)) ->
         require_reauthorization t ~user ~connection ~user_id
     | Error error as result ->
@@ -154,7 +155,7 @@ let sync t ~user ~connection =
   let* credentials, connection =
     refresh_credentials t ~user ~connection ~user_id credentials
   in
-  let* account = Withings_connection.connected_account connection in
+  let account = connection.account in
   let* batch = fetch_measurements t ~connection ~user_id credentials in
   let* rows = normalize_measurements ~account ~user_id batch in
   let cursor = batch.lastupdate in

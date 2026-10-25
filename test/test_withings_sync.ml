@@ -1,5 +1,5 @@
 let now = Option.get (Ptime.of_float_s 1_800_000_000.)
-let key = Bytes.make 32 'k'
+let key = Result.get_ok (Secret.Key.of_bytes (Bytes.make 32 'k'))
 
 let measurement ?(value = 80000L) ?(date = 1_700_000_000L) group_id =
   Withings.{ group_id; measured_at = date; measure_type = 1; value; unit_ = -3 }
@@ -8,7 +8,7 @@ let with_setup measurements f =
   Test_support.with_store (fun store user ->
       ignore
         (Result.get_ok
-           (Store_sqlite.create_withings_connection store ~user
+           (Test_support.ensure_withings_connection store ~user
               ~withings_user_id:"upstream-alice"));
       let credentials =
         Withings.
@@ -22,7 +22,7 @@ let with_setup measurements f =
       in
       let connection =
         Result.get_ok
-          (Store_sqlite.save_withings_credentials store ~user ~key credentials)
+          (Store_sqlite.replace_withings_connection store ~user ~key credentials)
       in
       let module Client = struct
         let exchange_code ~redirect_uri:_ ~code:_ =
@@ -39,7 +39,9 @@ let with_setup measurements f =
 
 let sync_cursor store =
   let statement =
-    Sqlite3.prepare store "SELECT sync_cursor FROM withings_connections"
+    Sqlite3.prepare
+      (Store_sqlite.For_testing.raw_database store)
+      "SELECT sync_cursor FROM withings_connections"
   in
   Fun.protect
     ~finally:(fun () -> ignore (Sqlite3.finalize statement))
@@ -136,13 +138,13 @@ let test_relink_different_account_resets_cursor () =
            ~rows:[] ~cursor:(Some 100L));
       ignore
         (Result.get_ok
-           (Store_sqlite.ensure_withings_connection store ~user
+           (Test_support.ensure_withings_connection store ~user
               ~withings_user_id:"upstream-alice"));
       Alcotest.(check (option int64))
         "same account retains cursor" (Some 100L) (sync_cursor store);
       ignore
         (Result.get_ok
-           (Store_sqlite.ensure_withings_connection store ~user
+           (Test_support.ensure_withings_connection store ~user
               ~withings_user_id:"upstream-bob"));
       Alcotest.(check (option int64))
         "different account starts from beginning" None (sync_cursor store))
@@ -163,7 +165,7 @@ let test_reconnect_same_account_updates_import () =
       Result.get_ok (Store_sqlite.delete_withings_connection store ~user);
       let replacement =
         Result.get_ok
-          (Store_sqlite.ensure_withings_connection store ~user
+          (Test_support.ensure_withings_connection store ~user
              ~withings_user_id:"upstream-alice")
       in
       let corrected = Weigh_in.{ original with weight_kg = 81.0 } in
@@ -179,7 +181,8 @@ let test_reconnect_same_account_updates_import () =
       Alcotest.(check (float 0.0001))
         "corrected weight" 81.0 (List.hd rows).weight_kg;
       let statement =
-        Sqlite3.prepare store
+        Sqlite3.prepare
+          (Store_sqlite.For_testing.raw_database store)
           "SELECT withings_connection_id FROM weigh_ins WHERE external_id = \
            'upstream-alice:one'"
       in
@@ -196,7 +199,8 @@ let test_reconnect_same_account_updates_import () =
 let test_failed_transaction_retains_cursor () =
   with_setup [] (fun store user connection _ ->
       ignore
-        (Sqlite3.exec store
+        (Sqlite3.exec
+           (Store_sqlite.For_testing.raw_database store)
            "CREATE TRIGGER reject_import BEFORE INSERT ON weigh_ins WHEN \
             NEW.source = 'withings' BEGIN SELECT RAISE(ABORT, 'reject'); END");
       Alcotest.(check bool)
@@ -261,11 +265,14 @@ let test_refresh_failure_requires_reauthorization () =
               ~now:(fun () ->
                 Ptime.add_span now (Ptime.Span.of_int_s 7200) |> Option.get))
            ~user ~connection);
-      let (Withings_connection.Connected status) =
+      let status =
         Result.get_ok (Store_sqlite.get_withings_status store ~user)
       in
       Alcotest.(check bool)
-        "reauthorization" true status.requires_reauthorization)
+        "reauthorization" true
+        (match status with
+        | Withings_connection.Reauthorization_required _ -> true
+        | _ -> false))
 
 let test_transient_refresh_failure_does_not_require_reauthorization () =
   with_setup
@@ -287,12 +294,70 @@ let test_transient_refresh_failure_does_not_require_reauthorization () =
                  ~now:(fun () ->
                    Ptime.add_span now (Ptime.Span.of_int_s 7200) |> Option.get))
               ~user ~connection));
-      let (Withings_connection.Connected status) =
+      let status =
         Result.get_ok (Store_sqlite.get_withings_status store ~user)
       in
       Alcotest.(check bool)
         "transient failure retains authorization" false
-        status.requires_reauthorization)
+        (match status with
+        | Withings_connection.Reauthorization_required _ -> true
+        | _ -> false))
+
+let test_refresh_race_with_account_replacement () =
+  with_setup [] (fun store user connection client ->
+      let replacement =
+        Withings.
+          {
+            withings_user_id = "replacement";
+            access_token = "new";
+            refresh_token = "new-refresh";
+            expires_at = now;
+          }
+      in
+      let module Fake = struct
+        include (val client : Withings.S)
+
+        let refresh ~refresh_token:_ =
+          let raw = Store_sqlite.For_testing.raw_database store in
+          (* A network boundary must be outside every database transaction. *)
+          Result.get_ok
+            (Migration.For_testing.execute raw "BEGIN IMMEDIATE; ROLLBACK");
+          ignore
+            (Result.get_ok
+               (Service.connect_withings (Service.make ~store) ~user ~key
+                  replacement));
+          Ok
+            Withings.
+              {
+                replacement with
+                withings_user_id = "upstream-alice";
+                access_token = "stale";
+              }
+      end in
+      let sync =
+        Withings_sync.make ~store
+          ~client:(module Fake)
+          ~token_key:key
+          ~now:(fun () ->
+            Option.get (Ptime.add_span now (Ptime.Span.of_int_s 7200)))
+      in
+      Alcotest.(check bool)
+        "stale refresh fails through sync" true
+        (Result.is_error (Withings_sync.sync sync ~user ~connection));
+      let _, current =
+        Result.get_ok
+          (Store_sqlite.withings_connection_for_identity store
+             ~withings_user_id:"replacement")
+      in
+      let saved =
+        Result.get_ok
+          (Store_sqlite.withings_credentials store ~user ~connection:current
+             ~key)
+      in
+      Alcotest.(check string)
+        "replacement token preserved" "new" saved.access_token;
+      Alcotest.(check string)
+        "replacement refresh preserved" "new-refresh" saved.refresh_token)
 
 let test_import_does_not_repair_corrupt_weight () =
   with_setup
@@ -304,7 +369,9 @@ let test_import_does_not_repair_corrupt_weight () =
       Result.get_ok (Withings_sync.sync sync ~user ~connection);
       Alcotest.(check bool)
         "inject infinity" true
-        (Sqlite3.exec store "UPDATE weigh_ins SET weight_kg = 1e309"
+        (Sqlite3.exec
+           (Store_sqlite.For_testing.raw_database store)
+           "UPDATE weigh_ins SET weight_kg = 1e309"
         = Sqlite3.Rc.OK);
       Alcotest.(check bool)
         "corrupt correction rejected" true
@@ -313,7 +380,8 @@ let test_import_does_not_repair_corrupt_weight () =
         | _ -> false);
       let weight = ref 0.0 in
       ignore
-        (Sqlite3.exec store
+        (Sqlite3.exec
+           (Store_sqlite.For_testing.raw_database store)
            ~cb:(fun row _ -> weight := float_of_string (Option.get row.(0)))
            "SELECT weight_kg FROM weigh_ins");
       Alcotest.(check bool)
@@ -448,7 +516,9 @@ let check_state store user cursor weight =
 let test_missing_watermark_race () =
   with_setup [] (fun store user connection _ ->
       store_batch store user connection (Some 100L) 80.0;
-      let connection = { connection with sync_cursor = Some 100L } in
+      let connection =
+        Test_support.connection_with_cursor connection (Some 100L)
+      in
       let request =
         Withings.
           {
@@ -464,7 +534,9 @@ let test_missing_watermark_race () =
 let test_missing_watermark_baseline_and_equal_correction () =
   with_setup [] (fun store user connection _ ->
       store_batch store user connection (Some 100L) 80.0;
-      let connection = { connection with sync_cursor = Some 100L } in
+      let connection =
+        Test_support.connection_with_cursor connection (Some 100L)
+      in
       List.iter
         (fun (cursor, value, weight) ->
           let request =
@@ -482,7 +554,9 @@ let test_missing_watermark_baseline_and_equal_correction () =
 let test_page_two_failure_does_not_persist () =
   with_setup [] (fun store user connection _ ->
       store_batch store user connection (Some 100L) 80.0;
-      let connection = { connection with sync_cursor = Some 100L } in
+      let connection =
+        Test_support.connection_with_cursor connection (Some 100L)
+      in
       let calls = ref 0 in
       let request =
         Withings.
@@ -506,7 +580,9 @@ let test_page_two_failure_does_not_persist () =
 let test_account_identity_checked_with_missing_watermark () =
   with_setup [] (fun store user connection _ ->
       store_batch store user connection (Some 100L) 80.0;
-      let connection = { connection with sync_cursor = Some 100L } in
+      let connection =
+        Test_support.connection_with_cursor connection (Some 100L)
+      in
       let request =
         Withings.
           {
@@ -514,7 +590,7 @@ let test_account_identity_checked_with_missing_watermark () =
               (fun ~uri:_ ~fields:_ ->
                 ignore
                   (Result.get_ok
-                     (Store_sqlite.ensure_withings_connection store ~user
+                     (Test_support.ensure_withings_connection store ~user
                         ~withings_user_id:"replacement"));
                 Ok (batch_json None [ measurement ~value:70000L "one" ]));
           }
@@ -525,15 +601,6 @@ let test_account_identity_checked_with_missing_watermark () =
       check_state store user None 80.0)
 
 let test_import_requires_account_and_group () =
-  with_setup [] (fun _store _user connection _ ->
-      List.iter
-        (fun withings_user_id ->
-          Alcotest.(check bool)
-            "connected identity required" true
-            (Result.is_error
-               (Withings_connection.connected_account
-                  { connection with withings_user_id })))
-        [ None; Some "" ]);
   List.iter
     (fun external_id ->
       Alcotest.(check bool)
@@ -645,7 +712,9 @@ let%hegel_test paginated_failure_is_atomic tc =
   in
   with_setup [] (fun store user connection _ ->
       store_batch store user connection (Some 100L) 80.0;
-      let connection = { connection with sync_cursor = Some 100L } in
+      let connection =
+        Test_support.connection_with_cursor connection (Some 100L)
+      in
       let before = visible_map store user in
       let request, calls =
         request_pages ~cursor:(Some 101L) ~baseline:(Some 100L) ~fail_at pages
@@ -687,7 +756,7 @@ let%hegel_test sync_state_matches_map_and_cursor_model tc =
         in
         Result.get_ok
           (sync_request store user
-             { connection with sync_cursor = baseline }
+             (Test_support.connection_with_cursor connection baseline)
              request);
         let accepted =
           match received with
@@ -725,11 +794,338 @@ let%hegel_test sync_state_matches_map_and_cursor_model tc =
         assert (Option.equal Int64.equal expected_cursor (sync_cursor store))
       done)
 
+type lifecycle_link = {
+  identity : string;
+  connection_id : string;
+  access : string;
+  refresh : string;
+  cursor : int64 option;
+}
+
+type lifecycle_observation = {
+  weight : float;
+  deleted : bool;
+  observation_id : string;
+  measured : string;
+  created : string;
+  linkage : string option;
+}
+
+type lifecycle_model = {
+  link : lifecycle_link option;
+  observations :
+    (string, lifecycle_observation, Base.String.comparator_witness) Base.Map.t;
+  snapshots : Withings_connection.connected list;
+  sequence : int;
+}
+
+let%hegel_test connection_import_lifecycle_model tc =
+  Test_support.with_store (fun store user ->
+      let service = Service.make ~store in
+      let raw = Store_sqlite.For_testing.raw_database store in
+      let credentials identity access refresh =
+        Withings.
+          {
+            withings_user_id = identity;
+            access_token = access;
+            refresh_token = refresh;
+            expires_at = now;
+          }
+      in
+      let current identity =
+        snd
+          (Result.get_ok
+             (Store_sqlite.withings_connection_for_identity store
+                ~withings_user_id:identity))
+      in
+      let history () =
+        let statement =
+          Sqlite3.prepare raw
+            "SELECT \
+             external_id,id,weight_kg,deleted_at,measured_at,created_at,withings_connection_id \
+             FROM weigh_ins ORDER BY external_id"
+        in
+        Fun.protect
+          ~finally:(fun () -> ignore (Sqlite3.finalize statement))
+          (fun () ->
+            let rec rows acc =
+              match Sqlite3.step statement with
+              | Sqlite3.Rc.DONE -> acc
+              | Sqlite3.Rc.ROW ->
+                  let external_id = Sqlite3.column_text statement 0 in
+                  let row =
+                    {
+                      weight = Sqlite3.column_double statement 2;
+                      deleted = not (Sqlite3.column_is_null statement 3);
+                      observation_id = Sqlite3.column_text statement 1;
+                      measured = Sqlite3.column_text statement 4;
+                      created = Sqlite3.column_text statement 5;
+                      linkage =
+                        (if Sqlite3.column_is_null statement 6 then None
+                         else Some (Sqlite3.column_text statement 6));
+                    }
+                  in
+                  rows (Base.Map.set acc ~key:external_id ~data:row)
+              | _ -> failwith "history query failed"
+            in
+            rows (Base.Map.empty (module Base.String)))
+      in
+      let invariant model =
+        (match
+           (model.link, Result.get_ok (Service.withings_status service ~user))
+         with
+        | None, Withings_connection.Disconnected -> ()
+        | Some expected, Connected connection ->
+            assert (
+              String.equal expected.identity
+                (Withings_connection.Account.to_string connection.account));
+            assert (String.equal expected.connection_id connection.id);
+            assert (
+              Option.equal Int64.equal expected.cursor connection.sync_cursor);
+            let saved =
+              Result.get_ok
+                (Store_sqlite.withings_credentials store ~user ~connection ~key)
+            in
+            assert (String.equal saved.access_token expected.access);
+            assert (String.equal saved.refresh_token expected.refresh)
+        | _ -> failwith "connection differs from independent model");
+        let actual = history () in
+        assert (Base.Map.length actual = Base.Map.length model.observations);
+        Base.Map.iteri model.observations
+          ~f:(fun ~key:external_id ~data:expected ->
+            let found = Base.Map.find_exn actual external_id in
+            assert (Float.equal expected.weight found.weight);
+            assert (Bool.equal expected.deleted found.deleted);
+            assert (String.equal expected.observation_id found.observation_id);
+            assert (String.equal expected.measured found.measured);
+            assert (String.equal expected.created found.created);
+            assert (Option.equal String.equal expected.linkage found.linkage));
+        let statement = Sqlite3.prepare raw "PRAGMA foreign_key_check" in
+        Fun.protect
+          ~finally:(fun () -> ignore (Sqlite3.finalize statement))
+          (fun () -> assert (Sqlite3.step statement = Sqlite3.Rc.DONE))
+      in
+      let rule ~name ~step =
+        Hegel.Stateful.Rule.create ~name
+          ~step:(fun tc state -> state := step tc !state)
+          ()
+      in
+      let connect =
+        rule ~name:"connect_or_replace_account" ~step:(fun tc model ->
+            let identity =
+              if Hegel.draw tc (Hegel.booleans ()) then "a" else "b"
+            in
+            let access = "access-" ^ string_of_int model.sequence in
+            let refresh = "refresh-" ^ string_of_int model.sequence in
+            let connection =
+              Result.get_ok
+                (Service.connect_withings service ~user ~key
+                   (credentials identity access refresh))
+            in
+            let cursor =
+              match model.link with
+              | Some old when String.equal old.identity identity -> old.cursor
+              | _ -> None
+            in
+            {
+              model with
+              link =
+                Some
+                  {
+                    identity;
+                    access;
+                    refresh;
+                    cursor;
+                    connection_id = connection.id;
+                  };
+              snapshots = connection :: model.snapshots;
+              sequence = model.sequence + 1;
+            })
+      in
+      let failed_relink =
+        rule ~name:"failed_relink_is_atomic" ~step:(fun _tc model ->
+            Result.get_ok
+              (Migration.For_testing.execute raw
+                 "CREATE TRIGGER fail_relink BEFORE UPDATE ON \
+                  withings_connections BEGIN SELECT RAISE(ABORT,'injected'); \
+                  END; CREATE TRIGGER fail_first_link BEFORE INSERT ON \
+                  withings_connections BEGIN SELECT RAISE(ABORT,'injected'); \
+                  END");
+            Fun.protect
+              ~finally:(fun () ->
+                Result.get_ok
+                  (Migration.For_testing.execute raw
+                     "DROP TRIGGER fail_relink; DROP TRIGGER fail_first_link"))
+              (fun () ->
+                assert (
+                  Result.is_error
+                    (Service.connect_withings service ~user ~key
+                       (credentials "failed" "bad" "bad"))));
+            model)
+      in
+      let disconnect =
+        rule ~name:"disconnect_preserves_history" ~step:(fun _tc model ->
+            Result.get_ok (Service.disconnect_withings service ~user);
+            {
+              model with
+              link = None;
+              observations =
+                Base.Map.map model.observations ~f:(fun row ->
+                    { row with linkage = None });
+            })
+      in
+      let import =
+        rule ~name:"import_and_tombstone_corrections" ~step:(fun tc model ->
+            Hegel.assume tc (Option.is_some model.link);
+            let link = Option.get model.link in
+            let connection = current link.identity in
+            let group =
+              string_of_int
+                (Hegel.draw tc (Hegel.integers ~min_value:0 ~max_value:3 ()))
+            in
+            let external_id = link.identity ^ ":" ^ group in
+            let weight =
+              float_of_int
+                (Hegel.draw tc (Hegel.integers ~min_value:1 ~max_value:200 ()))
+            in
+            let cursor =
+              Hegel.draw tc
+                (Hegel.optional (Hegel.integers ~min_value:0 ~max_value:10 ()))
+              |> Option.map Int64.of_int
+            in
+            Result.get_ok
+              (Test_support.persist_withings_import_raw store ~user ~connection
+                 ~rows:
+                   [
+                     Weigh_in.
+                       { external_id; measured_at = now; weight_kg = weight };
+                   ]
+                 ~cursor);
+            let accepted =
+              match (cursor, link.cursor) with
+              | Some received, Some stored -> Int64.compare received stored >= 0
+              | _ -> true
+            in
+            if not accepted then model
+            else
+              let observations =
+                match Base.Map.find model.observations external_id with
+                | Some old when old.deleted -> model.observations
+                | Some old ->
+                    Base.Map.set model.observations ~key:external_id
+                      ~data:
+                        { old with weight; linkage = Some link.connection_id }
+                | None ->
+                    let observed = Base.Map.find_exn (history ()) external_id in
+                    (* IDs and creation time are generated by SQLite's caller; the model
+                   captures them once, then requires stability across transitions. *)
+                    Base.Map.set model.observations ~key:external_id
+                      ~data:
+                        {
+                          observed with
+                          weight;
+                          deleted = false;
+                          measured = Time.to_utc_string now;
+                          linkage = Some link.connection_id;
+                        }
+              in
+              {
+                model with
+                observations;
+                link =
+                  Some
+                    {
+                      link with
+                      cursor =
+                        (match cursor with
+                        | None -> link.cursor
+                        | Some _ -> cursor);
+                    };
+              })
+      in
+      let delete =
+        rule ~name:"delete_import_leaves_tombstone" ~step:(fun tc model ->
+            let visible =
+              Base.Map.to_alist model.observations
+              |> List.filter (fun (_, row) -> not row.deleted)
+            in
+            Hegel.assume tc (not (List.is_empty visible));
+            let external_id, row =
+              Hegel.draw_silent tc (Hegel.sampled_from visible)
+            in
+            let id = Option.get (Weigh_in_id.of_string row.observation_id) in
+            Result.get_ok (Store_sqlite.delete_weigh_in store ~user id);
+            {
+              model with
+              observations =
+                Base.Map.set model.observations ~key:external_id
+                  ~data:{ row with deleted = true };
+            })
+      in
+      let refresh =
+        rule ~name:"refresh_expected_account_snapshot" ~step:(fun tc model ->
+            Hegel.assume tc (not (List.is_empty model.snapshots));
+            let connection =
+              Hegel.draw_silent tc (Hegel.sampled_from model.snapshots)
+            in
+            let identity =
+              Withings_connection.Account.to_string connection.account
+            in
+            let access = "refreshed-" ^ string_of_int model.sequence in
+            let refresh = "rotated-" ^ string_of_int model.sequence in
+            let result =
+              Store_sqlite.refresh_withings_credentials store ~user ~connection
+                ~key
+                (credentials identity access refresh)
+            in
+            match model.link with
+            | Some link
+              when String.equal link.identity identity
+                   && String.equal link.connection_id connection.id ->
+                ignore (Result.get_ok result);
+                {
+                  model with
+                  link = Some { link with access; refresh };
+                  sequence = model.sequence + 1;
+                }
+            | _ ->
+                assert (Result.is_error result);
+                model)
+      in
+      let module Machine = struct
+        type state = lifecycle_model ref
+
+        let rules =
+          [ connect; failed_relink; disconnect; import; delete; refresh ]
+
+        let invariants =
+          [
+            Hegel.Stateful.Invariant.create
+              ~name:"ledger_and_connection_match_model" ~always_check:true
+              ~inv:(fun _tc state -> invariant !state)
+              ();
+          ]
+      end in
+      Hegel.Stateful.run tc
+        (module Machine)
+        ~step_count:30
+        ~init:
+          (ref
+             {
+               link = None;
+               observations = Base.Map.empty (module Base.String);
+               snapshots = [];
+               sequence = 0;
+             }))
+[@@settings Hegel.Settings.create ~test_cases:1000 ()]
+
 let () =
   Alcotest.run "withings sync"
     [
       ( "properties",
         [
+          Alcotest.test_case "connection/import lifecycle state machine" `Quick
+            connection_import_lifecycle_model;
           Alcotest.test_case "page partition equivalence" `Quick
             page_partition_equivalence;
           Alcotest.test_case "page failure atomicity" `Quick
@@ -739,6 +1135,8 @@ let () =
         ] );
       ( "sync",
         [
+          Alcotest.test_case "refresh race with account replacement" `Quick
+            test_refresh_race_with_account_replacement;
           Alcotest.test_case "import requires account and group" `Quick
             test_import_requires_account_and_group;
           Alcotest.test_case "raw missing watermark concurrent cursor" `Quick

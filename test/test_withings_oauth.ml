@@ -106,15 +106,17 @@ let test_connection_status_is_user_scoped () =
   Test_support.with_two_users (fun store alice bob ->
       ignore
         (Result.get_ok
-           (Store_sqlite.create_withings_connection store ~user:alice
+           (Test_support.ensure_withings_connection store ~user:alice
               ~withings_user_id:"withings-alice"));
       let service = Service.make ~store in
       Alcotest.(check bool)
         "owner sees connection" true
-        (Result.is_ok (Service.get_withings_status service ~user:alice));
+        (Result.is_ok (Service.withings_status service ~user:alice));
       Alcotest.(check bool)
         "other user does not see connection" true
-        (Result.is_error (Service.get_withings_status service ~user:bob)))
+        (match Service.withings_status service ~user:bob with
+        | Ok Withings_connection.Disconnected -> true
+        | _ -> false))
 
 let () =
   Alcotest.run "withings OAuth"

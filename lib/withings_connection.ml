@@ -6,38 +6,27 @@ module Account = struct
   type t = string
 
   let of_string value =
-    if String.length value = 0 then
-      Error (Error.Invalid_input "Withings account identity required")
+    if String.is_empty value then
+      Error (Error.Storage_decoding "Withings account")
     else Ok value
 
   let to_string value = value
 end
 
-type t = {
+type connected = {
   id : string;
   user_id : User_id.t;
-  withings_user_id : string option;
-  token_expires_at : Ptime.t option;
+  account : Account.t;
+  token_expires_at : Ptime.t;
   sync_cursor : int64 option;
-  requires_reauthorization : bool;
 }
 
 type status =
-  | Connected of {
-      withings_user_id : string option;
-      token_expires_at : Ptime.t option;
-      requires_reauthorization : bool;
-    }
+  | Disconnected
+  | Connected of connected
+  | Reauthorization_required of connected
 
-let status connection =
-  Connected
-    {
-      withings_user_id = connection.withings_user_id;
-      token_expires_at = connection.token_expires_at;
-      requires_reauthorization = connection.requires_reauthorization;
-    }
-
-let connected_account connection =
-  match connection.withings_user_id with
-  | Some account -> Account.of_string account
-  | None -> Error (Error.Invalid_input "Withings account identity required")
+let decode ~id ~user_id ~withings_user_id ~token_expires_at ~sync_cursor =
+  match Account.of_string withings_user_id with
+  | Error _ as error -> error
+  | Ok account -> Ok { id; user_id; account; token_expires_at; sync_cursor }

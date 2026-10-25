@@ -24,8 +24,10 @@ let table_exists db name =
     (table_exists_bool db name)
 
 let with_store (f : Store_sqlite.t -> User.t -> 'a) : 'a =
-  with_database (fun store ->
-      Result.get_ok (Migration.apply_all store);
+  let store = Result.get_ok (Store_sqlite.open_database ~path:":memory:") in
+  Fun.protect
+    ~finally:(fun () -> Result.get_ok (Store_sqlite.close store))
+    (fun () ->
       let user =
         Result.get_ok
           (Store_sqlite.resolve_user store ~issuer:"https://issuer.example"
@@ -44,13 +46,12 @@ let with_two_users (f : Store_sqlite.t -> User.t -> User.t -> 'a) : 'a =
 
 let with_exclusive_lock setup f =
   let path = Filename.temp_file "kcal-store" ".sqlite" in
-  let store = Sqlite3.db_open path in
+  let store = Result.get_ok (Store_sqlite.open_database ~path) in
   Fun.protect
     ~finally:(fun () ->
-      close_database store;
+      Result.get_ok (Store_sqlite.close store);
       Sys.remove path)
     (fun () ->
-      Result.get_ok (Migration.apply_all store);
       let user =
         Result.get_ok
           (Store_sqlite.resolve_user store ~issuer:"https://issuer.example"
@@ -185,3 +186,22 @@ let meal =
     equal_meal
 
 let exact_float = Alcotest.testable Format.pp_print_float Float.equal
+
+let ensure_withings_connection store ~user ~withings_user_id =
+  let key = Result.get_ok (Secret.Key.of_bytes (Bytes.make 32 'k')) in
+  Store_sqlite.replace_withings_connection store ~user ~key
+    Withings.
+      {
+        withings_user_id;
+        access_token = "access";
+        refresh_token = "refresh";
+        expires_at = Option.get (Ptime.of_float_s 1_800_000_000.);
+      }
+
+let connection_with_cursor (connection : Withings_connection.connected)
+    sync_cursor =
+  Result.get_ok
+    (Withings_connection.decode ~id:connection.id ~user_id:connection.user_id
+       ~withings_user_id:
+         (Withings_connection.Account.to_string connection.account)
+       ~token_expires_at:connection.token_expires_at ~sync_cursor)

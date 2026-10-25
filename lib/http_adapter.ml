@@ -77,8 +77,8 @@ let bearer headers =
 type withings_config = {
   oauth : Withings_oauth.t;
   client : (module Withings.S);
-  token_key : bytes;
-  sync : User.t -> Withings_connection.t -> (unit, Error.t) result;
+  token_key : Secret.Key.t;
+  sync : User.t -> Withings_connection.connected -> (unit, Error.t) result;
   callback_url : string;
   client_id : string;
   redirect_uri : string;
@@ -130,22 +130,9 @@ let exchange_withings_code withings ~user_id code =
             (Error.to_string error));
       Error (plain 502 "Withings authorization failed")
 
-let ensure_callback_connection withings ~user ~user_id credentials =
+let save_callback_credentials service withings ~user ~user_id credentials =
   match
-    Store_sqlite.ensure_withings_connection withings.oauth.store ~user
-      ~withings_user_id:credentials.Withings.withings_user_id
-  with
-  | Ok connection -> Ok connection
-  | Error error ->
-      Withings_log.err (fun m ->
-          m "user=%s failed to persist Withings connection: %s" user_id
-            (Error.to_string error));
-      Error (plain 500 "Internal Server Error")
-
-let save_callback_credentials withings ~user ~user_id credentials =
-  match
-    Store_sqlite.save_withings_credentials withings.oauth.store ~user
-      ~key:withings.token_key credentials
+    Service.connect_withings service ~user ~key:withings.token_key credentials
   with
   | Ok connection -> Ok connection
   | Error error ->
@@ -176,18 +163,15 @@ let subscribe_callback withings ~user_id credentials =
             (Error.to_string error));
       Error (plain 502 "Withings subscription failed")
 
-let withings_callback withings query =
+let withings_callback service withings query =
   match (query_value "state" query, query_value "code" query) with
   | Some state, Some code -> (
       let result =
         let* user = callback_user withings state in
         let user_id = User_id.to_string user.User.id in
         let* credentials = exchange_withings_code withings ~user_id code in
-        let* _ =
-          ensure_callback_connection withings ~user ~user_id credentials
-        in
         let* connection =
-          save_callback_credentials withings ~user ~user_id credentials
+          save_callback_credentials service withings ~user ~user_id credentials
         in
         let* () = sync_callback_connection withings ~user ~user_id connection in
         let* () = subscribe_callback withings ~user_id credentials in
@@ -201,7 +185,7 @@ let withings_callback withings query =
           m "callback rejected: missing state or code parameter");
       plain 400 "Invalid OAuth callback"
 
-let webhook ~schedule_sync withings headers body =
+let webhook ~schedule_sync service withings headers body =
   match
     List.assoc_opt "content-type"
       (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) headers)
@@ -215,7 +199,7 @@ let webhook ~schedule_sync withings headers body =
         match (query_value "userid" fields, query_value "appli" fields) with
         | Some identity, Some "1" when String.length identity <= 128 -> (
             match
-              Store_sqlite.withings_connection_for_identity withings.oauth.store
+              Service.withings_connection_for_identity service
                 ~withings_user_id:identity
             with
             | Ok (user, connection) ->
@@ -297,12 +281,12 @@ let handle_withings ~protected_resource ~schedule_sync ~withings ~auth ~service
       | None -> plain 404 "Not Found")
   | `GET, "/withings/callback" -> (
       match withings with
-      | Some withings -> withings_callback withings query
+      | Some withings -> withings_callback service withings query
       | None -> plain 404 "Not Found")
   | `HEAD, "/withings/webhook" -> plain 200 ""
   | `POST, "/withings/webhook" -> (
       match withings with
-      | Some withings -> webhook ~schedule_sync withings headers body
+      | Some withings -> webhook ~schedule_sync service withings headers body
       | None -> plain 404 "Not Found")
   | `POST, "/mcp" ->
       authenticated ?protected_resource auth headers (fun identity ->

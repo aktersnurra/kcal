@@ -1,4 +1,5 @@
-let parsed store text = Result.get_ok (Search_query.of_strings store [ text ])
+let parsed store text =
+  Result.get_ok (Store_sqlite.compile_search_query store [ text ])
 
 let input : Product.input =
   {
@@ -114,7 +115,7 @@ let test_validation () =
       List.iter
         (fun query ->
           check_equal Alcotest.bool "blank query rejected" true
-            (invalid (Search_query.of_strings store [ query ])))
+            (invalid (Store_sqlite.compile_search_query store [ query ])))
         [ ""; " \n" ];
       List.iter
         (fun limit ->
@@ -208,7 +209,9 @@ let test_corrupt_product_is_not_repaired () =
       let product = save store user input in
       Alcotest.(check bool)
         "inject infinity" true
-        (Sqlite3.exec store "UPDATE products SET protein_g = 1e309"
+        (Sqlite3.exec
+           (Store_sqlite.For_testing.raw_database store)
+           "UPDATE products SET protein_g = 1e309"
         = Sqlite3.Rc.OK);
       Alcotest.(check bool)
         "search rejects corrupt product" true

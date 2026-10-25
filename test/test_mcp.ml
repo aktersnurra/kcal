@@ -602,6 +602,35 @@ let test_all_scopes_allow_each_tool_class () =
           ("get_withings_status", `Assoc []);
         ])
 
+let test_disconnected_withings_status_is_success () =
+  Test_support.with_store (fun store user ->
+      let response =
+        Mcp.handle ~withings:(withings store) ~service:(Service.make ~store)
+          ~identity:(identity user [ "withings:manage" ])
+          (call "get_withings_status" (`Assoc []))
+      in
+      Alcotest.(check bool)
+        "ordinary disconnected status is not a tool error" true
+        (match result_member "isError" response with
+        | Some (`Bool true) -> false
+        | _ -> true);
+      let content =
+        match result_member "content" response with
+        | Some (`List [ `Assoc fields ]) -> (
+            match List.assoc_opt "text" fields with
+            | Some (`String body) -> Yojson.Safe.from_string body
+            | _ -> Alcotest.fail "missing text")
+        | _ -> Alcotest.fail "missing successful status content"
+      in
+      Alcotest.check json "explicit disconnected payload"
+        (`Assoc
+           [
+             ("connected", `Bool false);
+             ("requires_reauthorization", `Bool false);
+             ("token_expires_at", `Null);
+           ])
+        content)
+
 let test_withings_mcp_uses_configured_oauth_url () =
   Test_support.with_store (fun store user ->
       let response =
@@ -1117,7 +1146,11 @@ let test_calendar_endpoint_mcp date timezone () =
       (* Any accidental query would now fail instead of yielding a calendar error. *)
       Alcotest.(check bool)
         "remove query tables" true
-        (match Sqlite3.exec store "DROP TABLE meals; DROP TABLE weigh_ins" with
+        (match
+           Sqlite3.exec
+             (Store_sqlite.For_testing.raw_database store)
+             "DROP TABLE meals; DROP TABLE weigh_ins"
+         with
         | Sqlite3.Rc.OK -> true
         | _ -> false);
       List.iter [ "get_daily_totals"; "get_daily_series"; "get_summary" ]
@@ -1191,6 +1224,8 @@ let () =
             test_combined_scopes_allow_their_union;
           Alcotest.test_case "all scopes permit each tool class" `Quick
             test_all_scopes_allow_each_tool_class;
+          Alcotest.test_case "disconnected Withings status succeeds" `Quick
+            test_disconnected_withings_status_is_success;
           Alcotest.test_case "configured Withings OAuth URL" `Quick
             test_withings_mcp_uses_configured_oauth_url;
           Alcotest.test_case "discovers stateless protocol" `Quick

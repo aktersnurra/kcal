@@ -202,7 +202,8 @@ let nonfinite_request tool arguments table () =
              (`Bool true));
       let count = ref (-1) in
       let rc =
-        Sqlite3.exec store
+        Sqlite3.exec
+          (Store_sqlite.For_testing.raw_database store)
           ~cb:(fun row _ -> count := int_of_string (Option.get row.(0)))
           ("SELECT count(*) FROM " ^ table)
       in

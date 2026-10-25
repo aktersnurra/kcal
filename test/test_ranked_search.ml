@@ -159,33 +159,51 @@ let test_ranking () =
         result)
 
 let test_v3_backfill () =
-  Test_support.with_database (fun db ->
-      List.iter
-        (fun (v, sql) ->
-          if v <= 3 then (
-            Result.get_ok (Migration.execute db sql);
-            Result.get_ok (Migration.record_version db v)))
-        Store_sqlite.migrations;
-      let user =
-        Result.get_ok
-          (Store_sqlite.resolve_user db ~issuer:"issuer" ~subject:"alice")
-      in
-      ignore (save db user "rice chicken");
-      ignore (meal db user "ris kyckling");
-      let deleted = meal db user "ris kyckling" in
-      Result.get_ok (Store_sqlite.delete_meal db ~user deleted.id);
-      Result.get_ok (Migration.apply_all db);
-      Result.get_ok (Migration.apply_all db);
-      check Alcotest.int "product backfilled" 1
-        (List.length
-           (rows "products"
-              (request db user "search_products" "query"
-                 (`String "chicken rice") [])));
-      check Alcotest.int "meal backfilled" 1
-        (List.length
-           (rows "meals"
-              (request db user "query_meals" "search" (`String "kyckling ris")
-                 []))))
+  let path = Filename.temp_file "kcal-v3" ".sqlite" in
+  Fun.protect
+    ~finally:(fun () -> Sys.remove path)
+    (fun () ->
+      let raw = Sqlite3.db_open path in
+      Fun.protect
+        ~finally:(fun () -> Test_support.close_database raw)
+        (fun () ->
+          List.iter
+            (fun (v, sql) ->
+              if v <= 3 then (
+                Result.get_ok (Migration.For_testing.execute raw sql);
+                Result.get_ok (Migration.For_testing.record_version raw v)))
+            Migration.migrations;
+          Result.get_ok
+            (Migration.For_testing.execute raw
+               "INSERT INTO users VALUES \
+                ('12345678-1234-4234-8234-123456789abc','issuer','alice','2026-01-01T00:00:00Z'); \
+                INSERT INTO products VALUES \
+                ('22345678-1234-4234-8234-123456789abc','12345678-1234-4234-8234-123456789abc','rice \
+                chicken','100g',100,10,NULL,NULL,'label','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'); \
+                INSERT INTO meals VALUES \
+                ('32345678-1234-4234-8234-123456789abc','12345678-1234-4234-8234-123456789abc','2026-01-01T00:00:00Z','ris \
+                kyckling',100,10,NULL,NULL,NULL,NULL,NULL,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',NULL); \
+                INSERT INTO meals VALUES \
+                ('42345678-1234-4234-8234-123456789abc','12345678-1234-4234-8234-123456789abc','2026-01-01T00:00:00Z','ris \
+                kyckling',100,10,NULL,NULL,NULL,NULL,NULL,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')"));
+      let db = Result.get_ok (Store_sqlite.open_database ~path) in
+      Fun.protect
+        ~finally:(fun () -> Result.get_ok (Store_sqlite.close db))
+        (fun () ->
+          let user =
+            Result.get_ok
+              (Store_sqlite.resolve_user db ~issuer:"issuer" ~subject:"alice")
+          in
+          check Alcotest.int "product backfilled" 1
+            (List.length
+               (rows "products"
+                  (request db user "search_products" "query"
+                     (`String "chicken rice") [])));
+          check Alcotest.int "meal backfilled" 1
+            (List.length
+               (rows "meals"
+                  (request db user "query_meals" "search"
+                     (`String "kyckling ris") [])))))
 
 let test_invalid_wire_forms () =
   Test_support.with_store (fun db user ->
@@ -257,7 +275,9 @@ let test_index_lifecycle () =
         [ Mcp.product_json changed ]
         (find_products "newword");
       Result.get_ok
-        (Migration.execute db "DELETE FROM products WHERE name = 'newword'");
+        (Migration.For_testing.execute
+           (Store_sqlite.For_testing.raw_database db)
+           "DELETE FROM products WHERE name = 'newword'");
       check json_rows "physical product delete" [] (find_products "newword");
       let m = meal db user "oldmeal" in
       let find_meals text =
@@ -275,14 +295,17 @@ let test_index_lifecycle () =
       check json_rows "soft delete and foreign hidden" [] (find_meals "newmeal");
       let n = meal db user "physicalmeal" in
       Result.get_ok
-        (Migration.execute db
+        (Migration.For_testing.execute
+           (Store_sqlite.For_testing.raw_database db)
            ("DELETE FROM meals WHERE id = '" ^ Meal_id.to_string n.id ^ "'"));
       check json_rows "physical meal delete" [] (find_meals "physicalmeal");
       Result.get_ok
-        (Migration.execute db
+        (Migration.For_testing.execute
+           (Store_sqlite.For_testing.raw_database db)
            "INSERT INTO products_fts(products_fts) VALUES ('integrity-check')");
       Result.get_ok
-        (Migration.execute db
+        (Migration.For_testing.execute
+           (Store_sqlite.For_testing.raw_database db)
            "INSERT INTO meals_fts(meals_fts) VALUES ('integrity-check')"))
 
 let test_meal_ranked_filters () =

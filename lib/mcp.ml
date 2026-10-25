@@ -692,15 +692,26 @@ type withings = {
 }
 
 let withings_status_json = function
-  | Withings_connection.Connected status ->
+  | Withings_connection.Disconnected ->
+      `Assoc
+        [
+          ("connected", `Bool false);
+          ("requires_reauthorization", `Bool false);
+          ("token_expires_at", `Null);
+        ]
+  | ( Withings_connection.Connected connection
+    | Reauthorization_required connection ) as status ->
+      let requires_reauthorization =
+        match status with
+        | Withings_connection.Reauthorization_required _ -> true
+        | _ -> false
+      in
       `Assoc
         [
           ("connected", `Bool true);
-          ("requires_reauthorization", `Bool status.requires_reauthorization);
+          ("requires_reauthorization", `Bool requires_reauthorization);
           ( "token_expires_at",
-            json_option
-              (fun value -> `String (Time.to_utc_string value))
-              status.token_expires_at );
+            `String (Time.to_utc_string connection.token_expires_at) );
         ]
 
 let required_scope = function
@@ -728,17 +739,17 @@ let call_begin_withings_connection withings ~user =
     (Withings_oauth.begin_authorization ~client_id:withings.client_id
        ~redirect_uri:withings.redirect_uri withings.oauth ~user)
 
-let call_get_withings_status withings ~user =
-  let* withings = withings_for_call withings in
+let call_get_withings_status service withings ~user =
+  let* _ = withings_for_call withings in
   Result.map
     (fun status -> text_result (withings_status_json status))
-    (Store_sqlite.get_withings_status withings.oauth.store ~user)
+    (Service.withings_status service ~user)
 
-let call_disconnect_withings withings ~user =
-  let* withings = withings_for_call withings in
+let call_disconnect_withings service withings ~user =
+  let* _ = withings_for_call withings in
   Result.map
     (fun () -> text_result (`Assoc [ ("disconnected", `Bool true) ]))
-    (Store_sqlite.delete_withings_connection withings.oauth.store ~user)
+    (Service.disconnect_withings service ~user)
 
 let product_input fields : (Product.Create.t, Error.t) result =
   let* name = required_string "name" fields in
@@ -945,8 +956,8 @@ let call ?withings service (identity : Auth.identity) name arguments =
       match name with
       | "begin_withings_connection" ->
           call_begin_withings_connection withings ~user
-      | "get_withings_status" -> call_get_withings_status withings ~user
-      | "disconnect_withings" -> call_disconnect_withings withings ~user
+      | "get_withings_status" -> call_get_withings_status service withings ~user
+      | "disconnect_withings" -> call_disconnect_withings service withings ~user
       | "save_product" -> call_save_product service ~user fields
       | "search_products" -> call_search_products service ~user fields
       | "record_meal" -> call_record_meal service ~user fields

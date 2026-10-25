@@ -4,21 +4,23 @@ module Account : sig
   val to_string : t -> string
 end
 
-type t = {
+type connected = private {
   id : string;
   user_id : User_id.t;
-  withings_user_id : string option;
-  token_expires_at : Ptime.t option;
+  account : Account.t;
+  token_expires_at : Ptime.t;
   sync_cursor : int64 option;
-  requires_reauthorization : bool;
 }
 
 type status =
-  | Connected of {
-      withings_user_id : string option;
-      token_expires_at : Ptime.t option;
-      requires_reauthorization : bool;
-    }
+  | Disconnected
+  | Connected of connected
+  | Reauthorization_required of connected
 
-val status : t -> status
-val connected_account : t -> (Account.t, Error.t) result
+val decode :
+  id:string ->
+  user_id:User_id.t ->
+  withings_user_id:string ->
+  token_expires_at:Ptime.t ->
+  sync_cursor:int64 option ->
+  (connected, Error.t) result

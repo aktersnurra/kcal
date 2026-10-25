@@ -8,7 +8,8 @@
  (name test_migration)
  (modules test_migration test_support)
  (libraries alcotest sqlite3 kcal)
- (deps ../migrations/001_ledger.sql ../migrations/004_ranked_search.sql))
+ (deps
+  (glob_files ../migrations/[0-9]*.sql)))
 
 (test
  (name test_secret)
@@ -31,7 +32,10 @@
  (name test_withings_sync)
  (modules test_withings_sync test_support)
  (libraries alcotest sqlite3 kcal hegel base)
- (preprocess (per_module ((pps ppx_jane ppx_hegel_test) test_withings_sync)))
+ (preprocess
+  (per_module
+   ((pps ppx_jane ppx_hegel_test)
+    test_withings_sync)))
  (deps ../migrations/001_ledger.sql ../migrations/002_withings.sql))
 
 (test
@@ -50,7 +54,8 @@
  (name test_domain)
  (modules test_domain)
  (libraries alcotest kcal hegel calendar_test_support)
- (preprocess (pps ppx_jane ppx_hegel_test)))
+ (preprocess
+  (pps ppx_jane ppx_hegel_test)))
 
 (test
  (name test_meal_store)
@@ -105,7 +110,8 @@
  (name test_summary)
  (modules test_summary)
  (libraries alcotest kcal hegel calendar_test_support)
- (preprocess (pps ppx_jane ppx_hegel_test)))
+ (preprocess
+  (pps ppx_jane ppx_hegel_test)))
 
 (test
  (name test_product_store)

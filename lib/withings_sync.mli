@@ -3,7 +3,7 @@ type t
 val make :
   store:Store_sqlite.t ->
   client:(module Withings.S) ->
-  token_key:bytes ->
+  token_key:Secret.Key.t ->
   now:(unit -> Ptime.t) ->
   t
 
@@ -13,4 +13,7 @@ val imports :
   (Weigh_in.Import.t list, Error.t) result
 
 val sync :
-  t -> user:User.t -> connection:Withings_connection.t -> (unit, Error.t) result
+  t ->
+  user:User.t ->
+  connection:Withings_connection.connected ->
+  (unit, Error.t) result

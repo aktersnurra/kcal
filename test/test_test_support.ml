@@ -3,7 +3,8 @@ exception Fixture_failure
 let check_closed store =
   let is_closed =
     try
-      ignore (Sqlite3.exec store "SELECT 1");
+      ignore
+        (Sqlite3.exec (Store_sqlite.For_testing.raw_database store) "SELECT 1");
       false
     with Sqlite3.Error _ -> true
   in

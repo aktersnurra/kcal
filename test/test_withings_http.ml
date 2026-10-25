@@ -31,7 +31,7 @@ let integration ?(sync = fun _ _ -> Ok ()) store =
         Withings_oauth.make ~store ~now:(fun () ->
             Option.get (Ptime.of_float_s 1_800_000_000.));
       client = (module Client);
-      token_key = Bytes.make 32 'k';
+      token_key = Result.get_ok (Secret.Key.of_bytes (Bytes.make 32 'k'));
       sync;
       callback_url = "https://kcal.example.com/withings/webhook";
       client_id = "client";
@@ -71,7 +71,7 @@ let test_known_webhook_schedules_sync_after_validation () =
       in
       let connection =
         Result.get_ok
-          (Store_sqlite.ensure_withings_connection store ~user
+          (Test_support.ensure_withings_connection store ~user
              ~withings_user_id:"known")
       in
       let sync_calls = ref 0 in

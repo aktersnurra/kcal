@@ -65,16 +65,16 @@ let test_credentials_are_replaced_and_refresh_failure_marks_reauthorization () =
   Test_support.with_store (fun store user ->
       ignore
         (Result.get_ok
-           (Store_sqlite.create_withings_connection store ~user
+           (Test_support.ensure_withings_connection store ~user
               ~withings_user_id:"withings-alice"));
-      let key = Bytes.make 32 'k' in
+      let key = Result.get_ok (Secret.Key.of_bytes (Bytes.make 32 'k')) in
       ignore
         (Result.get_ok
-           (Store_sqlite.save_withings_credentials store ~user ~key
+           (Store_sqlite.replace_withings_connection store ~user ~key
               (credentials "old-access" "old-refresh")));
       let connection =
         Result.get_ok
-          (Store_sqlite.save_withings_credentials store ~user ~key
+          (Store_sqlite.replace_withings_connection store ~user ~key
              (credentials "new-access" "new-refresh"))
       in
       let saved =
@@ -86,11 +86,14 @@ let test_credentials_are_replaced_and_refresh_failure_marks_reauthorization () =
         "rotated refresh" "new-refresh" saved.refresh_token;
       Result.get_ok
         (Store_sqlite.mark_withings_reauthorization store ~user ~connection);
-      let (Withings_connection.Connected status) =
+      let status =
         Result.get_ok (Store_sqlite.get_withings_status store ~user)
       in
       Alcotest.(check bool)
-        "reauthorization required" true status.requires_reauthorization;
+        "reauthorization required" true
+        (match status with
+        | Withings_connection.Reauthorization_required _ -> true
+        | _ -> false);
       ignore connection)
 
 let test_exchange_code_sends_redirect_uri () =
@@ -360,9 +363,139 @@ let test_structured_failures () =
     | Error (Error.Withings_failure (Http_status 503)) -> true
     | _ -> false)
 
+let test_failed_relink_preserves_connection () =
+  Test_support.with_store (fun store user ->
+      let key = Result.get_ok (Secret.Key.of_bytes (Bytes.make 32 'k')) in
+      ignore
+        (Result.get_ok
+           (Test_support.ensure_withings_connection store ~user
+              ~withings_user_id:"withings-alice"));
+      let old =
+        Result.get_ok
+          (Store_sqlite.replace_withings_connection store ~user ~key
+             (credentials "old" "old-refresh"))
+      in
+      Result.get_ok
+        (Store_sqlite.persist_withings_import store ~user ~connection:old
+           ~rows:[] ~expected_cursor:None ~cursor:(Some 42L));
+      ignore
+        (Sqlite3.exec
+           (Store_sqlite.For_testing.raw_database store)
+           "CREATE TRIGGER fail_save BEFORE UPDATE OF access_token_encrypted \
+            ON withings_connections BEGIN SELECT RAISE(ABORT, 'injected'); END");
+      let replacement =
+        Withings.
+          {
+            (credentials "new" "new-refresh") with
+            withings_user_id = "replacement";
+          }
+      in
+      Alcotest.(check bool)
+        "save fails" true
+        (Result.is_error
+           (Store_sqlite.replace_withings_connection store ~user ~key
+              replacement));
+      let _, current =
+        Result.get_ok
+          (Store_sqlite.withings_connection_for_identity store
+             ~withings_user_id:"withings-alice")
+      in
+      Alcotest.(check (option int64))
+        "cursor unchanged" (Some 42L) current.sync_cursor;
+      let saved =
+        Result.get_ok
+          (Store_sqlite.withings_credentials store ~user ~connection:current
+             ~key)
+      in
+      Alcotest.(check string) "access unchanged" "old" saved.access_token;
+      Alcotest.(check string)
+        "refresh unchanged" "old-refresh" saved.refresh_token)
+
+let test_refresh_scoped_to_expected_account () =
+  Test_support.with_store (fun store user ->
+      let key = Result.get_ok (Secret.Key.of_bytes (Bytes.make 32 'k')) in
+      let old =
+        Result.get_ok
+          (Store_sqlite.replace_withings_connection store ~user ~key
+             (credentials "old" "old-refresh"))
+      in
+      let replacement =
+        Withings.
+          {
+            (credentials "replacement" "replacement-refresh") with
+            withings_user_id = "replacement";
+          }
+      in
+      let current =
+        Result.get_ok
+          (Store_sqlite.replace_withings_connection store ~user ~key replacement)
+      in
+      Alcotest.(check bool)
+        "stale refresh rejected" true
+        (Result.is_error
+           (Store_sqlite.refresh_withings_credentials store ~user
+              ~connection:old ~key
+              (credentials "stale" "stale-refresh")));
+      Alcotest.(check bool)
+        "stale rejection cannot mark new account" true
+        (Result.is_error
+           (Store_sqlite.mark_withings_reauthorization store ~user
+              ~connection:old));
+      let saved =
+        Result.get_ok
+          (Store_sqlite.withings_credentials store ~user ~connection:current
+             ~key)
+      in
+      Alcotest.(check string)
+        "new identity" "replacement" saved.withings_user_id;
+      Alcotest.(check string) "new access" "replacement" saved.access_token;
+      Alcotest.(check string)
+        "new refresh" "replacement-refresh" saved.refresh_token)
+
+let test_disconnected_and_incomplete_status () =
+  Test_support.with_store (fun store user ->
+      let service = Service.make ~store in
+      Alcotest.(check bool)
+        "disconnected is ordinary absence" true
+        (match Service.withings_status service ~user with
+        | Ok Withings_connection.Disconnected -> true
+        | _ -> false);
+      List.iter
+        (fun assignment ->
+          ignore
+            (Result.get_ok
+               (Test_support.ensure_withings_connection store ~user
+                  ~withings_user_id:"withings-alice"));
+          Result.get_ok
+            (Migration.For_testing.execute
+               (Store_sqlite.For_testing.raw_database store)
+               ("UPDATE withings_connections SET " ^ assignment));
+          Alcotest.(check bool)
+            "incomplete durable row is a decoding error" true
+            (match Service.withings_status service ~user with
+            | Error (Error.Storage_decoding _) -> true
+            | _ -> false))
+        [
+          "withings_user_id=NULL";
+          "withings_user_id=''";
+          "token_expires_at=NULL";
+          "token_expires_at='invalid'";
+          "access_token_encrypted=NULL";
+          "refresh_token_encrypted=NULL";
+        ])
+
 let () =
   Alcotest.run "withings client"
     [
+      ( "atomic lifecycle",
+        [
+          Alcotest.test_case "stale refresh scoped to expected account" `Quick
+            test_refresh_scoped_to_expected_account;
+          Alcotest.test_case "disconnected and incomplete status" `Quick
+            test_disconnected_and_incomplete_status;
+          Alcotest.test_case "failed relink preserves connection" `Quick
+            test_failed_relink_preserves_connection;
+        ] );
       ( "credentials",
         [
           Alcotest.test_case "pure credentials and injected clock" `Quick

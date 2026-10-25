@@ -1,13 +1,13 @@
-let key = Bytes.make 32 'k'
+let key = Result.get_ok (Secret.Key.of_bytes (Bytes.make 32 'k'))
 let now = Option.get (Ptime.of_float_s 1_800_000_000.)
 
 let connected store user identity =
   ignore
     (Result.get_ok
-       (Store_sqlite.ensure_withings_connection store ~user
+       (Test_support.ensure_withings_connection store ~user
           ~withings_user_id:identity));
   Result.get_ok
-    (Store_sqlite.save_withings_credentials store ~user ~key
+    (Store_sqlite.replace_withings_connection store ~user ~key
        Withings.
          {
            access_token = "access";

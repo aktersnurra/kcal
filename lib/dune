@@ -22,3 +22,12 @@
   cohttp-eio
   tls-eio
   logs))
+
+(rule
+ (target embedded_migrations.ml)
+ (deps
+  (glob_files ../migrations/[0-9]*.sql))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{exe:../tools/embed_migrations.exe} %{deps}))))
