@@ -646,12 +646,18 @@ let%hegel_test paginated_failure_is_atomic tc =
   with_setup [] (fun store user connection _ ->
       store_batch store user connection (Some 100L) 80.0;
       let connection = { connection with sync_cursor = Some 100L } in
+      let before = visible_map store user in
       let request, calls =
         request_pages ~cursor:(Some 101L) ~baseline:(Some 100L) ~fail_at pages
       in
       assert (Result.is_error (sync_request store user connection request));
       Alcotest.(check int) "requests stop at failing page" (fail_at + 1) !calls;
-      check_state store user (Some 100L) 80.0)
+      assert (
+        Base.Map.equal
+          (fun (a, at) (b, bt) -> Float.equal a b && Ptime.equal at bt)
+          before (visible_map store user));
+      Alcotest.(check (option int64))
+        "cursor unchanged" (Some 100L) (sync_cursor store))
 
 (* The model is an observation map plus revision (-1 means no watermark).
    Unversioned batches belong to a fetch snapshot; versioned batches are ordered
