@@ -1,3 +1,4 @@
+open Base
 open Hegel
 
 (* Generalizes the hand-picked "patch one field" examples in test_meal_store.ml:
@@ -26,17 +27,18 @@ let%hegel_test meal_patch_touches_only_the_included_fields tc =
           }
       in
       let updated =
-        Result.get_ok (Test_support.update_meal_raw store ~user meal.id patch)
+        Option.value_exn
+          (Result.ok (Test_support.update_meal_raw store ~user meal.id patch))
       in
       assert (
-        updated.description
-        = if include_description then new_description else meal.description);
+        String.equal updated.description
+          (if include_description then new_description else meal.description));
       assert (
         updated.calories_kcal
         = if include_calories then new_calories else meal.calories_kcal);
       assert (
-        updated.protein_g
-        = if include_protein then new_protein else meal.protein_g);
+        Float.equal updated.protein_g
+          (if include_protein then new_protein else meal.protein_g));
       (* Fields never included in this patch must never move, no matter what else did. *)
       assert (Option.equal Float.equal updated.carbs_g meal.carbs_g);
       assert (Option.equal Float.equal updated.fat_g meal.fat_g);

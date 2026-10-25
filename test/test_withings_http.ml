@@ -1,3 +1,7 @@
+module Domain_error = Error
+open Base
+module Error = Domain_error
+
 let auth store scopes =
   let claims =
     Oidc.
@@ -5,7 +9,7 @@ let auth store scopes =
         issuer = "https://issuer.example";
         subject = "alice";
         audience = [ "kcal-client" ];
-        expires_at = Option.get (Ptime.of_float_s 2_000_000_000.);
+        expires_at = Option.value_exn (Ptime.of_float_s 2_000_000_000.);
         scopes;
       }
   in
@@ -29,9 +33,10 @@ let integration ?(sync = fun _ _ -> Ok ()) store =
     {
       oauth =
         Withings_oauth.make ~store ~now:(fun () ->
-            Option.get (Ptime.of_float_s 1_800_000_000.));
+            Option.value_exn (Ptime.of_float_s 1_800_000_000.));
       client = (module Client);
-      token_key = Result.get_ok (Secret.Key.of_bytes (Bytes.make 32 'k'));
+      token_key =
+        Option.value_exn (Result.ok (Secret.Key.of_bytes (Bytes.make 32 'k')));
       sync;
       callback_url = "https://kcal.example.com/withings/webhook";
       client_id = "client";
@@ -65,21 +70,23 @@ let test_webhook_boundaries () =
 let test_known_webhook_schedules_sync_after_validation () =
   Test_support.with_store (fun store _ ->
       let user =
-        Result.get_ok
-          (Store_sqlite.resolve_user store ~issuer:"issuer"
-             ~subject:"webhook-user")
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.resolve_user store ~issuer:"issuer"
+                ~subject:"webhook-user"))
       in
       let connection =
-        Result.get_ok
-          (Test_support.ensure_withings_connection store ~user
-             ~withings_user_id:"known")
+        Option.value_exn
+          (Result.ok
+             (Test_support.ensure_withings_connection store ~user
+                ~withings_user_id:"known"))
       in
       let sync_calls = ref 0 in
       let scheduled = ref None in
       let withings =
         integration
           ~sync:(fun _ _ ->
-            incr sync_calls;
+            Int.incr sync_calls;
             Ok ())
           store
       in
@@ -94,7 +101,7 @@ let test_known_webhook_schedules_sync_after_validation () =
       in
       Alcotest.(check int) "acknowledged" 200 response.status;
       Alcotest.(check int) "not in response path" 0 !sync_calls;
-      Option.iter (fun sync -> sync ()) !scheduled;
+      Option.iter ~f:(fun sync -> sync ()) !scheduled;
       Alcotest.(check int) "known webhook triggers shared sync" 1 !sync_calls;
       ignore connection)
 
@@ -127,10 +134,11 @@ let test_connect_unauthorized_carries_challenge () =
         "challenge"
         (Some
            {|Bearer resource_metadata="https://kcal.example.com/.well-known/oauth-protected-resource/mcp"|})
-        (List.assoc_opt "www-authenticate"
+        (List.Assoc.find
            (List.map
-              (fun (k, v) -> (String.lowercase_ascii k, v))
-              response.Http_adapter.headers)))
+              ~f:(fun (k, v) -> (String.lowercase k, v))
+              response.Http_adapter.headers)
+           ~equal:String.equal "www-authenticate"))
 
 let test_connect_requires_withings_manage_scope () =
   Test_support.with_store (fun store _ ->
@@ -157,7 +165,7 @@ let test_callback_syncs_before_subscribing () =
               {
                 access_token = "access";
                 refresh_token = "refresh";
-                expires_at = Option.get (Ptime.of_float_s 1_900_000_000.);
+                expires_at = Option.value_exn (Ptime.of_float_s 1_900_000_000.);
                 withings_user_id = "alice";
               }
 
@@ -179,9 +187,10 @@ let test_callback_syncs_before_subscribing () =
       in
       let withings = { withings with client = (module Client : Withings.S) } in
       let state, _ =
-        Result.get_ok
-          (Withings_oauth.begin_authorization ~client_id:withings.client_id
-             ~redirect_uri:withings.redirect_uri withings.oauth ~user)
+        Option.value_exn
+          (Result.ok
+             (Withings_oauth.begin_authorization ~client_id:withings.client_id
+                ~redirect_uri:withings.redirect_uri withings.oauth ~user))
       in
       let response =
         Http_adapter.handle_withings ~protected_resource:None
@@ -207,7 +216,7 @@ let test_callback_stops_before_subscription_on_sync_failure () =
               {
                 access_token = "access";
                 refresh_token = "refresh";
-                expires_at = Option.get (Ptime.of_float_s 1_900_000_000.);
+                expires_at = Option.value_exn (Ptime.of_float_s 1_900_000_000.);
                 withings_user_id = "alice";
               }
 
@@ -227,9 +236,10 @@ let test_callback_stops_before_subscription_on_sync_failure () =
       in
       let withings = { withings with client = (module Client : Withings.S) } in
       let state, _ =
-        Result.get_ok
-          (Withings_oauth.begin_authorization ~client_id:withings.client_id
-             ~redirect_uri:withings.redirect_uri withings.oauth ~user)
+        Option.value_exn
+          (Result.ok
+             (Withings_oauth.begin_authorization ~client_id:withings.client_id
+                ~redirect_uri:withings.redirect_uri withings.oauth ~user))
       in
       let response =
         Http_adapter.handle_withings ~protected_resource:None

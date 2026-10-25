@@ -1,8 +1,10 @@
-type t = { store : Store_sqlite.t; withings_oauth : Withings_oauth.t }
+module Domain_error = Error
+open Base
+module Error = Domain_error
 
-let make ~store =
-  let now () = Option.get (Ptime.of_float_s (Unix.gettimeofday ())) in
-  { store; withings_oauth = Withings_oauth.make ~store ~now }
+type t = { store : Store_sqlite.t }
+
+let make ~store = { store }
 
 let resolve_user service ~issuer ~subject =
   Store_sqlite.resolve_user service.store ~issuer ~subject
@@ -51,12 +53,8 @@ let delete_weigh_in service ~user id =
 let latest_weigh_in service ~user =
   Store_sqlite.latest_weigh_in service.store ~user
 
-let begin_withings_authorization ~client_id ~redirect_uri service ~user =
-  Withings_oauth.begin_authorization ~client_id ~redirect_uri
-    service.withings_oauth ~user
-
-let consume_withings_authorization_state service ~user ~state =
-  Withings_oauth.consume_state service.withings_oauth ~user ~state
+let begin_withings_authorization ~client_id ~redirect_uri ~oauth ~user =
+  Withings_oauth.begin_authorization ~client_id ~redirect_uri oauth ~user
 
 let withings_status service ~user =
   Store_sqlite.get_withings_status service.store ~user
@@ -75,3 +73,54 @@ let disconnect_withings service ~user =
 
 let withings_connection_for_identity service ~withings_user_id =
   Store_sqlite.withings_connection_for_identity service.store ~withings_user_id
+
+let ( let* ) result f = Result.bind result ~f
+
+let records_in_range service ~user ~zone ~range =
+  let* start, stop = Date_range.utc_bounds zone range in
+  let* meals = meals_between service ~user ~start ~stop in
+  let* weigh_ins = weigh_ins_between service ~user ~start ~stop in
+  Ok (meals, weigh_ins)
+
+let daily_series service ~user ~zone ~range =
+  let* meals, weigh_ins = records_in_range service ~user ~zone ~range in
+  Summary.daily_series zone range ~meals ~weigh_ins
+
+let summary ?calorie_target ?protein_target service ~user ~zone ~range =
+  let* meals, weigh_ins = records_in_range service ~user ~zone ~range in
+  Summary.summarise ?calorie_target ?protein_target zone range ~meals ~weigh_ins
+
+type withings_authorization_failure =
+  | Invalid_state of Error.t
+  | Exchange_failed of Error.t
+  | Persistence_failed of Error.t
+  | Sync_failed of Error.t
+  | Subscription_failed of Error.t
+
+let complete_withings_authorization service ~oauth ~key ~client ~redirect_uri
+    ~callback_url ~sync ~state ~code =
+  let module Client = (val client : Withings.S) in
+  let* user =
+    Result.map_error
+      ~f:(fun error -> Invalid_state error)
+      (Withings_oauth.consume_callback_state oauth ~state)
+  in
+  let* credentials =
+    Result.map_error
+      ~f:(fun error -> Exchange_failed error)
+      (Client.exchange_code ~redirect_uri ~code)
+  in
+  let* connection =
+    Result.map_error
+      ~f:(fun error -> Persistence_failed error)
+      (connect_withings service ~user ~key credentials)
+  in
+  let* () =
+    Result.map_error ~f:(fun error -> Sync_failed error) (sync user connection)
+  in
+  let* () =
+    Result.map_error
+      ~f:(fun error -> Subscription_failed error)
+      (Client.subscribe ~access_token:credentials.access_token ~callback_url)
+  in
+  Ok ()

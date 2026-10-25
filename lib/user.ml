@@ -1,3 +1,5 @@
+open Base
+
 type t = {
   id : User_id.t;
   oidc_issuer : string;

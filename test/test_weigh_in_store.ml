@@ -1,9 +1,14 @@
+module Domain_error = Error
+open Base
+module Error = Domain_error
+
 let test_recorded_weight_is_manual () =
   Test_support.with_store (fun store user ->
       let weight =
-        Result.get_ok
-          (Test_support.create_manual_weigh_in_raw store ~user
-             Weigh_in.{ measured_at = None; weight_kg = 79.6 })
+        Option.value_exn
+          (Result.ok
+             (Test_support.create_manual_weigh_in_raw store ~user
+                Weigh_in.{ measured_at = None; weight_kg = 79.6 }))
       in
       Alcotest.(check string)
         "source" "manual"
@@ -41,9 +46,10 @@ let test_foreign_weight_operations_are_hidden () =
       Alcotest.(check int)
         "foreign query" 0
         (List.length
-           (Result.get_ok
-              (Store_sqlite.query_weigh_ins store ~user:bob ~from:None ~to_:None
-                 ~limit:100)));
+           (Option.value_exn
+              (Result.ok
+                 (Store_sqlite.query_weigh_ins store ~user:bob ~from:None
+                    ~to_:None ~limit:100))));
       Alcotest.(check bool)
         "foreign latest weight" true
         (hidden (Store_sqlite.latest_weigh_in store ~user:bob)))
@@ -52,13 +58,16 @@ let test_weight_crud_and_delete () =
   Test_support.with_store (fun store user ->
       let weight = Test_support.create_weight store user in
       let updated =
-        Result.get_ok
-          (Test_support.update_manual_weigh_in_raw store ~user weight.id
-             Weigh_in.{ empty_patch with weight_kg = Some 80.0 })
+        Option.value_exn
+          (Result.ok
+             (Test_support.update_manual_weigh_in_raw store ~user weight.id
+                Weigh_in.{ empty_patch with weight_kg = Some 80.0 }))
       in
       Alcotest.(check (float 0.001)) "updated weight" 80.0 updated.weight_kg;
-      Result.get_ok (Store_sqlite.delete_weigh_in store ~user weight.id);
-      Result.get_ok (Store_sqlite.delete_weigh_in store ~user weight.id);
+      Option.value_exn
+        (Result.ok (Store_sqlite.delete_weigh_in store ~user weight.id));
+      Option.value_exn
+        (Result.ok (Store_sqlite.delete_weigh_in store ~user weight.id));
       Alcotest.(check bool)
         "deleted hidden" true
         (match Store_sqlite.get_weigh_in store ~user weight.id with
@@ -69,9 +78,10 @@ let test_partial_update_leaves_omitted_field_unchanged () =
   Test_support.with_store (fun store user ->
       let weight = Test_support.create_weight store user in
       let weight_only =
-        Result.get_ok
-          (Test_support.update_manual_weigh_in_raw store ~user weight.id
-             Weigh_in.{ empty_patch with weight_kg = Some 80.0 })
+        Option.value_exn
+          (Result.ok
+             (Test_support.update_manual_weigh_in_raw store ~user weight.id
+                Weigh_in.{ empty_patch with weight_kg = Some 80.0 }))
       in
       Alcotest.(check (float 0.0001))
         "weight updated" 80.0 weight_only.weight_kg;
@@ -80,12 +90,14 @@ let test_partial_update_leaves_omitted_field_unchanged () =
         (Time.to_utc_string weight.measured_at)
         (Time.to_utc_string weight_only.measured_at);
       let new_measured_at =
-        Result.get_ok (Time.parse_offset_datetime "2026-01-01T00:00:00Z")
+        Option.value_exn
+          (Result.ok (Time.parse_offset_datetime "2026-01-01T00:00:00Z"))
       in
       let date_only =
-        Result.get_ok
-          (Test_support.update_manual_weigh_in_raw store ~user weight.id
-             Weigh_in.{ empty_patch with measured_at = Some new_measured_at })
+        Option.value_exn
+          (Result.ok
+             (Test_support.update_manual_weigh_in_raw store ~user weight.id
+                Weigh_in.{ empty_patch with measured_at = Some new_measured_at }))
       in
       Alcotest.(check string)
         "measured_at updated"
@@ -114,30 +126,35 @@ let test_locked_weight_get_and_update_are_storage_errors () =
 let test_weight_queries_are_ordered_and_bounded () =
   Test_support.with_store (fun store user ->
       let later =
-        Result.get_ok (Time.parse_offset_datetime "2026-01-02T10:00:00Z")
+        Option.value_exn
+          (Result.ok (Time.parse_offset_datetime "2026-01-02T10:00:00Z"))
       in
       let earlier =
-        Result.get_ok (Time.parse_offset_datetime "2026-01-01T10:00:00Z")
+        Option.value_exn
+          (Result.ok (Time.parse_offset_datetime "2026-01-01T10:00:00Z"))
       in
       let second =
-        Result.get_ok
-          (Test_support.create_manual_weigh_in_raw store ~user
-             Weigh_in.{ measured_at = Some later; weight_kg = 80.0 })
+        Option.value_exn
+          (Result.ok
+             (Test_support.create_manual_weigh_in_raw store ~user
+                Weigh_in.{ measured_at = Some later; weight_kg = 80.0 }))
       in
       let first =
-        Result.get_ok
-          (Test_support.create_manual_weigh_in_raw store ~user
-             Weigh_in.{ measured_at = Some earlier; weight_kg = 79.0 })
+        Option.value_exn
+          (Result.ok
+             (Test_support.create_manual_weigh_in_raw store ~user
+                Weigh_in.{ measured_at = Some earlier; weight_kg = 79.0 }))
       in
       let weights =
-        Result.get_ok
-          (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None
-             ~limit:100)
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None
+                ~limit:100))
       in
       Alcotest.(check string)
         "ascending"
         (Weigh_in_id.to_string first.id)
-        (Weigh_in_id.to_string (List.hd weights).id);
+        (Weigh_in_id.to_string (List.hd_exn weights).id);
       Alcotest.(check bool)
         "limit rejected" true
         (match
@@ -150,53 +167,64 @@ let test_weight_queries_are_ordered_and_bounded () =
 
 let test_weigh_ins_between_is_half_open () =
   Test_support.with_store (fun store user ->
-      let at value = Result.get_ok (Time.parse_offset_datetime value) in
+      let at value =
+        Option.value_exn (Result.ok (Time.parse_offset_datetime value))
+      in
       let record value weight_kg =
-        Result.get_ok
-          (Test_support.create_manual_weigh_in_raw store ~user
-             Weigh_in.{ measured_at = Some (at value); weight_kg })
+        Option.value_exn
+          (Result.ok
+             (Test_support.create_manual_weigh_in_raw store ~user
+                Weigh_in.{ measured_at = Some (at value); weight_kg }))
       in
       ignore (record "2026-09-21T23:59:59Z" 81.0);
       let inside = record "2026-09-22T00:00:00Z" 80.0 in
       ignore (record "2026-09-23T00:00:00Z" 79.0);
       let weigh_ins =
-        Result.get_ok
-          (Store_sqlite.weigh_ins_between store ~user
-             ~start:(at "2026-09-22T00:00:00Z")
-             ~stop:(at "2026-09-23T00:00:00Z"))
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.weigh_ins_between store ~user
+                ~start:(at "2026-09-22T00:00:00Z")
+                ~stop:(at "2026-09-23T00:00:00Z")))
       in
       Alcotest.(check (list string))
         "only [start, stop)"
         [ Weigh_in_id.to_string inside.id ]
         (List.map
-           (fun (weigh_in : Weigh_in.t) -> Weigh_in_id.to_string weigh_in.id)
+           ~f:(fun (weigh_in : Weigh_in.t) -> Weigh_in_id.to_string weigh_in.id)
            weigh_ins))
 
 let test_latest_weigh_in_returns_the_most_recent () =
   Test_support.with_store (fun store user ->
       let earlier =
-        Result.get_ok (Time.parse_offset_datetime "2026-01-01T10:00:00Z")
+        Option.value_exn
+          (Result.ok (Time.parse_offset_datetime "2026-01-01T10:00:00Z"))
       in
       let later =
-        Result.get_ok (Time.parse_offset_datetime "2026-01-02T10:00:00Z")
+        Option.value_exn
+          (Result.ok (Time.parse_offset_datetime "2026-01-02T10:00:00Z"))
       in
       ignore
-        (Result.get_ok
-           (Test_support.create_manual_weigh_in_raw store ~user
-              Weigh_in.{ measured_at = Some earlier; weight_kg = 79.0 }));
+        (Option.value_exn
+           (Result.ok
+              (Test_support.create_manual_weigh_in_raw store ~user
+                 Weigh_in.{ measured_at = Some earlier; weight_kg = 79.0 })));
       let latest =
-        Result.get_ok
-          (Test_support.create_manual_weigh_in_raw store ~user
-             Weigh_in.{ measured_at = Some later; weight_kg = 80.0 })
+        Option.value_exn
+          (Result.ok
+             (Test_support.create_manual_weigh_in_raw store ~user
+                Weigh_in.{ measured_at = Some later; weight_kg = 80.0 }))
       in
-      let found = Result.get_ok (Store_sqlite.latest_weigh_in store ~user) in
+      let found =
+        Option.value_exn (Result.ok (Store_sqlite.latest_weigh_in store ~user))
+      in
       Alcotest.(check string)
         "most recent by measured_at"
         (Weigh_in_id.to_string latest.id)
         (Weigh_in_id.to_string found.id);
-      Result.get_ok (Store_sqlite.delete_weigh_in store ~user latest.id);
+      Option.value_exn
+        (Result.ok (Store_sqlite.delete_weigh_in store ~user latest.id));
       let after_delete =
-        Result.get_ok (Store_sqlite.latest_weigh_in store ~user)
+        Option.value_exn (Result.ok (Store_sqlite.latest_weigh_in store ~user))
       in
       Alcotest.(check bool)
         "falls back once the latest is deleted" true
@@ -229,11 +257,14 @@ let test_corrupt_weight_is_not_repaired () =
   Test_support.with_store (fun store user ->
       let weight = Test_support.create_weight store user in
       Alcotest.(check bool)
-        "inject infinity" true
-        (Sqlite3.exec
-           (Store_sqlite.For_testing.raw_database store)
-           "UPDATE weigh_ins SET weight_kg = 1e309"
-        = Sqlite3.Rc.OK);
+        "inject Float.infinity" true
+        (match
+           Sqlite3.exec
+             (Store_sqlite.For_testing.raw_database store)
+             "UPDATE weigh_ins SET weight_kg = 1e309"
+         with
+        | Sqlite3.Rc.OK -> true
+        | _ -> false);
       Alcotest.(check bool)
         "query rejects corrupt weight" true
         (match Store_sqlite.latest_weigh_in store ~user with

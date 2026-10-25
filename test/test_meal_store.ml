@@ -1,12 +1,18 @@
+module Domain_error = Error
+open Base
+module Error = Domain_error
+
 let parsed store text =
-  Result.get_ok (Store_sqlite.compile_search_query store [ text ])
+  Option.value_exn
+    (Result.ok (Store_sqlite.compile_search_query store [ text ]))
 
 let test_user_resolution_is_stable () =
   Test_support.with_store (fun store first ->
       let second =
-        Result.get_ok
-          (Store_sqlite.resolve_user store ~issuer:"https://issuer.example"
-             ~subject:"alice")
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.resolve_user store ~issuer:"https://issuer.example"
+                ~subject:"alice"))
       in
       Alcotest.(check string)
         "same user"
@@ -42,9 +48,10 @@ let test_foreign_meal_operations_are_hidden () =
       Alcotest.(check int)
         "foreign query" 0
         (List.length
-           (Result.get_ok
-              (Store_sqlite.query_meals store ~user:bob ~from:None ~to_:None
-                 ~limit:100))))
+           (Option.value_exn
+              (Result.ok
+                 (Store_sqlite.query_meals store ~user:bob ~from:None ~to_:None
+                    ~limit:100)))))
 
 let test_meal_crud_and_soft_delete () =
   Test_support.with_store (fun store user ->
@@ -58,12 +65,15 @@ let test_meal_crud_and_soft_delete () =
           }
       in
       let updated =
-        Result.get_ok (Test_support.update_meal_raw store ~user meal.id patch)
+        Option.value_exn
+          (Result.ok (Test_support.update_meal_raw store ~user meal.id patch))
       in
       Alcotest.(check string) "description" "Stew" updated.description;
       Alcotest.(check int) "calories" 300 updated.calories_kcal;
-      Result.get_ok (Store_sqlite.delete_meal store ~user meal.id);
-      Result.get_ok (Store_sqlite.delete_meal store ~user meal.id);
+      Option.value_exn
+        (Result.ok (Store_sqlite.delete_meal store ~user meal.id));
+      Option.value_exn
+        (Result.ok (Store_sqlite.delete_meal store ~user meal.id));
       Alcotest.(check bool)
         "deleted hidden" true
         (match Store_sqlite.get_meal store ~user meal.id with
@@ -73,25 +83,28 @@ let test_meal_crud_and_soft_delete () =
 let test_deleted_meal_is_excluded_from_query () =
   Test_support.with_store (fun store user ->
       let meal = Test_support.create_meal store user in
-      Result.get_ok (Store_sqlite.delete_meal store ~user meal.id);
+      Option.value_exn
+        (Result.ok (Store_sqlite.delete_meal store ~user meal.id));
       Alcotest.(check int)
         "visible meals" 0
         (List.length
-           (Result.get_ok
-              (Store_sqlite.query_meals store ~user ~from:None ~to_:None
-                 ~limit:100))))
+           (Option.value_exn
+              (Result.ok
+                 (Store_sqlite.query_meals store ~user ~from:None ~to_:None
+                    ~limit:100)))))
 
 let test_partial_update_leaves_omitted_fields_unchanged () =
   Test_support.with_store (fun store user ->
       let meal = Test_support.create_meal store user in
       let updated =
-        Result.get_ok
-          (Test_support.update_meal_raw store ~user meal.id
-             Meal.{ empty_patch with confidence = Some 0.5 })
+        Option.value_exn
+          (Result.ok
+             (Test_support.update_meal_raw store ~user meal.id
+                Meal.{ empty_patch with confidence = Some 0.5 }))
       in
       Alcotest.(check (float 0.0001))
         "confidence updated" 0.5
-        (Option.get updated.confidence);
+        (Option.value_exn updated.confidence);
       Alcotest.(check string)
         "description untouched" meal.description updated.description;
       Alcotest.(check int)
@@ -129,11 +142,14 @@ let test_locked_meal_get_and_update_are_storage_errors () =
 
 let test_meals_between_is_half_open_and_skips_deleted () =
   Test_support.with_store (fun store user ->
-      let at value = Result.get_ok (Time.parse_offset_datetime value) in
+      let at value =
+        Option.value_exn (Result.ok (Time.parse_offset_datetime value))
+      in
       let create value =
-        Result.get_ok
-          (Test_support.create_meal_raw store ~user
-             (Test_support.meal_input ~eaten_at:(at value) ()))
+        Option.value_exn
+          (Result.ok
+             (Test_support.create_meal_raw store ~user
+                (Test_support.meal_input ~eaten_at:(at value) ())))
       in
       let first = create "2026-09-22T00:00:00Z" in
       let second = create "2026-09-22T20:00:00Z" in
@@ -144,14 +160,16 @@ let test_meals_between_is_half_open_and_skips_deleted () =
       and stop = at "2026-09-23T00:00:00Z" in
       let ids () =
         List.map
-          (fun (meal : Meal.t) -> Meal_id.to_string meal.id)
-          (Result.get_ok (Store_sqlite.meals_between store ~user ~start ~stop))
+          ~f:(fun (meal : Meal.t) -> Meal_id.to_string meal.id)
+          (Option.value_exn
+             (Result.ok (Store_sqlite.meals_between store ~user ~start ~stop)))
       in
       Alcotest.(check (list string))
         "in range, oldest first"
         [ Meal_id.to_string first.id; Meal_id.to_string second.id ]
         (ids ());
-      Result.get_ok (Store_sqlite.delete_meal store ~user second.id);
+      Option.value_exn
+        (Result.ok (Store_sqlite.delete_meal store ~user second.id));
       Alcotest.(check (list string))
         "deleted meal excluded"
         [ Meal_id.to_string first.id ]
@@ -161,14 +179,15 @@ let test_meals_between_is_half_open_and_skips_deleted () =
       Alcotest.(check int)
         "empty range" 0
         (List.length
-           (Result.get_ok
-              (Store_sqlite.meals_between store ~user ~start:empty_start
-                 ~stop:empty_stop))))
+           (Option.value_exn
+              (Result.ok
+                 (Store_sqlite.meals_between store ~user ~start:empty_start
+                    ~stop:empty_stop)))))
 
 let test_rejects_invalid_limit () =
   Test_support.with_store (fun store user ->
       List.iter
-        (fun limit ->
+        ~f:(fun limit ->
           Alcotest.(check bool)
             "invalid limit" true
             (match
@@ -181,15 +200,16 @@ let test_rejects_invalid_limit () =
 let test_search_matches_literal_text_and_scopes_results () =
   Test_support.with_two_users (fun store user foreign ->
       let create user description estimate_source notes =
-        Result.get_ok
-          (Test_support.create_meal_raw store ~user
-             Meal.
-               {
-                 (Test_support.meal_input ()) with
-                 description;
-                 estimate_source;
-                 notes;
-               })
+        Option.value_exn
+          (Result.ok
+             (Test_support.create_meal_raw store ~user
+                Meal.
+                  {
+                    (Test_support.meal_input ()) with
+                    description;
+                    estimate_source;
+                    notes;
+                  }))
       in
       let description = create user "WHEY shake" None None in
       let source = create user "Shake" (Some "whey label") None in
@@ -203,17 +223,19 @@ let test_search_matches_literal_text_and_scopes_results () =
       let deleted =
         create user "whey Polarbröd 20% food_bar Baker's" None None
       in
-      Result.get_ok (Store_sqlite.delete_meal store ~user deleted.id);
+      Option.value_exn
+        (Result.ok (Store_sqlite.delete_meal store ~user deleted.id));
       List.iter
-        (fun (search, expected) ->
+        ~f:(fun (search, expected) ->
           let meals =
-            Result.get_ok
-              (Store_sqlite.query_meals ~search:(parsed store search) store
-                 ~user ~from:None ~to_:None ~limit:100)
+            Option.value_exn
+              (Result.ok
+                 (Store_sqlite.query_meals ~search:(parsed store search) store
+                    ~user ~from:None ~to_:None ~limit:100))
           in
           let ids meals =
-            List.map (fun (meal : Meal.t) -> Meal_id.to_string meal.id) meals
-            |> List.sort String.compare
+            List.map ~f:(fun (meal : Meal.t) -> Meal_id.to_string meal.id) meals
+            |> List.sort ~compare:String.compare
           in
           Alcotest.(check (list string)) search (ids expected) (ids meals))
         [
@@ -228,15 +250,18 @@ let test_search_matches_literal_text_and_scopes_results () =
 let test_search_composes_with_dates_order_and_limit () =
   Test_support.with_store (fun store user ->
       let service = Service.make ~store in
-      let at value = Result.get_ok (Time.parse_offset_datetime value) in
+      let at value =
+        Option.value_exn (Result.ok (Time.parse_offset_datetime value))
+      in
       let create time description =
-        Result.get_ok
-          (Test_support.create_meal_raw store ~user
-             Meal.
-               {
-                 (Test_support.meal_input ~eaten_at:(at time) ()) with
-                 description;
-               })
+        Option.value_exn
+          (Result.ok
+             (Test_support.create_meal_raw store ~user
+                Meal.
+                  {
+                    (Test_support.meal_input ~eaten_at:(at time) ()) with
+                    description;
+                  }))
       in
       (* Insert out of chronological order to pin ordering, not insertion order. *)
       let last = create "2026-09-23T00:00:00Z" "whey last" in
@@ -244,14 +269,16 @@ let test_search_composes_with_dates_order_and_limit () =
       let first = create "2026-09-22T00:00:00Z" "whey first" in
       let middle = create "2026-09-22T12:00:00Z" "whey middle" in
       let check label expected result =
-        let ids = List.map (fun (meal : Meal.t) -> Meal_id.to_string meal.id) in
+        let ids =
+          List.map ~f:(fun (meal : Meal.t) -> Meal_id.to_string meal.id)
+        in
         Alcotest.(check (list string))
           label (ids expected)
-          (ids (Result.get_ok result))
+          (ids (Option.value_exn (Result.ok result)))
       in
       let query ?search ?(from = None) ?(to_ = None) limit =
         Service.query_meals
-          ?search:(Option.map (parsed store) search)
+          ?search:(Option.map ~f:(parsed store) search)
           service ~user ~from ~to_ ~limit
       in
       check "filter before limit" [ first ] (query ~search:"whey" 1);
@@ -267,7 +294,7 @@ let test_search_composes_with_dates_order_and_limit () =
 let test_search_rejects_blank_text_and_invalid_limits () =
   Test_support.with_store (fun store user ->
       List.iter
-        (fun (search, limit) ->
+        ~f:(fun (search, limit) ->
           Alcotest.(check bool)
             "invalid search query" true
             (match
@@ -285,11 +312,14 @@ let test_invalid_durable_numeric_row () =
   Test_support.with_store (fun store user ->
       let meal = Test_support.create_meal store user in
       Alcotest.(check bool)
-        "inject infinity" true
-        (Sqlite3.exec
-           (Store_sqlite.For_testing.raw_database store)
-           "UPDATE meals SET protein_g = 1e309"
-        = Sqlite3.Rc.OK);
+        "inject Float.infinity" true
+        (match
+           Sqlite3.exec
+             (Store_sqlite.For_testing.raw_database store)
+             "UPDATE meals SET protein_g = 1e309"
+         with
+        | Sqlite3.Rc.OK -> true
+        | _ -> false);
       Alcotest.(check bool)
         "corrupt row rejected" true
         (match Store_sqlite.get_meal store ~user meal.id with
@@ -307,23 +337,26 @@ let test_invalid_durable_numeric_row () =
       ignore
         (Sqlite3.exec
            (Store_sqlite.For_testing.raw_database store)
-           ~cb:(fun row _ -> protein := float_of_string (Option.get row.(0)))
+           ~cb:(fun row _ ->
+             protein := Float.of_string (Option.value_exn row.(0)))
            "SELECT protein_g FROM meals");
       Alcotest.(check bool)
-        "durable infinity untouched" true
-        (Float.is_infinite !protein))
+        "durable Float.infinity untouched" true (Float.is_inf !protein))
 
 let test_durable_calories_are_not_coerced () =
   List.iter
-    (fun value ->
+    ~f:(fun value ->
       Test_support.with_store (fun store user ->
           let meal = Test_support.create_meal store user in
           Alcotest.(check bool)
             "inject invalid durable calories" true
-            (Sqlite3.exec
-               (Store_sqlite.For_testing.raw_database store)
-               ("UPDATE meals SET calories_kcal = " ^ value)
-            = Sqlite3.Rc.OK);
+            (match
+               Sqlite3.exec
+                 (Store_sqlite.For_testing.raw_database store)
+                 ("UPDATE meals SET calories_kcal = " ^ value)
+             with
+            | Sqlite3.Rc.OK -> true
+            | _ -> false);
           Alcotest.(check bool)
             "storage decoding error" true
             (match Store_sqlite.get_meal store ~user meal.id with

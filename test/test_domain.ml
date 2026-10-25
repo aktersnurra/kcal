@@ -1,3 +1,7 @@
+module Domain_error = Error
+open Base
+module Error = Domain_error
+
 let valid_meal () =
   Meal.
     {
@@ -40,7 +44,7 @@ let test_rejects_negative_meal_macros () =
 
 let test_rejects_invalid_confidence () =
   List.iter
-    (fun confidence ->
+    ~f:(fun confidence ->
       let input = Meal.{ (valid_meal ()) with confidence = Some confidence } in
       Alcotest.(check bool)
         "invalid" true
@@ -91,8 +95,9 @@ let test_source_strings () =
     "withings model" "withings"
     (Weigh_in.source_to_string
        (Weigh_in.Withings
-          (Result.get_ok
-             (Weigh_in.Imported_identity.of_external_id "account:group"))))
+          (Option.value_exn
+             (Result.ok
+                (Weigh_in.Imported_identity.of_external_id "account:group")))))
 
 let test_parses_offset_datetime_as_utc () =
   match Time.parse_offset_datetime "2026-01-02T03:04:05+02:00" with
@@ -103,7 +108,7 @@ let test_parses_offset_datetime_as_utc () =
 
 let test_rejects_malformed_or_no_offset_datetime () =
   List.iter
-    (fun input ->
+    ~f:(fun input ->
       Alcotest.(check bool)
         "invalid" true
         (Result.is_error (Time.parse_offset_datetime input)))
@@ -111,7 +116,7 @@ let test_rejects_malformed_or_no_offset_datetime () =
 
 let test_rejects_nonfinite_inputs () =
   List.iter
-    (fun value ->
+    ~f:(fun value ->
       Alcotest.(check bool)
         "meal rejects nonfinite protein" true
         (Result.is_error
@@ -120,13 +125,13 @@ let test_rejects_nonfinite_inputs () =
         "weight rejects nonfinite" true
         (Result.is_error
            (Weigh_in.Create.of_raw { measured_at = None; weight_kg = value })))
-    [ infinity; neg_infinity; nan ]
+    [ Float.infinity; Float.neg_infinity; Float.nan ]
 
 let%hegel_test meal_optional_macros_obey_finite_nonnegative_contract tc =
   let protein_g = Hegel.draw tc (Hegel.floats ()) in
   let carbs_g = Hegel.draw tc (Hegel.optional (Hegel.floats ())) in
   let fat_g = Hegel.draw tc (Hegel.optional (Hegel.floats ())) in
-  let valid x = Float.is_finite x && x >= 0.0 in
+  let valid x = Float.is_finite x && Float.(x >= 0.0) in
   let optional = function None -> true | Some x -> valid x in
   assert (
     Bool.equal
@@ -145,19 +150,19 @@ let%hegel_test scalar_constructors_accept_exactly_their_domains tc =
   assert (
     Bool.equal
       (Result.is_ok (Nutrition.Grams.of_float value))
-      (finite && value >= 0.0));
+      (finite && Float.(value >= 0.0)));
   assert (
     Bool.equal
       (Result.is_ok (Nutrition.Kilograms.of_float value))
-      (finite && value > 0.0));
+      (finite && Float.(value > 0.0)));
   assert (
     Bool.equal
       (Result.is_ok (Nutrition.Confidence.of_float value))
-      (finite && value >= 0.0 && value <= 1.0));
+      (finite && Float.(value >= 0.0) && Float.(value <= 1.0)));
   assert (
     Bool.equal
       (Result.is_ok (Summary.Protein_target.of_g value))
-      (finite && value > 0.0))
+      (finite && Float.(value > 0.0)))
 
 let%hegel_test meal_create_and_patch_share_numeric_rules tc =
   let calories_kcal = Hegel.draw tc (Hegel.integers ()) in
@@ -191,7 +196,7 @@ let%hegel_test meal_create_and_patch_share_numeric_rules tc =
 
 let test_all_numeric_inputs_reject_nonfinite () =
   List.iter
-    (fun value ->
+    ~f:(fun value ->
       let rejected name result =
         Alcotest.(check bool)
           name true
@@ -230,7 +235,7 @@ let test_all_numeric_inputs_reject_nonfinite () =
              carbs_g = None;
              fat_g = None;
            }))
-    [ infinity; neg_infinity; nan ]
+    [ Float.infinity; Float.neg_infinity; Float.nan ]
 
 module Calendar_properties = struct
   module Domain_error = Error

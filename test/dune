@@ -7,25 +7,25 @@
 (test
  (name test_migration)
  (modules test_migration test_support)
- (libraries alcotest sqlite3 kcal)
+ (libraries alcotest sqlite3 kcal base)
  (deps
   (glob_files ../migrations/[0-9]*.sql)))
 
 (test
  (name test_secret)
  (modules test_secret)
- (libraries alcotest kcal))
+ (libraries alcotest kcal base))
 
 (test
  (name test_withings_oauth)
  (modules test_withings_oauth test_support)
- (libraries alcotest sqlite3 kcal)
+ (libraries alcotest sqlite3 kcal base)
  (deps ../migrations/001_ledger.sql ../migrations/002_withings.sql))
 
 (test
  (name test_withings_client)
  (modules test_withings_client test_support)
- (libraries alcotest sqlite3 kcal)
+ (libraries alcotest sqlite3 kcal base)
  (deps ../migrations/001_ledger.sql ../migrations/002_withings.sql))
 
 (test
@@ -41,67 +41,67 @@
 (test
  (name test_withings_http)
  (modules test_withings_http test_support)
- (libraries alcotest sqlite3 kcal)
+ (libraries alcotest sqlite3 kcal base)
  (deps ../migrations/001_ledger.sql ../migrations/002_withings.sql))
 
 (test
  (name test_withings_reconciliation)
  (modules test_withings_reconciliation test_support)
- (libraries alcotest sqlite3 kcal)
+ (libraries alcotest sqlite3 kcal base)
  (deps ../migrations/001_ledger.sql ../migrations/002_withings.sql))
 
 (test
  (name test_domain)
  (modules test_domain)
- (libraries alcotest kcal hegel calendar_test_support)
+ (libraries alcotest kcal hegel calendar_test_support base)
  (preprocess
   (pps ppx_jane ppx_hegel_test)))
 
 (test
  (name test_meal_store)
  (modules test_meal_store test_support)
- (libraries alcotest sqlite3 kcal)
+ (libraries alcotest sqlite3 kcal base)
  (deps ../migrations/001_ledger.sql))
 
 (test
  (name test_weigh_in_store)
  (modules test_weigh_in_store test_support)
- (libraries alcotest sqlite3 kcal)
+ (libraries alcotest sqlite3 kcal base)
  (deps ../migrations/001_ledger.sql))
 
 (test
  (name test_auth)
  (modules test_auth test_support)
- (libraries alcotest sqlite3 kcal)
+ (libraries alcotest sqlite3 kcal base)
  (deps ../migrations/001_ledger.sql))
 
 (test
  (name test_service_isolation)
  (modules test_service_isolation test_support)
- (libraries alcotest sqlite3 kcal)
+ (libraries alcotest sqlite3 kcal base)
  (deps ../migrations/001_ledger.sql))
 
 (test
  (name test_http)
  (modules test_http test_support)
- (libraries alcotest sqlite3 kcal)
+ (libraries alcotest sqlite3 kcal base)
  (deps ../migrations/001_ledger.sql))
 
 (test
  (name test_mcp)
  (modules test_mcp test_support)
- (libraries alcotest sqlite3 yojson kcal)
+ (libraries alcotest sqlite3 yojson kcal base)
  (deps ../migrations/001_ledger.sql))
 
 (test
  (name test_config)
  (modules test_config)
- (libraries alcotest kcal))
+ (libraries alcotest kcal base))
 
 (test
  (name test_properties)
  (modules test_properties test_support)
- (libraries alcotest sqlite3 kcal hegel)
+ (libraries alcotest sqlite3 kcal hegel base)
  (preprocess
   (pps ppx_jane ppx_hegel_test))
  (deps ../migrations/001_ledger.sql))
@@ -109,24 +109,24 @@
 (test
  (name test_summary)
  (modules test_summary)
- (libraries alcotest kcal hegel calendar_test_support)
+ (libraries alcotest kcal hegel calendar_test_support base)
  (preprocess
   (pps ppx_jane ppx_hegel_test)))
 
 (test
  (name test_product_store)
  (modules test_product_store test_support)
- (libraries alcotest sqlite3 kcal))
+ (libraries alcotest sqlite3 kcal base))
 
 (test
  (name test_ranked_search)
  (modules test_ranked_search test_support)
- (libraries alcotest sqlite3 yojson kcal))
+ (libraries alcotest sqlite3 yojson kcal base))
 
 (test
  (name test_search_query)
  (modules test_search_query)
- (libraries alcotest sqlite3 kcal))
+ (libraries alcotest sqlite3 kcal base))
 
 (rule
  (target search_query_fault_injected.ml)
@@ -141,14 +141,19 @@
 (test
  (name test_search_query_cleanup)
  (modules test_search_query_cleanup search_query_fault_injected)
- (libraries alcotest sqlite3 kcal))
+ (libraries alcotest sqlite3 kcal base))
 
 (test
  (name test_test_support)
  (modules test_test_support test_support)
- (libraries alcotest sqlite3 kcal))
+ (libraries alcotest sqlite3 kcal base))
 
 (test
  (name test_id)
  (modules test_id)
+ (libraries alcotest base kcal))
+
+(test
+ (name test_mcp_arguments)
+ (modules test_mcp_arguments)
  (libraries alcotest base kcal))

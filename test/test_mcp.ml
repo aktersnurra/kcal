@@ -1,3 +1,5 @@
+open Base
+
 let identity user scopes = Auth.{ user; scopes }
 
 let call name arguments =
@@ -10,26 +12,34 @@ let call name arguments =
 
 let response_has_error_code code = function
   | Ok (`Assoc fields) -> (
-      match List.assoc_opt "error" fields with
+      match List.Assoc.find fields ~equal:String.equal "error" with
       | Some (`Assoc error) ->
           Option.equal Yojson.Safe.equal
-            (List.assoc_opt "code" error)
+            (List.Assoc.find error ~equal:String.equal "code")
             (Some (`Int code))
       | _ -> false)
   | _ -> false
 
-let response_has_result = function
-  | Ok (`Assoc fields) -> Option.is_some (List.assoc_opt "result" fields)
-  | Error `Forbidden -> false
-
 let result_member name = function
   | Ok (`Assoc fields) -> (
-      match List.assoc_opt "result" fields with
-      | Some (`Assoc result) -> List.assoc_opt name result
+      match List.Assoc.find fields ~equal:String.equal "result" with
+      | Some (`Assoc result) -> List.Assoc.find result ~equal:String.equal name
       | _ -> None)
-  | Error `Forbidden -> None
+  | _ -> None
 
 let is_forbidden = function Error `Forbidden -> true | Ok _ -> false
+
+let successful_tool_payload response =
+  match
+    ( result_member "isError" response,
+      result_member "structuredContent" response )
+  with
+  | (None | Some (`Bool false)), Some (`Assoc _ as payload) -> payload
+  | _ -> Alcotest.fail "expected successful tool payload"
+
+let response_has_successful_payload response =
+  ignore (successful_tool_payload response);
+  true
 
 let test_record_meal_rejects_user_id () =
   Test_support.with_store (fun store user ->
@@ -76,7 +86,7 @@ let test_read_scope_allows_reads_only () =
       let service = Service.make ~store in
       Alcotest.(check bool)
         "read allowed" true
-        (Result.is_ok
+        (response_has_successful_payload
            (Mcp.handle ~service
               ~identity:(identity user [ "ledger:read" ])
               (call "query_meals" (`Assoc []))));
@@ -95,7 +105,7 @@ let test_write_scope_allows_writes_only () =
       let service = Service.make ~store in
       Alcotest.(check bool)
         "write allowed" true
-        (Result.is_ok
+        (response_has_successful_payload
            (Mcp.handle ~service
               ~identity:(identity user [ "ledger:write" ])
               (call "record_weight" (`Assoc [ ("weight_kg", `Float 70.) ]))));
@@ -112,7 +122,7 @@ let test_write_scope_allows_writes_only () =
 let withings store =
   let oauth =
     Withings_oauth.make ~store ~now:(fun () ->
-        Option.get (Ptime.of_float_s 1_800_000_000.))
+        Option.value_exn (Ptime.of_float_s 1_800_000_000.))
   in
   Mcp.
     {
@@ -127,7 +137,7 @@ let test_withings_scope_isolated_and_requires_configuration () =
       let withings = withings store in
       let managed = identity user [ "withings:manage" ] in
       List.iter
-        (fun name ->
+        ~f:(fun name ->
           Alcotest.(check bool)
             (name ^ " unavailable without configuration")
             true
@@ -136,7 +146,7 @@ let test_withings_scope_isolated_and_requires_configuration () =
           Alcotest.(check bool)
             (name ^ " configured result")
             true
-            (response_has_result
+            (response_has_successful_payload
                (Mcp.handle ~withings ~service ~identity:managed
                   (call name (`Assoc [])))))
         [
@@ -145,7 +155,7 @@ let test_withings_scope_isolated_and_requires_configuration () =
           "disconnect_withings";
         ];
       List.iter
-        (fun (name, arguments) ->
+        ~f:(fun (name, arguments) ->
           Alcotest.(check bool)
             (name ^ " forbidden to Withings-only identity")
             true
@@ -156,7 +166,7 @@ let test_withings_scope_isolated_and_requires_configuration () =
           ("record_weight", `Assoc [ ("weight_kg", `Float 70.) ]);
         ];
       List.iter
-        (fun scopes ->
+        ~f:(fun scopes ->
           Alcotest.(check bool)
             "Withings forbidden to ledger identity" true
             (is_forbidden
@@ -169,7 +179,7 @@ let test_zero_parameter_withings_tools_accept_omitted_arguments () =
       let service = Service.make ~store in
       let withings = withings store in
       List.iter
-        (fun name ->
+        ~f:(fun name ->
           let request =
             `Assoc
               [
@@ -181,7 +191,7 @@ let test_zero_parameter_withings_tools_accept_omitted_arguments () =
           Alcotest.(check bool)
             (name ^ " accepts omitted arguments")
             true
-            (response_has_result
+            (response_has_successful_payload
                (Mcp.handle ~withings ~service
                   ~identity:(identity user [ "withings:manage" ])
                   request)))
@@ -191,13 +201,83 @@ let test_zero_parameter_withings_tools_accept_omitted_arguments () =
           "disconnect_withings";
         ])
 
+let test_zero_argument_tools () =
+  Test_support.with_store (fun store user ->
+      let service = Service.make ~store in
+      let withings = withings store in
+      let identity =
+        identity user [ "ledger:read"; "ledger:write"; "withings:manage" ]
+      in
+      ignore
+        (successful_tool_payload
+           (Mcp.handle ~service ~identity
+              (call "record_weight" (`Assoc [ ("weight_kg", `Float 70.) ]))));
+      List.iter
+        ~f:(fun name ->
+          let run arguments =
+            Mcp.handle ~withings ~service ~identity
+              (`Assoc
+                 [
+                   ("jsonrpc", `String "2.0");
+                   ("method", `String "tools/call");
+                   ("params", `Assoc (("name", `String name) :: arguments));
+                 ])
+          in
+          Alcotest.(check bool)
+            (name ^ " rejects unknown fields")
+            true
+            (response_has_error_code (-32602)
+               (run [ ("arguments", `Assoc [ ("unexpected", `Bool true) ]) ]));
+          List.iter
+            ~f:(fun arguments ->
+              let payload = successful_tool_payload (run arguments) in
+              let fields =
+                match payload with
+                | `Assoc fields -> fields
+                | _ -> Alcotest.fail "expected object"
+              in
+              let member key =
+                List.Assoc.find_exn fields ~equal:String.equal key
+              in
+              match name with
+              | "get_latest_weight" ->
+                  Alcotest.check
+                    (Alcotest.testable Yojson.Safe.pp Yojson.Safe.equal)
+                    "latest weight" (`Float 70.) (member "weight_kg")
+              | "get_withings_status" ->
+                  Alcotest.check
+                    (Alcotest.testable Yojson.Safe.pp Yojson.Safe.equal)
+                    "disconnected status" (`Bool false) (member "connected")
+              | "disconnect_withings" ->
+                  Alcotest.check
+                    (Alcotest.testable Yojson.Safe.pp Yojson.Safe.equal)
+                    "disconnect acknowledged" (`Bool true)
+                    (member "disconnected")
+              | _ -> (
+                  match member "authorization_url" with
+                  | `String url ->
+                      Alcotest.(check (list string))
+                        "configured client" [ "mcp-client" ]
+                        (List.Assoc.find_exn
+                           (Uri.query (Uri.of_string url))
+                           ~equal:String.equal "client_id")
+                  | _ -> Alcotest.fail "missing authorization URL"))
+            [ []; [ ("arguments", `Assoc []) ] ])
+        [
+          "get_latest_weight";
+          "begin_withings_connection";
+          "get_withings_status";
+          "disconnect_withings";
+        ])
+
 let test_update_meal_partial_patch_leaves_other_fields_unchanged () =
   Test_support.with_store (fun store user ->
       let service = Service.make ~store in
       let meal =
-        Result.get_ok
-          (Test_support.record_meal_raw service ~user
-             (Test_support.meal_input ()))
+        Option.value_exn
+          (Result.ok
+             (Test_support.record_meal_raw service ~user
+                (Test_support.meal_input ())))
       in
       let response =
         Mcp.handle ~service
@@ -216,22 +296,22 @@ let test_update_meal_partial_patch_leaves_other_fields_unchanged () =
       in
       Alcotest.(check (option string))
         "description untouched" (Some meal.description)
-        (match List.assoc_opt "description" updated with
+        (match List.Assoc.find updated ~equal:String.equal "description" with
         | Some (`String v) -> Some v
         | _ -> None);
       Alcotest.(check (option int))
         "calories untouched" (Some meal.calories_kcal)
-        (match List.assoc_opt "calories_kcal" updated with
+        (match List.Assoc.find updated ~equal:String.equal "calories_kcal" with
         | Some (`Int v) -> Some v
         | _ -> None);
       Alcotest.(check (option (float 0.0001)))
         "protein untouched" (Some meal.protein_g)
-        (match List.assoc_opt "protein_g" updated with
+        (match List.Assoc.find updated ~equal:String.equal "protein_g" with
         | Some (`Float v) -> Some v
         | _ -> None);
       Alcotest.(check (option (float 0.0001)))
         "confidence updated" (Some 0.5)
-        (match List.assoc_opt "confidence" updated with
+        (match List.Assoc.find updated ~equal:String.equal "confidence" with
         | Some (`Float v) -> Some v
         | _ -> None))
 
@@ -239,12 +319,13 @@ let test_get_daily_totals_defaults_to_today_and_respects_scope () =
   Test_support.with_store (fun store user ->
       let service = Service.make ~store in
       ignore
-        (Result.get_ok
-           (Test_support.record_meal_raw service ~user
-              (Test_support.meal_input ())));
+        (Option.value_exn
+           (Result.ok
+              (Test_support.record_meal_raw service ~user
+                 (Test_support.meal_input ()))));
       Alcotest.(check bool)
         "read allowed with omitted arguments" true
-        (Result.is_ok
+        (response_has_successful_payload
            (Mcp.handle ~service
               ~identity:(identity user [ "ledger:read" ])
               (call "get_daily_totals" (`Assoc []))));
@@ -266,7 +347,7 @@ let structured_content response =
   | _ -> Alcotest.fail "no structured content"
 
 let field name fields =
-  match List.assoc_opt name fields with
+  match List.Assoc.find fields ~equal:String.equal name with
   | Some value -> value
   | None -> Alcotest.fail ("missing " ^ name)
 
@@ -277,7 +358,7 @@ let tool_error_text response =
     (result_member "isError" response, result_member "content" response)
   with
   | Some (`Bool true), Some (`List [ `Assoc content ]) -> (
-      match List.assoc_opt "text" content with
+      match List.Assoc.find content ~equal:String.equal "text" with
       | Some (`String text) -> Some text
       | _ -> None)
   | _ -> None
@@ -286,7 +367,8 @@ let contains text fragment =
   let length = String.length fragment in
   let rec scan index =
     index + length <= String.length text
-    && (String.sub text index length = fragment || scan (index + 1))
+    && (String.equal (String.sub text ~pos:index ~len:length) fragment
+       || scan (index + 1))
   in
   scan 0
 
@@ -309,12 +391,14 @@ let test_get_daily_totals_uses_the_requested_timezone () =
   Test_support.with_store (fun store user ->
       let service = Service.make ~store in
       let eaten_at =
-        Result.get_ok (Time.parse_offset_datetime "2026-07-14T23:30:00Z")
+        Option.value_exn
+          (Result.ok (Time.parse_offset_datetime "2026-07-14T23:30:00Z"))
       in
       ignore
-        (Result.get_ok
-           (Test_support.record_meal_raw service ~user
-              (Test_support.meal_input ~eaten_at ())));
+        (Option.value_exn
+           (Result.ok
+              (Test_support.record_meal_raw service ~user
+                 (Test_support.meal_input ~eaten_at ()))));
       let totals arguments =
         let fields =
           structured_content
@@ -345,35 +429,43 @@ let test_get_daily_totals_uses_the_requested_timezone () =
 let test_get_daily_series_returns_intake_and_weight_per_day () =
   Test_support.with_store (fun store user ->
       let service = Service.make ~store in
-      let at value = Result.get_ok (Time.parse_offset_datetime value) in
+      let at value =
+        Option.value_exn (Result.ok (Time.parse_offset_datetime value))
+      in
       ignore
-        (Result.get_ok
-           (Test_support.record_meal_raw service ~user
-              (Test_support.meal_input ~eaten_at:(at "2026-07-02T10:00:00Z") ())));
+        (Option.value_exn
+           (Result.ok
+              (Test_support.record_meal_raw service ~user
+                 (Test_support.meal_input
+                    ~eaten_at:(at "2026-07-02T10:00:00Z")
+                    ()))));
       ignore
-        (Result.get_ok
-           (Test_support.record_manual_weigh_in_raw service ~user
-              Weigh_in.
-                {
-                  measured_at = Some (at "2026-07-02T07:00:00Z");
-                  weight_kg = 80.0;
-                }));
+        (Option.value_exn
+           (Result.ok
+              (Test_support.record_manual_weigh_in_raw service ~user
+                 Weigh_in.
+                   {
+                     measured_at = Some (at "2026-07-02T07:00:00Z");
+                     weight_kg = 80.0;
+                   })));
       ignore
-        (Result.get_ok
-           (Test_support.record_manual_weigh_in_raw service ~user
-              Weigh_in.
-                {
-                  measured_at = Some (at "2026-07-02T21:00:00Z");
-                  weight_kg = 81.0;
-                }));
+        (Option.value_exn
+           (Result.ok
+              (Test_support.record_manual_weigh_in_raw service ~user
+                 Weigh_in.
+                   {
+                     measured_at = Some (at "2026-07-02T21:00:00Z");
+                     weight_kg = 81.0;
+                   })));
       ignore
-        (Result.get_ok
-           (Test_support.record_manual_weigh_in_raw service ~user
-              Weigh_in.
-                {
-                  measured_at = Some (at "2026-07-03T07:00:00Z");
-                  weight_kg = 79.5;
-                }));
+        (Option.value_exn
+           (Result.ok
+              (Test_support.record_manual_weigh_in_raw service ~user
+                 Weigh_in.
+                   {
+                     measured_at = Some (at "2026-07-03T07:00:00Z");
+                     weight_kg = 79.5;
+                   })));
       let fields =
         structured_content
           (Mcp.handle ~service ~identity:(read_identity user)
@@ -396,12 +488,12 @@ let test_get_daily_series_returns_intake_and_weight_per_day () =
         match field "days" fields with
         | `List days ->
             List.map
-              (function
+              ~f:(function
                 | `Assoc day -> day | _ -> Alcotest.fail "day is not an object")
               days
         | _ -> Alcotest.fail "days is not a list"
       in
-      let column name = List.map (field name) days in
+      let column name = List.map ~f:(field name) days in
       Alcotest.(check (list json))
         "dates"
         [ `String "2026-07-01"; `String "2026-07-02"; `String "2026-07-03" ]
@@ -473,27 +565,34 @@ let test_range_tools_explain_bad_arguments () =
 let test_get_summary_reports_averages_targets_and_trend () =
   Test_support.with_store (fun store user ->
       let service = Service.make ~store in
-      let at value = Result.get_ok (Time.parse_offset_datetime value) in
+      let at value =
+        Option.value_exn (Result.ok (Time.parse_offset_datetime value))
+      in
       ignore
-        (Result.get_ok
-           (Test_support.record_meal_raw service ~user
-              (Test_support.meal_input ~eaten_at:(at "2026-07-02T10:00:00Z") ())));
+        (Option.value_exn
+           (Result.ok
+              (Test_support.record_meal_raw service ~user
+                 (Test_support.meal_input
+                    ~eaten_at:(at "2026-07-02T10:00:00Z")
+                    ()))));
       ignore
-        (Result.get_ok
-           (Test_support.record_manual_weigh_in_raw service ~user
-              Weigh_in.
-                {
-                  measured_at = Some (at "2026-07-01T07:00:00Z");
-                  weight_kg = 80.0;
-                }));
+        (Option.value_exn
+           (Result.ok
+              (Test_support.record_manual_weigh_in_raw service ~user
+                 Weigh_in.
+                   {
+                     measured_at = Some (at "2026-07-01T07:00:00Z");
+                     weight_kg = 80.0;
+                   })));
       ignore
-        (Result.get_ok
-           (Test_support.record_manual_weigh_in_raw service ~user
-              Weigh_in.
-                {
-                  measured_at = Some (at "2026-07-09T07:00:00Z");
-                  weight_kg = 79.2;
-                }));
+        (Option.value_exn
+           (Result.ok
+              (Test_support.record_manual_weigh_in_raw service ~user
+                 Weigh_in.
+                   {
+                     measured_at = Some (at "2026-07-09T07:00:00Z");
+                     weight_kg = 79.2;
+                   })));
       let summary arguments =
         structured_content
           (Mcp.handle ~service ~identity:(read_identity user)
@@ -570,12 +669,12 @@ let test_combined_scopes_allow_their_union () =
       let scopes = [ "ledger:read"; "ledger:write" ] in
       Alcotest.(check bool)
         "read allowed" true
-        (Result.is_ok
+        (response_has_successful_payload
            (Mcp.handle ~service ~identity:(identity user scopes)
               (call "query_weights" (`Assoc []))));
       Alcotest.(check bool)
         "write allowed" true
-        (Result.is_ok
+        (response_has_successful_payload
            (Mcp.handle ~service ~identity:(identity user scopes)
               (call "record_weight" (`Assoc [ ("weight_kg", `Float 70.) ]))));
       Alcotest.(check bool)
@@ -590,10 +689,10 @@ let test_all_scopes_allow_each_tool_class () =
       let service = Service.make ~store in
       let scopes = [ "ledger:read"; "ledger:write"; "withings:manage" ] in
       List.iter
-        (fun (name, arguments) ->
+        ~f:(fun (name, arguments) ->
           Alcotest.(check bool)
             (name ^ " allowed") true
-            (Result.is_ok
+            (response_has_successful_payload
                (Mcp.handle ~withings:(withings store) ~service
                   ~identity:(identity user scopes) (call name arguments))))
         [
@@ -617,7 +716,7 @@ let test_disconnected_withings_status_is_success () =
       let content =
         match result_member "content" response with
         | Some (`List [ `Assoc fields ]) -> (
-            match List.assoc_opt "text" fields with
+            match List.Assoc.find fields ~equal:String.equal "text" with
             | Some (`String body) -> Yojson.Safe.from_string body
             | _ -> Alcotest.fail "missing text")
         | _ -> Alcotest.fail "missing successful status content"
@@ -641,7 +740,7 @@ let test_withings_mcp_uses_configured_oauth_url () =
       let url =
         match result_member "content" response with
         | Some (`List [ `Assoc content ]) -> (
-            match List.assoc_opt "text" content with
+            match List.Assoc.find content ~equal:String.equal "text" with
             | Some (`String body) -> (
                 match Yojson.Safe.from_string body with
                 | `Assoc [ (_, `String url) ] -> url
@@ -657,7 +756,12 @@ let test_withings_mcp_uses_configured_oauth_url () =
           ("redirect_uri", [ "https://kcal.example/mcp-callback" ]);
           ("scope", [ "user.metrics" ]);
           ( "state",
-            [ List.assoc "state" (Uri.query (Uri.of_string url)) |> List.hd ] );
+            [
+              List.Assoc.find_exn
+                (Uri.query (Uri.of_string url))
+                ~equal:String.equal "state"
+              |> List.hd_exn;
+            ] );
         ]
         (Uri.query (Uri.of_string url)))
 
@@ -693,7 +797,7 @@ let test_server_discover_advertises_stateless_protocol () =
         | Some (`List versions) ->
             Some
               (List.filter_map
-                 (function `String version -> Some version | _ -> None)
+                 ~f:(function `String version -> Some version | _ -> None)
                  versions)
         | _ -> None);
       Alcotest.(check (option string))
@@ -709,7 +813,8 @@ let test_server_discover_advertises_stateless_protocol () =
       Alcotest.(check bool)
         "tools capability" true
         (match result_member "capabilities" response with
-        | Some (`Assoc capabilities) -> List.mem_assoc "tools" capabilities
+        | Some (`Assoc capabilities) ->
+            List.Assoc.mem capabilities ~equal:String.equal "tools"
         | _ -> false))
 
 let test_modern_results_include_required_metadata () =
@@ -730,7 +835,7 @@ let test_modern_results_include_required_metadata () =
           (call "query_meals" (`Assoc []))
       in
       List.iter
-        (fun (name, response) ->
+        ~f:(fun (name, response) ->
           Alcotest.(check (option string))
             (name ^ " result type") (Some "complete")
             (match result_member "resultType" response with
@@ -758,21 +863,23 @@ let test_tool_list_is_exact () =
       let names =
         match response with
         | Ok (`Assoc fields) -> (
-            match List.assoc_opt "result" fields with
+            match List.Assoc.find fields ~equal:String.equal "result" with
             | Some (`Assoc result) -> (
-                match List.assoc_opt "tools" result with
+                match List.Assoc.find result ~equal:String.equal "tools" with
                 | Some (`List tools) ->
                     List.filter_map
-                      (function
+                      ~f:(function
                         | `Assoc tool -> (
-                            match List.assoc_opt "name" tool with
+                            match
+                              List.Assoc.find tool ~equal:String.equal "name"
+                            with
                             | Some (`String name) -> Some name
                             | _ -> None)
                         | _ -> None)
                       tools
                 | _ -> [])
             | _ -> [])
-        | Error `Forbidden -> []
+        | _ -> []
       in
       Alcotest.(check (list string))
         "approved tools"
@@ -822,8 +929,8 @@ let test_product_schemas () =
       in
       let schema name =
         let tool =
-          List.find
-            (function
+          List.find_exn
+            ~f:(function
               | `Assoc fields ->
                   Yojson.Safe.equal (field "name" fields) (`String name)
               | _ -> false)
@@ -837,11 +944,11 @@ let test_product_schemas () =
         | _ -> assert false
       in
       List.iter
-        (fun (name, required, properties) ->
+        ~f:(fun (name, required, properties) ->
           let s = schema name in
           Alcotest.(check json)
             "required"
-            (`List (List.map (fun s -> `String s) required))
+            (`List (List.map ~f:(fun s -> `String s) required))
             (field "required" s);
           Alcotest.(check json)
             "strict" (`Bool false)
@@ -851,10 +958,10 @@ let test_product_schemas () =
           in
           Alcotest.(check (list string))
             "properties"
-            (List.sort String.compare properties)
-            (List.sort String.compare (List.map fst props));
+            (List.sort properties ~compare:String.compare)
+            (List.sort (List.map ~f:fst props) ~compare:String.compare);
           List.iter
-            (fun (_, p) ->
+            ~f:(fun (_, p) ->
               match p with
               | `Assoc fields -> ignore (field "description" fields)
               | _ -> Alcotest.fail "property")
@@ -877,7 +984,7 @@ let test_product_schemas () =
           ("query_weights", [], [ "from"; "to"; "limit" ]);
         ];
       List.iter
-        (fun (name, key) ->
+        ~f:(fun (name, key) ->
           let properties =
             match field "properties" (schema name) with
             | `Assoc p -> p
@@ -917,7 +1024,8 @@ let test_product_save_search_replace () =
              (("carbs_g", `Float 2.) :: product_arguments))
       in
       List.iter
-        (fun (name, want) -> Alcotest.(check json) name want (field name saved))
+        ~f:(fun (name, want) ->
+          Alcotest.(check json) name want (field name saved))
         [
           ("name", `String "Whey 100");
           ("basis", `String "40 g");
@@ -929,11 +1037,13 @@ let test_product_save_search_replace () =
         ];
       Alcotest.(check bool)
         "no ownership" false
-        (List.mem_assoc "user_id" saved);
+        (List.Assoc.mem saved ~equal:String.equal "user_id");
       List.iter
-        (fun name ->
+        ~f:(fun name ->
           match field name saved with
-          | `String s -> ignore (Result.get_ok (Time.parse_offset_datetime s))
+          | `String s ->
+              ignore
+                (Option.value_exn (Result.ok (Time.parse_offset_datetime s)))
           | _ -> Alcotest.fail name)
         [ "created_at"; "updated_at" ];
       let id = field "id" saved in
@@ -962,7 +1072,7 @@ let test_product_save_search_replace () =
         "creation preserved" (field "created_at" saved)
         (field "created_at" replaced);
       List.iter
-        (fun name ->
+        ~f:(fun name ->
           Alcotest.(check json)
             "omitted macros cleared" `Null (field name replaced))
         [ "carbs_g"; "fat_g" ];
@@ -995,16 +1105,16 @@ let test_product_argument_validation_and_scopes () =
                 (call name (`Assoc args))))
       in
       List.iter
-        (fun name ->
+        ~f:(fun name ->
           let args =
-            if name = "save_product" then product_arguments
+            if String.equal name "save_product" then product_arguments
             else [ ("query", `String "whey") ]
           in
           List.iter
-            (fun key -> invalid name ((key, `String "forbidden") :: args))
+            ~f:(fun key -> invalid name ((key, `String "forbidden") :: args))
             [ "user_id"; "created_at"; "updated_at"; "unknown" ];
           List.iter
-            (fun request ->
+            ~f:(fun request ->
               Alcotest.(check bool)
                 "scope before parsing" true
                 (is_forbidden (handle [] request)))
@@ -1015,16 +1125,18 @@ let test_product_argument_validation_and_scopes () =
                (handle [ "ledger:read"; "ledger:write" ] (omitted_call name))))
         [ "save_product"; "search_products" ];
       List.iter
-        (fun key ->
-          invalid "save_product" (List.remove_assoc key product_arguments))
+        ~f:(fun key ->
+          invalid "save_product"
+            (List.Assoc.remove product_arguments ~equal:String.equal key))
         [ "name"; "basis"; "calories_kcal"; "protein_g"; "source" ];
       List.iter
-        (fun id -> invalid "save_product" (("id", id) :: product_arguments))
+        ~f:(fun id -> invalid "save_product" (("id", id) :: product_arguments))
         [ `String "bad"; `Int 1; `Null ];
       List.iter
-        (fun (key, value) ->
+        ~f:(fun (key, value) ->
           invalid "save_product"
-            ((key, value) :: List.remove_assoc key product_arguments))
+            ((key, value)
+            :: List.Assoc.remove product_arguments ~equal:String.equal key))
         [
           ("name", `String " ");
           ("basis", `String "");
@@ -1036,10 +1148,10 @@ let test_product_argument_validation_and_scopes () =
         ];
       invalid "search_products" [];
       List.iter
-        (fun value -> invalid "search_products" [ ("query", value) ])
+        ~f:(fun value -> invalid "search_products" [ ("query", value) ])
         [ `String " "; `Int 1; `Null ];
       List.iter
-        (fun value ->
+        ~f:(fun value ->
           invalid "search_products"
             [ ("query", `String "whey"); ("limit", value) ])
         [ `Int 0; `Int 501; `Int (-1); `String "2"; `Null ];
@@ -1066,7 +1178,7 @@ let test_product_argument_validation_and_scopes () =
                 (call "save_product" (`Assoc product_arguments))))
       done;
       List.iter
-        (fun (args, count) ->
+        ~f:(fun (args, count) ->
           let products =
             field "products"
               (structured_content
@@ -1085,13 +1197,16 @@ let test_query_meals_search_composes_with_dates_and_limit () =
   Test_support.with_store (fun store user ->
       let service = Service.make ~store in
       List.iter
-        (fun (date, description) ->
-          let eaten_at = Result.get_ok (Time.parse_offset_datetime date) in
+        ~f:(fun (date, description) ->
+          let eaten_at =
+            Option.value_exn (Result.ok (Time.parse_offset_datetime date))
+          in
           let input =
             { (Test_support.meal_input ~eaten_at ()) with description }
           in
           ignore
-            (Result.get_ok (Test_support.record_meal_raw service ~user input)))
+            (Option.value_exn
+               (Result.ok (Test_support.record_meal_raw service ~user input))))
         [
           ("2026-07-01T10:00:00Z", "Whey old");
           ("2026-07-02T10:00:00Z", "Soup");
@@ -1114,7 +1229,7 @@ let test_query_meals_search_composes_with_dates_and_limit () =
         match field "meals" (structured_content response) with
         | `List rows ->
             List.map
-              (function
+              ~f:(function
                 | `Assoc row -> field "description" row | _ -> assert false)
               rows
         | _ -> assert false
@@ -1129,7 +1244,7 @@ let test_query_meals_search_composes_with_dates_and_limit () =
         [ `String "Soup" ]
         (descriptions (handle "query_meals" args));
       List.iter
-        (fun value ->
+        ~f:(fun value ->
           Alcotest.(check bool)
             "invalid meal search" true
             (response_has_error_code (-32602)
@@ -1220,6 +1335,8 @@ let () =
           Alcotest.test_case
             "zero-parameter Withings tools accept omitted arguments" `Quick
             test_zero_parameter_withings_tools_accept_omitted_arguments;
+          Alcotest.test_case "zero argument tools enforce schema" `Quick
+            test_zero_argument_tools;
           Alcotest.test_case "combined scopes permit union" `Quick
             test_combined_scopes_allow_their_union;
           Alcotest.test_case "all scopes permit each tool class" `Quick

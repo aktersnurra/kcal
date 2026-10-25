@@ -1,15 +1,19 @@
+open Base
+
 let test_embedded_migrations_match_files () =
   List.iter
-    (fun (version, name) ->
-      let channel = open_in_bin ("../migrations/" ^ name) in
+    ~f:(fun (version, name) ->
+      let channel = Stdlib.open_in_bin ("../migrations/" ^ name) in
       let sql =
-        Fun.protect
-          ~finally:(fun () -> close_in channel)
-          (fun () -> really_input_string channel (in_channel_length channel))
+        Stdlib.Fun.protect
+          ~finally:(fun () -> Stdlib.close_in channel)
+          (fun () ->
+            Stdlib.really_input_string channel
+              (Stdlib.in_channel_length channel))
       in
       Alcotest.(check string)
         "installed and standalone migrations agree" sql
-        (List.assoc version Migration.migrations))
+        (List.Assoc.find_exn Migration.migrations ~equal:Int.equal version))
     [
       (1, "001_ledger.sql");
       (2, "002_withings.sql");
@@ -24,7 +28,7 @@ let test_creates_ledger_tables () =
         "migration succeeds" true
         (Result.is_ok (Migration.apply_all db));
       List.iter
-        (Test_support.table_exists db)
+        ~f:(Test_support.table_exists db)
         [
           "users";
           "meals";
@@ -36,7 +40,7 @@ let test_creates_ledger_tables () =
 
 let test_repeat_is_a_no_op () =
   Test_support.with_database (fun db ->
-      Result.get_ok (Migration.apply_all db);
+      Option.value_exn (Result.ok (Migration.apply_all db));
       Alcotest.(check bool)
         "second migration succeeds" true
         (Result.is_ok (Migration.apply_all db)))
@@ -54,25 +58,30 @@ let test_failure_rolls_back_and_does_not_record_version () =
 let test_upgrade_from_v2_preserves_meal () =
   Test_support.with_database (fun db ->
       List.iter
-        (fun (version, sql) ->
+        ~f:(fun (version, sql) ->
           if version <= 2 then (
-            Result.get_ok (Migration.For_testing.execute db sql);
-            Result.get_ok (Migration.For_testing.record_version db version)))
+            Option.value_exn (Result.ok (Migration.For_testing.execute db sql));
+            Option.value_exn
+              (Result.ok (Migration.For_testing.record_version db version))))
         Migration.migrations;
-      Result.get_ok
-        (Migration.For_testing.execute db
-           "INSERT INTO users VALUES ('u','i','s','2026-01-01T00:00:00Z'); \
-            INSERT INTO meals VALUES \
-            ('m','u','2026-01-01T00:00:00Z','Soup',250,12,NULL,NULL,NULL,NULL,NULL,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',NULL)");
-      Result.get_ok (Migration.apply_all db);
+      Option.value_exn
+        (Result.ok
+           (Migration.For_testing.execute db
+              "INSERT INTO users VALUES ('u','i','s','2026-01-01T00:00:00Z'); \
+               INSERT INTO meals VALUES \
+               ('m','u','2026-01-01T00:00:00Z','Soup',250,12,NULL,NULL,NULL,NULL,NULL,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',NULL)"));
+      Option.value_exn (Result.ok (Migration.apply_all db));
       Test_support.table_exists db "products";
       let statement =
         Sqlite3.prepare db "SELECT description FROM meals WHERE id='m'"
       in
-      Fun.protect
+      Stdlib.Fun.protect
         ~finally:(fun () -> ignore (Sqlite3.finalize statement))
         (fun () ->
-          assert (Sqlite3.step statement = Sqlite3.Rc.ROW);
+          assert (
+            match Sqlite3.step statement with
+            | Sqlite3.Rc.ROW -> true
+            | _ -> false);
           Alcotest.(check string)
             "meal preserved" "Soup"
             (Sqlite3.column_text statement 0)))
@@ -80,27 +89,30 @@ let test_upgrade_from_v2_preserves_meal () =
 let test_v4_dangling_history () =
   Test_support.with_database (fun db ->
       List.iter
-        (fun (version, sql) ->
+        ~f:(fun (version, sql) ->
           if version <= 4 then (
-            Result.get_ok (Migration.For_testing.execute db sql);
-            Result.get_ok (Migration.For_testing.record_version db version)))
+            Option.value_exn (Result.ok (Migration.For_testing.execute db sql));
+            Option.value_exn
+              (Result.ok (Migration.For_testing.record_version db version))))
         Migration.migrations;
-      Result.get_ok
-        (Migration.For_testing.execute db
-           "INSERT INTO users VALUES \
-            ('u','issuer','subject','2026-01-01T00:00:00Z'); INSERT INTO \
-            weigh_ins VALUES \
-            ('observation','u','2026-01-01T01:00:00Z',81.5,'withings','account:group','2026-01-01T02:00:00Z','2026-01-01T03:00:00Z','2026-01-01T04:00:00Z','missing')");
-      Result.get_ok (Migration.apply_all db);
+      Option.value_exn
+        (Result.ok
+           (Migration.For_testing.execute db
+              "INSERT INTO users VALUES \
+               ('u','issuer','subject','2026-01-01T00:00:00Z'); INSERT INTO \
+               weigh_ins VALUES \
+               ('observation','u','2026-01-01T01:00:00Z',81.5,'withings','account:group','2026-01-01T02:00:00Z','2026-01-01T03:00:00Z','2026-01-01T04:00:00Z','missing')"));
+      Option.value_exn (Result.ok (Migration.apply_all db));
       let stmt =
         Sqlite3.prepare db
           "SELECT id, weight_kg, measured_at, external_id, created_at, \
            updated_at, deleted_at, withings_connection_id FROM weigh_ins"
       in
-      Fun.protect
+      Stdlib.Fun.protect
         ~finally:(fun () -> ignore (Sqlite3.finalize stmt))
         (fun () ->
-          assert (Sqlite3.step stmt = Sqlite3.Rc.ROW);
+          assert (
+            match Sqlite3.step stmt with Sqlite3.Rc.ROW -> true | _ -> false);
           Alcotest.(check string)
             "id" "observation"
             (Sqlite3.column_text stmt 0);
@@ -108,7 +120,7 @@ let test_v4_dangling_history () =
             "value" 81.5
             (Sqlite3.column_double stmt 1);
           List.iteri
-            (fun i expected ->
+            ~f:(fun i expected ->
               Alcotest.(check string)
                 "history preserved" expected
                 (Sqlite3.column_text stmt (i + 2)))
@@ -123,17 +135,19 @@ let test_v4_dangling_history () =
             "dangling linkage normalized" true
             (Sqlite3.column_is_null stmt 7));
       let stmt = Sqlite3.prepare db "PRAGMA foreign_key_check" in
-      Fun.protect
+      Stdlib.Fun.protect
         ~finally:(fun () -> ignore (Sqlite3.finalize stmt))
         (fun () ->
           Alcotest.(check bool)
             "foreign keys clean" true
-            (Sqlite3.step stmt = Sqlite3.Rc.DONE)))
+            (match Sqlite3.step stmt with
+            | Sqlite3.Rc.DONE -> true
+            | _ -> false)))
 
 let test_v4_history_disconnect () =
-  let path = Filename.temp_file "kcal-v4" ".sqlite" in
-  Fun.protect
-    ~finally:(fun () -> Sys.remove path)
+  let path = Stdlib.Filename.temp_file "kcal-v4" ".sqlite" in
+  Stdlib.Fun.protect
+    ~finally:(fun () -> Stdlib.Sys.remove path)
     (fun () ->
       let raw = Sqlite3.db_open path in
       let history db =
@@ -143,7 +157,7 @@ let test_v4_history_disconnect () =
              id,user_id,measured_at,weight_kg,source,external_id,created_at,updated_at,deleted_at \
              FROM weigh_ins ORDER BY id"
         in
-        Fun.protect
+        Stdlib.Fun.protect
           ~finally:(fun () -> ignore (Sqlite3.finalize statement))
           (fun () ->
             let rec rows acc =
@@ -156,67 +170,81 @@ let test_v4_history_disconnect () =
             rows [])
       in
       let original =
-        Fun.protect
+        Stdlib.Fun.protect
           ~finally:(fun () -> Test_support.close_database raw)
           (fun () ->
             List.iter
-              (fun (version, sql) ->
+              ~f:(fun (version, sql) ->
                 if version <= 4 then (
-                  Result.get_ok (Migration.For_testing.execute raw sql);
-                  Result.get_ok
-                    (Migration.For_testing.record_version raw version)))
+                  Option.value_exn
+                    (Result.ok (Migration.For_testing.execute raw sql));
+                  Option.value_exn
+                    (Result.ok
+                       (Migration.For_testing.record_version raw version))))
               Migration.migrations;
-            Result.get_ok
-              (Migration.For_testing.execute raw
-                 "INSERT INTO users VALUES \
-                  ('12345678-1234-4234-8234-123456789abc','issuer','alice','2026-01-01T00:00:00Z'); \
-                  INSERT INTO withings_connections VALUES \
-                  ('connection','12345678-1234-4234-8234-123456789abc','account','ciphertext','ciphertext','2026-01-02T00:00:00Z',42,0,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'); \
-                  INSERT INTO weigh_ins VALUES \
-                  ('linked','12345678-1234-4234-8234-123456789abc','2026-01-01T01:00:00Z',80.5,'withings','account:linked','2026-01-01T02:00:00Z','2026-01-01T03:00:00Z',NULL,'connection'); \
-                  INSERT INTO weigh_ins VALUES \
-                  ('dangling','12345678-1234-4234-8234-123456789abc','2026-01-01T01:00:00Z',81.5,'withings','account:deleted','2026-01-01T02:00:00Z','2026-01-01T03:00:00Z','2026-01-01T04:00:00Z','missing'); \
-                  INSERT INTO weigh_ins VALUES \
-                  ('manual','12345678-1234-4234-8234-123456789abc','2026-01-01T01:00:00Z',82.5,'manual',NULL,'2026-01-01T02:00:00Z','2026-01-01T03:00:00Z',NULL,NULL)");
+            Option.value_exn
+              (Result.ok
+                 (Migration.For_testing.execute raw
+                    "INSERT INTO users VALUES \
+                     ('12345678-1234-4234-8234-123456789abc','issuer','alice','2026-01-01T00:00:00Z'); \
+                     INSERT INTO withings_connections VALUES \
+                     ('connection','12345678-1234-4234-8234-123456789abc','account','ciphertext','ciphertext','2026-01-02T00:00:00Z',42,0,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'); \
+                     INSERT INTO weigh_ins VALUES \
+                     ('linked','12345678-1234-4234-8234-123456789abc','2026-01-01T01:00:00Z',80.5,'withings','account:linked','2026-01-01T02:00:00Z','2026-01-01T03:00:00Z',NULL,'connection'); \
+                     INSERT INTO weigh_ins VALUES \
+                     ('dangling','12345678-1234-4234-8234-123456789abc','2026-01-01T01:00:00Z',81.5,'withings','account:deleted','2026-01-01T02:00:00Z','2026-01-01T03:00:00Z','2026-01-01T04:00:00Z','missing'); \
+                     INSERT INTO weigh_ins VALUES \
+                     ('manual','12345678-1234-4234-8234-123456789abc','2026-01-01T01:00:00Z',82.5,'manual',NULL,'2026-01-01T02:00:00Z','2026-01-01T03:00:00Z',NULL,NULL)"));
             history raw)
       in
-      let store = Result.get_ok (Store_sqlite.open_database ~path) in
-      Fun.protect
-        ~finally:(fun () -> Result.get_ok (Store_sqlite.close store))
+      let store =
+        Option.value_exn (Result.ok (Store_sqlite.open_database ~path))
+      in
+      Stdlib.Fun.protect
+        ~finally:(fun () ->
+          Option.value_exn (Result.ok (Store_sqlite.close store)))
         (fun () ->
           let db = Store_sqlite.For_testing.raw_database store in
           let check_history () =
             let render rows =
-              List.map (List.map Sqlite3.Data.to_string_debug) rows
+              List.map ~f:(List.map ~f:Sqlite3.Data.to_string_debug) rows
             in
             Alcotest.(check (list (list string)))
               "all durable observation columns preserved" (render original)
               (render (history db));
             let statement = Sqlite3.prepare db "PRAGMA foreign_key_check" in
-            Fun.protect
+            Stdlib.Fun.protect
               ~finally:(fun () -> ignore (Sqlite3.finalize statement))
               (fun () ->
                 Alcotest.(check bool)
                   "foreign_key_check is empty" true
-                  (Sqlite3.step statement = Sqlite3.Rc.DONE))
+                  (match Sqlite3.step statement with
+                  | Sqlite3.Rc.DONE -> true
+                  | _ -> false))
           in
           check_history ();
           let user =
-            Result.get_ok
-              (Store_sqlite.resolve_user store ~issuer:"issuer" ~subject:"alice")
+            Option.value_exn
+              (Result.ok
+                 (Store_sqlite.resolve_user store ~issuer:"issuer"
+                    ~subject:"alice"))
           in
-          Result.get_ok
-            (Service.disconnect_withings (Service.make ~store) ~user);
+          Option.value_exn
+            (Result.ok
+               (Service.disconnect_withings (Service.make ~store) ~user));
           check_history ();
           let statement =
             Sqlite3.prepare db
               "SELECT count(*) FROM weigh_ins WHERE withings_connection_id IS \
                NOT NULL"
           in
-          Fun.protect
+          Stdlib.Fun.protect
             ~finally:(fun () -> ignore (Sqlite3.finalize statement))
             (fun () ->
-              assert (Sqlite3.step statement = Sqlite3.Rc.ROW);
+              assert (
+                match Sqlite3.step statement with
+                | Sqlite3.Rc.ROW -> true
+                | _ -> false);
               Alcotest.(check int)
                 "all historical linkage null after disconnect" 0
                 (Sqlite3.column_int statement 0));
@@ -230,9 +258,10 @@ let test_v4_history_disconnect () =
 
 let test_invalid_bookkeeping_is_not_absence () =
   Test_support.with_database (fun db ->
-      Result.get_ok
-        (Migration.For_testing.execute db
-           "CREATE TABLE schema_migrations (broken TEXT)");
+      Option.value_exn
+        (Result.ok
+           (Migration.For_testing.execute db
+              "CREATE TABLE schema_migrations (broken TEXT)"));
       Alcotest.(check bool)
         "bookkeeping query failure propagates" true
         (Result.is_error (Migration.apply_all db));

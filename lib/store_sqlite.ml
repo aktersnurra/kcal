@@ -1,3 +1,7 @@
+module Domain_error = Error
+open Base
+module Error = Domain_error
+
 type t = Sqlite3.db
 
 let close db =
@@ -11,9 +15,13 @@ let open_database ~path =
   try
     let db = Sqlite3.db_open path in
     let initialize () =
-      if Sqlite3.exec db "PRAGMA foreign_keys = ON" <> Sqlite3.Rc.OK then
-        Error (Error.Storage_error "SQLite initialization failed")
-      else Result.map (fun () -> db) (Migration.apply_all db)
+      if
+        not
+          (match Sqlite3.exec db "PRAGMA foreign_keys = ON" with
+          | Sqlite3.Rc.OK -> true
+          | _ -> false)
+      then Error (Error.Storage_error "SQLite initialization failed")
+      else Result.map ~f:(fun () -> db) (Migration.apply_all db)
     in
     match initialize () with
     | Ok _ as result -> result
@@ -36,7 +44,7 @@ module Log = (val Logs.src_log log_src : Logs.LOG)
 
 let storage_error () = Error.Storage_error "SQLite operation failed"
 let invalid_input () = Error.Invalid_input "invalid query or update"
-let now () = Option.get (Ptime.of_float_s (Unix.gettimeofday ()))
+let now () = Option.value_exn (Ptime.of_float_s (Unix.gettimeofday ()))
 let timestamp time = Time.to_utc_string time
 
 let nullable = function
@@ -52,21 +60,31 @@ let nullable_float = function
 let with_statement db sql f =
   try
     let statement = Sqlite3.prepare db sql in
-    Fun.protect
+    Stdlib.Fun.protect
       ~finally:(fun () ->
-        try ignore (Sqlite3.finalize statement) with _ -> ())
+        try ignore (Sqlite3.finalize statement)
+        with Sqlite3.Error _ | Sqlite3.SqliteError _ -> ())
       (fun () ->
         try f statement
-        with exn ->
-          Log.err (fun m -> m "query %S raised %s" sql (Printexc.to_string exn));
+        with
+        | ( Sqlite3.Error _ | Sqlite3.SqliteError _ | Sqlite3.RangeError _
+          | Sqlite3.DataTypeError _ | Sqlite3.InternalError _ ) as exn
+        ->
+          Log.err (fun m -> m "query %S raised %s" sql (Exn.to_string exn));
           Error (storage_error ()))
-  with exn ->
-    Log.err (fun m ->
-        m "preparing query %S raised %s" sql (Printexc.to_string exn));
+  with
+  | ( Sqlite3.Error _ | Sqlite3.SqliteError _ | Sqlite3.RangeError _
+    | Sqlite3.DataTypeError _ | Sqlite3.InternalError _ ) as exn
+  ->
+    Log.err (fun m -> m "preparing query %S raised %s" sql (Exn.to_string exn));
     Error (storage_error ())
 
 let bind statement values =
-  if Sqlite3.bind_values statement values = Sqlite3.Rc.OK then Ok ()
+  if
+    match Sqlite3.bind_values statement values with
+    | Sqlite3.Rc.OK -> true
+    | _ -> false
+  then Ok ()
   else (
     Log.err (fun m -> m "binding statement parameters failed");
     Error (storage_error ()))
@@ -123,7 +141,7 @@ let calorie_column statement column =
   match Sqlite3.column statement column with
   | Sqlite3.Data.INT value ->
       Int64.compare value 0L >= 0
-      && Int64.compare value (Int64.of_int max_int) <= 0
+      && Int64.compare value (Int64.of_int Int.max_value) <= 0
   | _ -> false
 
 (* The read must share the write transaction: invalid durable numeric values
@@ -133,7 +151,7 @@ let with_checked_numeric_update db ~check ~update =
     match Sqlite3.exec db "BEGIN IMMEDIATE" with
     | Sqlite3.Rc.OK ->
         let committed = ref false in
-        Fun.protect
+        Stdlib.Fun.protect
           ~finally:(fun () ->
             if not !committed then ignore (Sqlite3.exec db "ROLLBACK"))
           (fun () ->
@@ -181,9 +199,8 @@ let meal_of_row statement =
   with
   | Some id, Some user_id, Some eaten_at, Some created_at, Some updated_at
     when calorie_column statement 4 && numeric_column statement 5
-         && Base.List.for_all [ 6; 7; 8 ] ~f:(optional_numeric_column statement)
-    ->
-      Result.to_option
+         && List.for_all [ 6; 7; 8 ] ~f:(optional_numeric_column statement) ->
+      Result.ok
         (Meal.of_storage ~id ~user_id ~eaten_at ~description:(text statement 3)
            ~calories_kcal:(int statement 4) ~protein_g:(float statement 5)
            ~carbs_g:(optional_float statement 6)
@@ -192,7 +209,7 @@ let meal_of_row statement =
            ~estimate_source:(optional_text statement 9)
            ~notes:(optional_text statement 10)
            ~created_at ~updated_at
-           ~deleted_at:(Option.bind (optional_text statement 13) parse_time))
+           ~deleted_at:(Option.bind (optional_text statement 13) ~f:parse_time))
   | _ -> None
 
 let resolve_user db ~issuer ~subject =
@@ -213,7 +230,11 @@ let resolve_user db ~issuer ~subject =
       with
       | Error _ as error -> error
       | Ok () ->
-          if Sqlite3.step statement = Sqlite3.Rc.ROW then
+          if
+            match Sqlite3.step statement with
+            | Sqlite3.Rc.ROW -> true
+            | _ -> false
+          then
             match user_of_row statement with
             | Some user -> Ok user
             | None -> Error (storage_error ())
@@ -249,7 +270,11 @@ let create_meal db ~user input =
       match bind statement values with
       | Error _ as error -> error
       | Ok () ->
-          if Sqlite3.step statement = Sqlite3.Rc.ROW then
+          if
+            match Sqlite3.step statement with
+            | Sqlite3.Rc.ROW -> true
+            | _ -> false
+          then
             match meal_of_row statement with
             | Some meal -> Ok meal
             | None -> Error (Error.Storage_decoding "row")
@@ -273,7 +298,7 @@ let get_meal db ~user id =
 let update_meal db ~user id patch =
   let patch = Meal.Patch.to_raw patch in
   with_checked_numeric_update db
-    ~check:(fun () -> Result.map (fun _ -> ()) (get_meal db ~user id))
+    ~check:(fun () -> Result.map ~f:(fun _ -> ()) (get_meal db ~user id))
     ~update:(fun () ->
       let updated_at = timestamp (now ()) in
       with_statement db
@@ -287,7 +312,7 @@ let update_meal db ~user id patch =
        ^ meal_columns) (fun statement ->
           let values =
             [
-              nullable (Option.map timestamp patch.eaten_at);
+              nullable (Option.map ~f:timestamp patch.eaten_at);
               nullable patch.description;
               (match patch.calories_kcal with
               | None -> Sqlite3.Data.NULL
@@ -307,7 +332,7 @@ let update_meal db ~user id patch =
           | Error _ as error -> error
           | Ok () -> row_or_not_found statement meal_of_row))
 
-let valid_query ~from ~to_ ~limit =
+let is_valid_query ~from ~to_ ~limit =
   limit >= 1 && limit <= 500
   &&
   match (from, to_) with
@@ -339,8 +364,8 @@ let product_of_row statement =
   with
   | Some id, Some user_id, Some created_at, Some updated_at
     when calorie_column statement 4 && numeric_column statement 5
-         && Base.List.for_all [ 6; 7 ] ~f:(optional_numeric_column statement) ->
-      Result.to_option
+         && List.for_all [ 6; 7 ] ~f:(optional_numeric_column statement) ->
+      Result.ok
         (Product.of_storage ~id ~user_id ~name:(text statement 2)
            ~basis:(text statement 3) ~calories_kcal:(int statement 4)
            ~protein_g:(float statement 5)
@@ -394,7 +419,7 @@ let save_product db ~user ~id input =
       with_checked_numeric_update db
         ~check:(fun () ->
           Result.map
-            (fun _ -> ())
+            ~f:(fun _ -> ())
             (with_statement db
                ("SELECT " ^ product_columns
               ^ " FROM products WHERE id = ? AND user_id = ?")
@@ -411,9 +436,9 @@ let save_product db ~user ~id input =
         ~update:persist
 
 let qualified_columns table columns =
-  String.split_on_char ',' columns
-  |> List.map (fun column -> table ^ "." ^ String.trim column)
-  |> String.concat ", "
+  String.split columns ~on:','
+  |> List.map ~f:(fun column -> table ^ "." ^ String.strip column)
+  |> String.concat ~sep:", "
 
 let search_products db ~user ~query ~limit =
   if limit < 1 || limit > 500 then Error (invalid_input ())
@@ -437,7 +462,7 @@ let search_products db ~user ~query ~limit =
         | Ok () -> decode_all_rows statement product_of_row)
 
 let query_meals ?search db ~user ~from ~to_ ~limit =
-  if not (valid_query ~from ~to_ ~limit) then Error (invalid_input ())
+  if not (is_valid_query ~from ~to_ ~limit) then Error (invalid_input ())
   else
     let join, search_clause, search_values, ordering =
       match search with
@@ -456,8 +481,8 @@ let query_meals ?search db ~user ~from ~to_ ~limit =
       ^ " AND (? IS NULL OR meals.eaten_at >= ?) AND (? IS NULL OR \
          meals.eaten_at <= ?) ORDER BY " ^ ordering ^ " LIMIT ?")
       (fun statement ->
-        let from_value = nullable (Option.map timestamp from)
-        and to_value = nullable (Option.map timestamp to_) in
+        let from_value = nullable (Option.map ~f:timestamp from)
+        and to_value = nullable (Option.map ~f:timestamp to_) in
         match
           bind statement
             ([ Sqlite3.Data.TEXT (User_id.to_string user.User.id) ]
@@ -543,19 +568,20 @@ let weigh_in_of_row statement =
         match text statement 4 with
         | "manual" -> Some Weigh_in.Manual
         | "withings" ->
-            Option.bind (optional_text statement 5) (fun external_id ->
-                Result.to_option
+            Option.bind (optional_text statement 5) ~f:(fun external_id ->
+                Result.ok
                   (Result.map
-                     (fun identity -> Weigh_in.Withings identity)
+                     ~f:(fun identity -> Weigh_in.Withings identity)
                      (Weigh_in.Imported_identity.of_external_id external_id)))
         | _ -> None
       in
       match source with
       | Some source ->
-          Result.to_option
+          Result.ok
             (Weigh_in.of_storage ~id ~user_id ~measured_at
                ~weight_kg:(float statement 3) ~source ~created_at ~updated_at
-               ~deleted_at:(Option.bind (optional_text statement 8) parse_time))
+               ~deleted_at:
+                 (Option.bind (optional_text statement 8) ~f:parse_time))
       | None -> None)
   | _ -> None
 
@@ -584,7 +610,11 @@ let create_manual_weigh_in db ~user input =
       with
       | Error _ as error -> error
       | Ok () ->
-          if Sqlite3.step statement = Sqlite3.Rc.ROW then
+          if
+            match Sqlite3.step statement with
+            | Sqlite3.Rc.ROW -> true
+            | _ -> false
+          then
             match weigh_in_of_row statement with
             | Some weight -> Ok weight
             | None -> Error (Error.Storage_decoding "row")
@@ -608,7 +638,7 @@ let get_weigh_in db ~user id =
 let update_manual_weigh_in db ~user id patch =
   let patch = Weigh_in.Patch.to_raw patch in
   with_checked_numeric_update db
-    ~check:(fun () -> Result.map (fun _ -> ()) (get_weigh_in db ~user id))
+    ~check:(fun () -> Result.map ~f:(fun _ -> ()) (get_weigh_in db ~user id))
     ~update:(fun () ->
       let current = timestamp (now ()) in
       with_statement db
@@ -619,7 +649,7 @@ let update_manual_weigh_in db ~user id patch =
           match
             bind statement
               [
-                nullable (Option.map timestamp patch.measured_at);
+                nullable (Option.map ~f:timestamp patch.measured_at);
                 nullable_float patch.weight_kg;
                 Sqlite3.Data.TEXT current;
                 Sqlite3.Data.TEXT (Weigh_in_id.to_string id);
@@ -630,7 +660,7 @@ let update_manual_weigh_in db ~user id patch =
           | Ok () -> row_or_not_found statement weigh_in_of_row))
 
 let query_weigh_ins db ~user ~from ~to_ ~limit =
-  if not (valid_query ~from ~to_ ~limit) then Error (invalid_input ())
+  if not (is_valid_query ~from ~to_ ~limit) then Error (invalid_input ())
   else
     with_statement db
       ("SELECT " ^ weigh_in_columns
@@ -638,8 +668,8 @@ let query_weigh_ins db ~user ~from ~to_ ~limit =
         NULL OR measured_at >= ?) AND (? IS NULL OR measured_at <= ?) ORDER BY \
         measured_at ASC LIMIT ?")
       (fun statement ->
-        let from_value = nullable (Option.map timestamp from)
-        and to_value = nullable (Option.map timestamp to_) in
+        let from_value = nullable (Option.map ~f:timestamp from)
+        and to_value = nullable (Option.map ~f:timestamp to_) in
         match
           bind statement
             [
@@ -688,10 +718,10 @@ let withings_connection_of_row statement =
   match
     ( User_id.of_string (text statement 1),
       optional_text statement 2,
-      Option.bind (optional_text statement 3) parse_time )
+      Option.bind (optional_text statement 3) ~f:parse_time )
   with
   | Some user_id, Some withings_user_id, Some token_expires_at ->
-      Result.to_option
+      Result.ok
         (Withings_connection.decode ~id:(text statement 0) ~user_id
            ~withings_user_id ~token_expires_at
            ~sync_cursor:(optional_int64 statement 4))
@@ -713,7 +743,11 @@ let create_withings_oauth_state db ~user ~state_hash ~expires_at =
       with
       | Error _ as error -> error
       | Ok () ->
-          if Sqlite3.step statement = Sqlite3.Rc.DONE then Ok ()
+          if
+            match Sqlite3.step statement with
+            | Sqlite3.Rc.DONE -> true
+            | _ -> false
+          then Ok ()
           else Error (storage_error ()))
 
 let consume_withings_oauth_state db ~user ~state_hash ~now:current_time =
@@ -731,7 +765,11 @@ let consume_withings_oauth_state db ~user ~state_hash ~now:current_time =
       with
       | Error _ as error -> error
       | Ok () ->
-          if Sqlite3.step statement = Sqlite3.Rc.DONE && Sqlite3.changes db = 1
+          if
+            (match Sqlite3.step statement with
+              | Sqlite3.Rc.DONE -> true
+              | _ -> false)
+            && Sqlite3.changes db = 1
           then Ok ()
           else Error Error.Not_found)
 
@@ -794,7 +832,11 @@ let delete_withings_connection db ~user =
       with
       | Error _ as error -> error
       | Ok () ->
-          if Sqlite3.step statement = Sqlite3.Rc.DONE then Ok ()
+          if
+            match Sqlite3.step statement with
+            | Sqlite3.Rc.DONE -> true
+            | _ -> false
+          then Ok ()
           else Error (storage_error ()))
 
 let withings_connection_for_identity db ~withings_user_id =
@@ -970,7 +1012,7 @@ let withings_credentials db ~user ~connection ~key =
               match
                 ( optional_text statement 0,
                   optional_text statement 1,
-                  Option.bind (optional_text statement 2) parse_time,
+                  Option.bind (optional_text statement 2) ~f:parse_time,
                   optional_text statement 3 )
               with
               | ( Some encrypted_access,
@@ -1013,166 +1055,187 @@ let mark_withings_reauthorization db ~user ~connection =
       with
       | Error _ as error -> error
       | Ok () ->
-          if Sqlite3.step statement = Sqlite3.Rc.DONE && Sqlite3.changes db = 1
+          if
+            (match Sqlite3.step statement with
+              | Sqlite3.Rc.DONE -> true
+              | _ -> false)
+            && Sqlite3.changes db = 1
           then Ok ()
           else Error Error.Not_found)
 
 let persist_withings_import db ~user ~connection ~rows ~expected_cursor ~cursor
     =
-  let rows = List.map Weigh_in.Import.to_raw rows in
-  if Sqlite3.exec db "BEGIN IMMEDIATE" <> Sqlite3.Rc.OK then
-    Error (storage_error ())
+  let rows = List.map ~f:Weigh_in.Import.to_raw rows in
+  if
+    not
+      (match Sqlite3.exec db "BEGIN IMMEDIATE" with
+      | Sqlite3.Rc.OK -> true
+      | _ -> false)
+  then Error (storage_error ())
   else
     let rollback () = ignore (Sqlite3.exec db "ROLLBACK") in
-    let result =
-      try
-        let stale =
-          with_statement db
-            "SELECT sync_cursor, withings_user_id FROM withings_connections \
-             WHERE id = ? AND user_id = ?" (fun statement ->
-              match
-                bind statement
-                  [
-                    Sqlite3.Data.TEXT connection.Withings_connection.id;
-                    Sqlite3.Data.TEXT (User_id.to_string user.User.id);
-                  ]
-              with
-              | Error _ as error -> error
-              | Ok () -> (
-                  match Sqlite3.step statement with
-                  | Sqlite3.Rc.ROW ->
-                      let current_cursor =
-                        if Sqlite3.column_is_null statement 0 then None
-                        else Some (Sqlite3.column_int64 statement 0)
-                      in
-                      if
-                        not
-                          (Option.equal String.equal
-                             (optional_text statement 1)
-                             (Some
-                                (Withings_connection.Account.to_string
-                                   connection.account)))
-                      then Error Error.Not_found
-                      else
-                        Ok
-                          (match cursor with
-                          | None ->
-                              not
-                                (Option.equal Int64.equal current_cursor
-                                   expected_cursor)
-                          | Some received -> (
-                              match current_cursor with
-                              | None -> false
-                              | Some current ->
-                                  Int64.compare received current < 0))
-                  | Sqlite3.Rc.DONE -> Error Error.Not_found
-                  | _ -> Error (storage_error ())))
-        in
-        let current = timestamp (now ()) in
-        let persist (row : Weigh_in.import) =
-          let existing =
-            with_statement db
-              ("SELECT " ^ weigh_in_columns
-             ^ " FROM weigh_ins WHERE source = 'withings' AND external_id = ? \
-                AND user_id = ?")
-              (fun statement ->
-                match
-                  bind statement
-                    [
-                      Sqlite3.Data.TEXT row.external_id;
-                      Sqlite3.Data.TEXT (User_id.to_string user.User.id);
-                    ]
-                with
-                | Error _ as error -> error
-                | Ok () -> (
-                    match Sqlite3.step statement with
-                    | Sqlite3.Rc.DONE -> Ok ()
-                    | Sqlite3.Rc.ROW -> (
-                        match weigh_in_of_row statement with
-                        | Some _ -> Ok ()
-                        | None -> Error (Error.Storage_decoding "weigh-in"))
-                    | _ -> Error (storage_error ())))
-          in
-          match existing with
-          | Error _ as error -> error
-          | Ok () ->
+    let committed = ref false in
+    Stdlib.Fun.protect
+      ~finally:(fun () -> if not !committed then rollback ())
+      (fun () ->
+        let result =
+          try
+            let stale =
               with_statement db
-                "INSERT INTO weigh_ins (id, user_id, measured_at, weight_kg, \
-                 source, external_id, created_at, updated_at, deleted_at, \
-                 withings_connection_id) VALUES (?, ?, ?, ?, 'withings', ?, ?, \
-                 ?, NULL, ?) ON CONFLICT(source, external_id) DO UPDATE SET \
-                 weight_kg = excluded.weight_kg, withings_connection_id = \
-                 excluded.withings_connection_id, updated_at = \
-                 excluded.updated_at WHERE weigh_ins.deleted_at IS NULL AND \
-                 weigh_ins.user_id = excluded.user_id" (fun statement ->
+                "SELECT sync_cursor, withings_user_id FROM \
+                 withings_connections WHERE id = ? AND user_id = ?"
+                (fun statement ->
                   match
                     bind statement
                       [
-                        Sqlite3.Data.TEXT
-                          (Weigh_in_id.to_string (Weigh_in_id.fresh ()));
-                        Sqlite3.Data.TEXT (User_id.to_string user.User.id);
-                        Sqlite3.Data.TEXT (timestamp row.Weigh_in.measured_at);
-                        Sqlite3.Data.FLOAT row.weight_kg;
-                        Sqlite3.Data.TEXT row.external_id;
-                        Sqlite3.Data.TEXT current;
-                        Sqlite3.Data.TEXT current;
                         Sqlite3.Data.TEXT connection.Withings_connection.id;
+                        Sqlite3.Data.TEXT (User_id.to_string user.User.id);
                       ]
                   with
                   | Error _ as error -> error
-                  | Ok () ->
-                      if Sqlite3.step statement = Sqlite3.Rc.DONE then Ok ()
-                      else Error (storage_error ()))
-        in
-        match stale with
-        | Error _ as error -> error
-        | Ok true -> Ok ()
-        | Ok false -> (
-            match
-              List.fold_left
-                (fun result row -> Result.bind result (fun () -> persist row))
-                (Ok ()) rows
-            with
-            | Error _ as error -> error
-            | Ok () ->
+                  | Ok () -> (
+                      match Sqlite3.step statement with
+                      | Sqlite3.Rc.ROW ->
+                          let current_cursor =
+                            if Sqlite3.column_is_null statement 0 then None
+                            else Some (Sqlite3.column_int64 statement 0)
+                          in
+                          if
+                            not
+                              (Option.equal String.equal
+                                 (optional_text statement 1)
+                                 (Some
+                                    (Withings_connection.Account.to_string
+                                       connection.account)))
+                          then Error Error.Not_found
+                          else
+                            Ok
+                              (match cursor with
+                              | None ->
+                                  not
+                                    (Option.equal Int64.equal current_cursor
+                                       expected_cursor)
+                              | Some received -> (
+                                  match current_cursor with
+                                  | None -> false
+                                  | Some current ->
+                                      Int64.compare received current < 0))
+                      | Sqlite3.Rc.DONE -> Error Error.Not_found
+                      | _ -> Error (storage_error ())))
+            in
+            let current = timestamp (now ()) in
+            let persist (row : Weigh_in.import) =
+              let existing =
                 with_statement db
-                  "UPDATE withings_connections SET sync_cursor = CASE WHEN \
-                   sync_cursor IS NULL OR ? >= sync_cursor THEN ? ELSE \
-                   sync_cursor END, updated_at = ? WHERE id = ? AND user_id = \
-                   ?" (fun statement ->
-                    let cursor =
-                      match cursor with
-                      | None -> Sqlite3.Data.NULL
-                      | Some value -> Sqlite3.Data.INT value
-                    in
+                  ("SELECT " ^ weigh_in_columns
+                 ^ " FROM weigh_ins WHERE source = 'withings' AND external_id \
+                    = ? AND user_id = ?")
+                  (fun statement ->
                     match
                       bind statement
                         [
-                          cursor;
-                          cursor;
-                          Sqlite3.Data.TEXT current;
-                          Sqlite3.Data.TEXT connection.Withings_connection.id;
+                          Sqlite3.Data.TEXT row.external_id;
                           Sqlite3.Data.TEXT (User_id.to_string user.User.id);
                         ]
                     with
                     | Error _ as error -> error
-                    | Ok () ->
-                        if
-                          Sqlite3.step statement = Sqlite3.Rc.DONE
-                          && Sqlite3.changes db = 1
-                        then Ok ()
-                        else Error Error.Not_found))
-      with _ -> Error (storage_error ())
-    in
-    match result with
-    | Ok () ->
-        if Sqlite3.exec db "COMMIT" = Sqlite3.Rc.OK then Ok ()
-        else (
-          rollback ();
-          Error (storage_error ()))
-    | Error _ as error ->
-        rollback ();
-        error
+                    | Ok () -> (
+                        match Sqlite3.step statement with
+                        | Sqlite3.Rc.DONE -> Ok ()
+                        | Sqlite3.Rc.ROW -> (
+                            match weigh_in_of_row statement with
+                            | Some _ -> Ok ()
+                            | None -> Error (Error.Storage_decoding "weigh-in"))
+                        | _ -> Error (storage_error ())))
+              in
+              match existing with
+              | Error _ as error -> error
+              | Ok () ->
+                  with_statement db
+                    "INSERT INTO weigh_ins (id, user_id, measured_at, \
+                     weight_kg, source, external_id, created_at, updated_at, \
+                     deleted_at, withings_connection_id) VALUES (?, ?, ?, ?, \
+                     'withings', ?, ?, ?, NULL, ?) ON CONFLICT(source, \
+                     external_id) DO UPDATE SET weight_kg = \
+                     excluded.weight_kg, withings_connection_id = \
+                     excluded.withings_connection_id, updated_at = \
+                     excluded.updated_at WHERE weigh_ins.deleted_at IS NULL \
+                     AND weigh_ins.user_id = excluded.user_id" (fun statement ->
+                      match
+                        bind statement
+                          [
+                            Sqlite3.Data.TEXT
+                              (Weigh_in_id.to_string (Weigh_in_id.fresh ()));
+                            Sqlite3.Data.TEXT (User_id.to_string user.User.id);
+                            Sqlite3.Data.TEXT
+                              (timestamp row.Weigh_in.measured_at);
+                            Sqlite3.Data.FLOAT row.weight_kg;
+                            Sqlite3.Data.TEXT row.external_id;
+                            Sqlite3.Data.TEXT current;
+                            Sqlite3.Data.TEXT current;
+                            Sqlite3.Data.TEXT connection.Withings_connection.id;
+                          ]
+                      with
+                      | Error _ as error -> error
+                      | Ok () ->
+                          if
+                            match Sqlite3.step statement with
+                            | Sqlite3.Rc.DONE -> true
+                            | _ -> false
+                          then Ok ()
+                          else Error (storage_error ()))
+            in
+            match stale with
+            | Error _ as error -> error
+            | Ok true -> Ok ()
+            | Ok false -> (
+                match
+                  List.fold rows ~init:(Ok ()) ~f:(fun result row ->
+                      Result.bind result ~f:(fun () -> persist row))
+                with
+                | Error _ as error -> error
+                | Ok () ->
+                    with_statement db
+                      "UPDATE withings_connections SET sync_cursor = CASE WHEN \
+                       sync_cursor IS NULL OR ? >= sync_cursor THEN ? ELSE \
+                       sync_cursor END, updated_at = ? WHERE id = ? AND \
+                       user_id = ?" (fun statement ->
+                        let cursor =
+                          match cursor with
+                          | None -> Sqlite3.Data.NULL
+                          | Some value -> Sqlite3.Data.INT value
+                        in
+                        match
+                          bind statement
+                            [
+                              cursor;
+                              cursor;
+                              Sqlite3.Data.TEXT current;
+                              Sqlite3.Data.TEXT
+                                connection.Withings_connection.id;
+                              Sqlite3.Data.TEXT (User_id.to_string user.User.id);
+                            ]
+                        with
+                        | Error _ as error -> error
+                        | Ok () ->
+                            if
+                              (match Sqlite3.step statement with
+                                | Sqlite3.Rc.DONE -> true
+                                | _ -> false)
+                              && Sqlite3.changes db = 1
+                            then Ok ()
+                            else Error Error.Not_found))
+          with Sqlite3.Error _ | Sqlite3.SqliteError _ ->
+            Error (storage_error ())
+        in
+        match result with
+        | Ok () -> (
+            match Sqlite3.exec db "COMMIT" with
+            | Sqlite3.Rc.OK ->
+                committed := true;
+                Ok ()
+            | _ -> Error (storage_error ()))
+        | Error _ as error -> error)
 
 let delete_weigh_in db ~user id =
   let current = timestamp (now ()) in

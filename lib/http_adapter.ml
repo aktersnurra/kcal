@@ -1,3 +1,7 @@
+module Domain_error = Error
+open Base
+module Error = Domain_error
+
 let http_log_src = Logs.Src.create "kcal.http" ~doc:"HTTP request handling"
 
 module Http_log = (val Logs.src_log http_log_src : Logs.LOG)
@@ -50,35 +54,38 @@ let unauthorized protected_resource =
     | Some { metadata_url; _ } ->
         [
           ( "www-authenticate",
-            Printf.sprintf {|Bearer resource_metadata="%s"|} metadata_url );
+            Stdlib.Printf.sprintf {|Bearer resource_metadata="%s"|} metadata_url
+          );
         ]
     | None -> []
   in
   { status = 401; headers; body = "Unauthorized" }
 
-let json_media_type value =
-  match String.split_on_char ';' (String.lowercase_ascii value) with
+let is_json_media_type value =
+  match String.split (String.lowercase value) ~on:';' with
   | media_type :: parameters ->
-      String.trim media_type = "application/json"
-      && List.for_all (fun parameter -> String.trim parameter <> "") parameters
+      String.equal (String.strip media_type) "application/json"
+      && List.for_all
+           ~f:(fun parameter -> not (String.equal (String.strip parameter) ""))
+           parameters
   | [] -> false
 
 let bearer headers =
   match
-    List.assoc_opt "authorization"
-      (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) headers)
+    List.Assoc.find
+      (List.map ~f:(fun (k, v) -> (String.lowercase k, v)) headers)
+      ~equal:String.equal "authorization"
   with
   | Some value
-    when String.starts_with ~prefix:"Bearer " value && String.length value > 7
-    ->
-      Some (String.sub value 7 (String.length value - 7))
+    when String.is_prefix ~prefix:"Bearer " value && String.length value > 7 ->
+      Some (String.sub value ~pos:7 ~len:(String.length value - 7))
   | _ -> None
 
 type withings_config = {
   oauth : Withings_oauth.t;
   client : (module Withings.S);
   token_key : Secret.Key.t;
-  sync : User.t -> Withings_connection.connected -> (unit, Error.t) result;
+  sync : User.t -> Withings_connection.connected -> (unit, Error.t) Result.t;
   callback_url : string;
   client_id : string;
   redirect_uri : string;
@@ -89,8 +96,8 @@ let query path =
   (Uri.path uri, Uri.query uri)
 
 let query_value name query =
-  match List.assoc_opt name query with
-  | Some [ value ] when value <> "" -> Some value
+  match List.Assoc.find query ~equal:String.equal name with
+  | Some [ value ] when not (String.equal value "") -> Some value
   | _ -> None
 
 let authenticated ?protected_resource auth headers ?scope f =
@@ -109,130 +116,81 @@ let authenticated ?protected_resource auth headers ?scope f =
           | Some scope when not (Auth.has_scope identity scope) -> forbidden
           | None | Some _ -> f identity))
 
-let ( let* ) = Result.bind
-
-let callback_user withings state =
-  match Withings_oauth.consume_callback_state withings.oauth ~state with
-  | Ok user -> Ok user
-  | Error error ->
-      Withings_log.warn (fun m ->
-          m "callback rejected: invalid or expired OAuth state (%s)"
-            (Error.to_string error));
-      Error (plain 400 "Invalid OAuth state")
-
-let exchange_withings_code withings ~user_id code =
-  let module Client = (val withings.client : Withings.S) in
-  match Client.exchange_code ~redirect_uri:withings.redirect_uri ~code with
-  | Ok credentials -> Ok credentials
-  | Error error ->
-      Withings_log.err (fun m ->
-          m "user=%s code exchange with Withings failed: %s" user_id
-            (Error.to_string error));
-      Error (plain 502 "Withings authorization failed")
-
-let save_callback_credentials service withings ~user ~user_id credentials =
-  match
-    Service.connect_withings service ~user ~key:withings.token_key credentials
-  with
-  | Ok connection -> Ok connection
-  | Error error ->
-      Withings_log.err (fun m ->
-          m "user=%s failed to store Withings credentials: %s" user_id
-            (Error.to_string error));
-      Error (plain 500 "Internal Server Error")
-
-let sync_callback_connection withings ~user ~user_id connection =
-  match withings.sync user connection with
-  | Ok () -> Ok ()
-  | Error error ->
-      Withings_log.err (fun m ->
-          m "user=%s initial Withings sync failed: %s" user_id
-            (Error.to_string error));
-      Error (plain 502 "Withings synchronization failed")
-
-let subscribe_callback withings ~user_id credentials =
-  let module Client = (val withings.client : Withings.S) in
-  match
-    Client.subscribe ~access_token:credentials.Withings.access_token
-      ~callback_url:withings.callback_url
-  with
-  | Ok () -> Ok ()
-  | Error error ->
-      Withings_log.err (fun m ->
-          m "user=%s Withings webhook subscription failed: %s" user_id
-            (Error.to_string error));
-      Error (plain 502 "Withings subscription failed")
-
 let withings_callback service withings query =
   match (query_value "state" query, query_value "code" query) with
   | Some state, Some code -> (
-      let result =
-        let* user = callback_user withings state in
-        let user_id = User_id.to_string user.User.id in
-        let* credentials = exchange_withings_code withings ~user_id code in
-        let* connection =
-          save_callback_credentials service withings ~user ~user_id credentials
-        in
-        let* () = sync_callback_connection withings ~user ~user_id connection in
-        let* () = subscribe_callback withings ~user_id credentials in
-        Withings_log.info (fun m ->
-            m "user=%s connected Withings account" user_id);
-        Ok (plain 200 "Withings connected")
-      in
-      match result with Ok response | Error response -> response)
-  | _ ->
-      Withings_log.warn (fun m ->
-          m "callback rejected: missing state or code parameter");
-      plain 400 "Invalid OAuth callback"
+      match
+        Service.complete_withings_authorization service ~oauth:withings.oauth
+          ~key:withings.token_key ~client:withings.client
+          ~redirect_uri:withings.redirect_uri
+          ~callback_url:withings.callback_url ~sync:withings.sync ~state ~code
+      with
+      | Ok () -> plain 200 "Withings connected"
+      | Error failure ->
+          let status, body, error =
+            match failure with
+            | Service.Invalid_state error -> (400, "Invalid OAuth state", error)
+            | Exchange_failed error ->
+                (502, "Withings authorization failed", error)
+            | Persistence_failed error -> (500, "Internal Server Error", error)
+            | Sync_failed error ->
+                (502, "Withings synchronization failed", error)
+            | Subscription_failed error ->
+                (502, "Withings subscription failed", error)
+          in
+          Withings_log.err (fun m -> m "%s: %s" body (Error.to_string error));
+          plain status body)
+  | _ -> plain 400 "Invalid OAuth callback"
 
 let webhook ~schedule_sync service withings headers body =
   match
-    List.assoc_opt "content-type"
-      (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) headers)
+    List.Assoc.find
+      (List.map ~f:(fun (k, v) -> (String.lowercase k, v)) headers)
+      ~equal:String.equal "content-type"
   with
   | Some content_type
-    when String.trim (String.lowercase_ascii content_type)
-         = "application/x-www-form-urlencoded"
+    when String.equal
+           (String.strip (String.lowercase content_type))
+           "application/x-www-form-urlencoded"
          && String.length body <= 8192 -> (
-      try
-        let fields = Uri.query (Uri.of_string ("?" ^ body)) in
-        match (query_value "userid" fields, query_value "appli" fields) with
-        | Some identity, Some "1" when String.length identity <= 128 -> (
-            match
-              Service.withings_connection_for_identity service
-                ~withings_user_id:identity
-            with
-            | Ok (user, connection) ->
-                Withings_log.info (fun m ->
-                    m "user=%s webhook notification received, scheduling sync"
-                      (User_id.to_string user.User.id));
-                schedule_sync (fun () ->
-                    match withings.sync user connection with
-                    | Ok () -> ()
-                    | Error error ->
-                        Withings_log.err (fun m ->
-                            m "user=%s webhook-triggered sync failed: %s"
-                              (User_id.to_string user.User.id)
-                              (Error.to_string error)));
-                plain 200 "OK"
-            | Error Error.Not_found -> plain 404 "Not Found"
-            | Error error ->
-                Withings_log.err (fun m ->
-                    m "webhook lookup for withings_user_id=%s failed: %s"
-                      identity (Error.to_string error));
-                plain 500 "Internal Server Error")
-        | _ -> plain 400 "Malformed webhook"
-      with _ -> plain 400 "Malformed webhook")
+      let fields = Uri.query (Uri.of_string ("?" ^ body)) in
+      match (query_value "userid" fields, query_value "appli" fields) with
+      | Some identity, Some "1" when String.length identity <= 128 -> (
+          match
+            Service.withings_connection_for_identity service
+              ~withings_user_id:identity
+          with
+          | Ok (user, connection) ->
+              Withings_log.info (fun m ->
+                  m "user=%s webhook notification received, scheduling sync"
+                    (User_id.to_string user.User.id));
+              schedule_sync (fun () ->
+                  match withings.sync user connection with
+                  | Ok () -> ()
+                  | Error error ->
+                      Withings_log.err (fun m ->
+                          m "user=%s webhook-triggered sync failed: %s"
+                            (User_id.to_string user.User.id)
+                            (Error.to_string error)));
+              plain 200 "OK"
+          | Error Error.Not_found -> plain 404 "Not Found"
+          | Error error ->
+              Withings_log.err (fun m ->
+                  m "webhook lookup for withings_user_id=%s failed: %s" identity
+                    (Error.to_string error));
+              plain 500 "Internal Server Error")
+      | _ -> plain 400 "Malformed webhook")
   | Some _ -> plain 415 "Unsupported Media Type"
   | None -> plain 415 "Unsupported Media Type"
 
 let metadata_alias = "/.well-known/oauth-protected-resource"
 
-let metadata_route protected_resource route =
-  route = metadata_alias
+let is_metadata_route protected_resource route =
+  String.equal route metadata_alias
   ||
   match protected_resource with
-  | Some { metadata_url; _ } -> route = Uri.path (Uri.of_string metadata_url)
+  | Some { metadata_url; _ } ->
+      String.equal route (Uri.path (Uri.of_string metadata_url))
   | None -> false
 
 let mcp_handle (withings : withings_config option) ~service ~identity request =
@@ -252,7 +210,7 @@ let handle_withings ~protected_resource ~schedule_sync ~withings ~auth ~service
     ~method_ ~path ~headers ~body =
   let route, query = query path in
   match (method_, route) with
-  | `GET, route when metadata_route protected_resource route -> (
+  | `GET, route when is_metadata_route protected_resource route -> (
       match protected_resource with
       | Some { resource; authorization_server; _ } ->
           json 200
@@ -266,8 +224,9 @@ let handle_withings ~protected_resource ~schedule_sync ~withings ~auth ~service
           authenticated ?protected_resource auth headers
             ~scope:"withings:manage" (fun identity ->
               match
-                Withings_oauth.begin_authorization ~client_id:withings.client_id
-                  ~redirect_uri:withings.redirect_uri withings.oauth
+                Service.begin_withings_authorization
+                  ~client_id:withings.client_id
+                  ~redirect_uri:withings.redirect_uri ~oauth:withings.oauth
                   ~user:identity.user
               with
               | Ok (_, url) ->
@@ -291,10 +250,11 @@ let handle_withings ~protected_resource ~schedule_sync ~withings ~auth ~service
   | `POST, "/mcp" ->
       authenticated ?protected_resource auth headers (fun identity ->
           match
-            List.assoc_opt "content-type"
-              (List.map (fun (k, v) -> (String.lowercase_ascii k, v)) headers)
+            List.Assoc.find
+              (List.map ~f:(fun (k, v) -> (String.lowercase k, v)) headers)
+              ~equal:String.equal "content-type"
           with
-          | Some content_type when json_media_type content_type -> (
+          | Some content_type when is_json_media_type content_type -> (
               let parsed =
                 try Ok (Yojson.Safe.from_string body)
                 with Yojson.Json_error message -> Error message
@@ -311,20 +271,28 @@ let handle_withings ~protected_resource ~schedule_sync ~withings ~auth ~service
                     match request with
                     | `Assoc fields ->
                         let method_name =
-                          match List.assoc_opt "method" fields with
+                          match
+                            List.Assoc.find fields ~equal:String.equal "method"
+                          with
                           | Some (`String method_name) -> method_name
                           | _ -> "<invalid>"
                         in
-                        (method_name, not (List.mem_assoc "id" fields))
+                        ( method_name,
+                          not (List.Assoc.mem fields ~equal:String.equal "id")
+                        )
                     | _ -> ("<invalid>", false)
                   in
                   match mcp_handle withings ~service ~identity request with
                   | Ok response ->
                       let outcome =
                         match response with
-                        | `Assoc fields when List.mem_assoc "error" fields ->
+                        | `Assoc fields
+                          when List.Assoc.mem fields ~equal:String.equal "error"
+                          ->
                             "error"
-                        | `Assoc fields when List.mem_assoc "result" fields ->
+                        | `Assoc fields
+                          when List.Assoc.mem fields ~equal:String.equal
+                                 "result" ->
                             "result"
                         | _ -> "invalid"
                       in
@@ -347,10 +315,11 @@ let handle ?protected_resource ~auth ~service ~method_ ~path ~headers ~body () =
     ~withings:None ~auth ~service ~method_ ~path ~headers ~body
 
 let split_address value =
-  match String.rindex_opt value ':' with
+  match String.rindex value ':' with
   | Some index when index > 0 && index < String.length value - 1 ->
-      ( String.sub value 0 index,
-        String.sub value (index + 1) (String.length value - index - 1) )
+      ( String.sub value ~pos:0 ~len:index,
+        String.sub value ~pos:(index + 1) ~len:(String.length value - index - 1)
+      )
   | _ -> invalid_arg "invalid listen address"
 
 let status = function
@@ -362,19 +331,19 @@ let status = function
   | 404 -> `Not_found
   | 413 -> `Payload_too_large
   | 415 -> `Unsupported_media_type
+  | 502 -> `Bad_gateway
   | 302 -> `Found
   | _ -> `Internal_server_error
 
 let framed_response response =
   let headers =
-    List.fold_left
-      (fun headers (key, value) -> Httpun.Headers.add headers key value)
-      Httpun.Headers.empty response.headers
+    List.fold response.headers ~init:Httpun.Headers.empty
+      ~f:(fun headers (key, value) -> Httpun.Headers.add headers key value)
     |> fun headers ->
     Httpun.Headers.add
       (Httpun.Headers.remove headers "content-length")
       "content-length"
-      (string_of_int (String.length response.body))
+      (Int.to_string (String.length response.body))
   in
   Httpun.Response.create ~headers (status response.status)
 
@@ -398,8 +367,8 @@ let serve_request ~sw ~protected_resource ~withings ~auth ~service reqd =
     | `OTHER -> "OTHER"
   in
   let path =
-    match String.index_opt request.target '?' with
-    | Some index -> String.sub request.target 0 index
+    match String.index request.target '?' with
+    | Some index -> String.sub request.target ~pos:0 ~len:index
     | None -> request.target
   in
   let respond_with_log response =
@@ -425,7 +394,7 @@ let serve_request ~sw ~protected_resource ~withings ~auth ~service reqd =
     in
     respond_with_log response
   in
-  let buffer = Buffer.create 1024 in
+  let buffer = Stdlib.Buffer.create 1024 in
   let responded = ref false in
   let respond_once body =
     if not !responded then (
@@ -435,13 +404,14 @@ let serve_request ~sw ~protected_resource ~withings ~auth ~service reqd =
   let rec read () =
     Httpun.Body.Reader.schedule_read
       (Httpun.Reqd.request_body reqd)
-      ~on_eof:(fun () -> respond_once (Buffer.contents buffer))
+      ~on_eof:(fun () -> respond_once (Stdlib.Buffer.contents buffer))
       ~on_read:(fun bytes ~off ~len ->
-        if Buffer.length buffer + len > 1_048_576 then (
+        if Stdlib.Buffer.length buffer + len > 1_048_576 then (
           responded := true;
           respond_with_log (plain 413 "Payload Too Large"))
         else (
-          Buffer.add_string buffer (Bigstringaf.substring bytes ~off ~len);
+          Stdlib.Buffer.add_string buffer
+            (Bigstringaf.substring bytes ~off ~len);
           read ()))
   in
   read ()
@@ -460,7 +430,7 @@ let run ~withings env ~config ~auth service : unit =
   let host, port = split_address config.Config.listen_address in
   Eio.Switch.run @@ fun sw ->
   let address =
-    List.hd (Eio.Net.getaddrinfo_stream ~service:port env#net host)
+    List.hd_exn (Eio.Net.getaddrinfo_stream ~service:port env#net host)
   in
   let listener =
     Eio.Net.listen ~sw ~reuse_addr:true ~backlog:128 env#net address
@@ -476,3 +446,7 @@ let run ~withings env ~config ~auth service : unit =
     ~on_error:(fun _ -> ())
     listener
     (fun socket address -> handler address socket)
+
+module For_testing = struct
+  let framed_response = framed_response
+end

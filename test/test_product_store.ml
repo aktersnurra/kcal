@@ -1,5 +1,10 @@
+module Domain_error = Error
+open Base
+module Error = Domain_error
+
 let parsed store text =
-  Result.get_ok (Store_sqlite.compile_search_query store [ text ])
+  Option.value_exn
+    (Result.ok (Store_sqlite.compile_search_query store [ text ]))
 
 let input : Product.input =
   {
@@ -13,11 +18,14 @@ let input : Product.input =
   }
 
 let save store user ?id value =
-  Result.get_ok (Test_support.save_product_raw store ~user ~id value)
+  Option.value_exn
+    (Result.ok (Test_support.save_product_raw store ~user ~id value))
 
 let search store user ?(limit = 100) query =
-  Result.get_ok
-    (Store_sqlite.search_products store ~user ~query:(parsed store query) ~limit)
+  Option.value_exn
+    (Result.ok
+       (Store_sqlite.search_products store ~user ~query:(parsed store query)
+          ~limit))
 
 let check_equal = Alcotest.check
 let invalid = function Error (Error.Invalid_input _) -> true | _ -> false
@@ -72,7 +80,8 @@ let test_save_and_replace () =
         "other untouched" [ other ]
         (search store user "Other");
       check_equal Test_support.meal "meal untouched" meal
-        (Result.get_ok (Store_sqlite.get_meal store ~user meal.id)))
+        (Option.value_exn
+           (Result.ok (Store_sqlite.get_meal store ~user meal.id))))
 
 let test_validation () =
   Test_support.with_store (fun store user ->
@@ -87,16 +96,16 @@ let test_validation () =
           { input with fat_g = Some (-1.) };
         ]
         @ List.concat_map
-            (fun value ->
+            ~f:(fun value ->
               [
                 { input with protein_g = value };
                 { input with carbs_g = Some value };
                 { input with fat_g = Some value };
               ])
-            [ nan; infinity; neg_infinity ]
+            [ Float.nan; Float.infinity; Float.neg_infinity ]
       in
       List.iter
-        (fun value ->
+        ~f:(fun value ->
           check_equal Alcotest.bool "domain invalid" true
             (invalid_field (Product.Create.of_raw value));
           check_equal Alcotest.bool "save invalid" true
@@ -113,12 +122,12 @@ let test_validation () =
              fat_g = Some 0.;
            });
       List.iter
-        (fun query ->
+        ~f:(fun query ->
           check_equal Alcotest.bool "blank query rejected" true
             (invalid (Store_sqlite.compile_search_query store [ query ])))
         [ ""; " \n" ];
       List.iter
-        (fun limit ->
+        ~f:(fun limit ->
           check_equal Alcotest.bool "limit rejected" true
             (invalid
                (Store_sqlite.search_products store ~user
@@ -132,7 +141,7 @@ let test_isolation () =
         Alcotest.(list Test_support.product)
         "foreign search empty" [] (search store bob "whey");
       List.iter
-        (fun id ->
+        ~f:(fun id ->
           check_equal Alcotest.bool "unknown or foreign update hidden" true
             (hidden
                (Test_support.save_product_raw store ~user:bob ~id:(Some id)
@@ -152,9 +161,8 @@ let test_literal_search_and_order () =
       let b = save store user { input with name = "A whey" } in
       let z = save store user { input with name = "Z whey" } in
       let expected =
-        List.sort
-          (fun (a : Product.t) b -> Product_id.compare a.id b.id)
-          [ a; b ]
+        List.sort [ a; b ] ~compare:(fun (a : Product.t) b ->
+            Product_id.compare a.id b.id)
       in
       check_equal Alcotest.bool "same names distinct" false
         (Product_id.equal a.id b.id);
@@ -164,10 +172,10 @@ let test_literal_search_and_order () =
       check_equal
         Alcotest.(list Test_support.product)
         "limit after matching and ordering"
-        [ List.hd expected ]
+        [ List.hd_exn expected ]
         (search store user ~limit:1 "whey");
       List.iter
-        (fun (name, basis, source, query) ->
+        ~f:(fun (name, basis, source, query) ->
           let p = save store user { input with name; basis; source } in
           check_equal
             Alcotest.(list Test_support.product)
@@ -208,11 +216,14 @@ let test_corrupt_product_is_not_repaired () =
   Test_support.with_store (fun store user ->
       let product = save store user input in
       Alcotest.(check bool)
-        "inject infinity" true
-        (Sqlite3.exec
-           (Store_sqlite.For_testing.raw_database store)
-           "UPDATE products SET protein_g = 1e309"
-        = Sqlite3.Rc.OK);
+        "inject Float.infinity" true
+        (match
+           Sqlite3.exec
+             (Store_sqlite.For_testing.raw_database store)
+             "UPDATE products SET protein_g = 1e309"
+         with
+        | Sqlite3.Rc.OK -> true
+        | _ -> false);
       Alcotest.(check bool)
         "search rejects corrupt product" true
         (match
@@ -234,7 +245,7 @@ let () =
     [
       ( "references",
         List.map
-          (fun (name, test) -> Alcotest.test_case name `Quick test)
+          ~f:(fun (name, test) -> Alcotest.test_case name `Quick test)
           [
             ("save and replace", test_save_and_replace);
             ( "corrupt product is not repaired",

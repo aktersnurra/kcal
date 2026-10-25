@@ -1,5 +1,7 @@
-let fixed_now = Option.get (Ptime.of_float_s 1_700_000_000.)
-let later = Option.get (Ptime.of_float_s 1_700_000_601.)
+open Base
+
+let fixed_now = Option.value_exn (Ptime.of_float_s 1_700_000_000.)
+let later = Option.value_exn (Ptime.of_float_s 1_700_000_601.)
 let oauth store now = Withings_oauth.make ~store ~now:(fun () -> now)
 let client_id = "exact-client"
 let redirect_uri = "https://kcal.example/withings/callback"
@@ -10,12 +12,16 @@ let begin_authorization oauth ~user =
 let test_states_are_unique_and_metrics_only () =
   Test_support.with_store (fun store user ->
       let state_one, url_one =
-        Result.get_ok (begin_authorization (oauth store fixed_now) ~user)
+        Option.value_exn
+          (Result.ok (begin_authorization (oauth store fixed_now) ~user))
       in
       let state_two, _ =
-        Result.get_ok (begin_authorization (oauth store fixed_now) ~user)
+        Option.value_exn
+          (Result.ok (begin_authorization (oauth store fixed_now) ~user))
       in
-      Alcotest.(check bool) "states differ" true (state_one <> state_two);
+      Alcotest.(check bool)
+        "states differ" true
+        (not (String.equal state_one state_two));
       Alcotest.(check bool)
         "complete configured URL" true
         (String.contains url_one 'm'
@@ -23,10 +29,10 @@ let test_states_are_unique_and_metrics_only () =
         && String.contains url_one 'r'
         && String.contains url_one 's'
         && String.contains url_one '='
-        && Base.List.equal
+        && List.equal
              (fun (key, values) (other_key, other_values) ->
                String.equal key other_key
-               && Base.List.equal String.equal values other_values)
+               && List.equal String.equal values other_values)
              (Uri.query (Uri.of_string url_one))
              [
                ("response_type", [ "code" ]);
@@ -40,7 +46,8 @@ let test_state_is_owned_single_use_and_expires () =
   Test_support.with_two_users (fun store alice bob ->
       let authorization = oauth store fixed_now in
       let state, _ =
-        Result.get_ok (begin_authorization authorization ~user:alice)
+        Option.value_exn
+          (Result.ok (begin_authorization authorization ~user:alice))
       in
       Alcotest.(check bool)
         "wrong user rejected" true
@@ -55,7 +62,8 @@ let test_state_is_owned_single_use_and_expires () =
         (Result.is_error
            (Withings_oauth.consume_state authorization ~user:alice ~state));
       let expired_state, _ =
-        Result.get_ok (begin_authorization authorization ~user:alice)
+        Option.value_exn
+          (Result.ok (begin_authorization authorization ~user:alice))
       in
       Alcotest.(check bool)
         "expired state rejected" true
@@ -67,18 +75,21 @@ let test_callback_state_is_bound_single_use_and_expires () =
   Test_support.with_two_users (fun store alice bob ->
       let authorization = oauth store fixed_now in
       let alice_state, _ =
-        Result.get_ok (begin_authorization authorization ~user:alice)
+        Option.value_exn
+          (Result.ok (begin_authorization authorization ~user:alice))
       in
       let bob_state, _ =
-        Result.get_ok (begin_authorization authorization ~user:bob)
+        Option.value_exn
+          (Result.ok (begin_authorization authorization ~user:bob))
       in
       Alcotest.(check string)
         "callback state binds alice"
         (User_id.to_string alice.User.id)
         (User_id.to_string
-           (Result.get_ok
-              (Withings_oauth.consume_callback_state authorization
-                 ~state:alice_state))
+           (Option.value_exn
+              (Result.ok
+                 (Withings_oauth.consume_callback_state authorization
+                    ~state:alice_state)))
              .User.id);
       Alcotest.(check bool)
         "callback replay rejected" true
@@ -89,12 +100,14 @@ let test_callback_state_is_bound_single_use_and_expires () =
         "callback state binds bob"
         (User_id.to_string bob.User.id)
         (User_id.to_string
-           (Result.get_ok
-              (Withings_oauth.consume_callback_state authorization
-                 ~state:bob_state))
+           (Option.value_exn
+              (Result.ok
+                 (Withings_oauth.consume_callback_state authorization
+                    ~state:bob_state)))
              .User.id);
       let expired_state, _ =
-        Result.get_ok (begin_authorization authorization ~user:alice)
+        Option.value_exn
+          (Result.ok (begin_authorization authorization ~user:alice))
       in
       Alcotest.(check bool)
         "expired callback state rejected" true
@@ -105,9 +118,10 @@ let test_callback_state_is_bound_single_use_and_expires () =
 let test_connection_status_is_user_scoped () =
   Test_support.with_two_users (fun store alice bob ->
       ignore
-        (Result.get_ok
-           (Test_support.ensure_withings_connection store ~user:alice
-              ~withings_user_id:"withings-alice"));
+        (Option.value_exn
+           (Result.ok
+              (Test_support.ensure_withings_connection store ~user:alice
+                 ~withings_user_id:"withings-alice")));
       let service = Service.make ~store in
       Alcotest.(check bool)
         "owner sees connection" true
@@ -118,6 +132,12 @@ let test_connection_status_is_user_scoped () =
         | Ok Withings_connection.Disconnected -> true
         | _ -> false))
 
+let test_authorization_expiry_is_fallible () =
+  Test_support.with_store (fun store user ->
+      Alcotest.(check bool)
+        "unrepresentable state expiry" true
+        (Result.is_error (begin_authorization (oauth store Ptime.max) ~user)))
+
 let () =
   Alcotest.run "withings OAuth"
     [
@@ -125,6 +145,8 @@ let () =
         [
           Alcotest.test_case "unique metrics-only state" `Quick
             test_states_are_unique_and_metrics_only;
+          Alcotest.test_case "expiry is fallible" `Quick
+            test_authorization_expiry_is_fallible;
           Alcotest.test_case "ownership, expiry, replay" `Quick
             test_state_is_owned_single_use_and_expires;
           Alcotest.test_case "callback binding, expiry, replay" `Quick

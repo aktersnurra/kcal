@@ -1,4 +1,8 @@
-let expires = Option.get (Ptime.of_float_s 1_800_000_000.)
+module Domain_error = Error
+open Base
+module Error = Domain_error
+
+let expires = Option.value_exn (Ptime.of_float_s 1_800_000_000.)
 
 let credentials token refresh =
   Withings.
@@ -28,17 +32,21 @@ let test_exchange_and_refresh_response_are_sanitized () =
            ~config:Withings.{ client_id = "id"; client_secret = "secret" })
   in
   let exchanged =
-    Result.get_ok
-      (Client.exchange_code
-         ~redirect_uri:"https://kcal.example.com/withings/callback" ~code:"code")
+    Option.value_exn
+      (Result.ok
+         (Client.exchange_code
+            ~redirect_uri:"https://kcal.example.com/withings/callback"
+            ~code:"code"))
   in
   Alcotest.(check string) "exchange token" "access" exchanged.access_token;
-  let refreshed = Result.get_ok (Client.refresh ~refresh_token:"refresh") in
+  let refreshed =
+    Option.value_exn (Result.ok (Client.refresh ~refresh_token:"refresh"))
+  in
   Alcotest.(check string) "refresh token" "refresh" refreshed.refresh_token;
   Alcotest.(check bool)
     "HTTPS only" true
     (List.for_all
-       (fun (uri, _) -> String.starts_with ~prefix:"https://" uri)
+       ~f:(fun (uri, _) -> String.is_prefix ~prefix:"https://" uri)
        !calls)
 
 let test_measurement_fixture_accepts_withings_numbers () =
@@ -53,8 +61,9 @@ let test_measurement_fixture_accepts_withings_numbers () =
            ~config:Withings.{ client_id = "id"; client_secret = "secret" })
   in
   match
-    Result.get_ok
-      (Client.get_measurements ~access_token:"token" ~lastupdate:None)
+    Option.value_exn
+      (Result.ok
+         (Client.get_measurements ~access_token:"token" ~lastupdate:None))
   with
   | { Withings.measurements = [ measurement ]; lastupdate = Some cursor } ->
       Alcotest.(check string) "numeric group id" "12345" measurement.group_id;
@@ -64,30 +73,38 @@ let test_measurement_fixture_accepts_withings_numbers () =
 let test_credentials_are_replaced_and_refresh_failure_marks_reauthorization () =
   Test_support.with_store (fun store user ->
       ignore
-        (Result.get_ok
-           (Test_support.ensure_withings_connection store ~user
-              ~withings_user_id:"withings-alice"));
-      let key = Result.get_ok (Secret.Key.of_bytes (Bytes.make 32 'k')) in
+        (Option.value_exn
+           (Result.ok
+              (Test_support.ensure_withings_connection store ~user
+                 ~withings_user_id:"withings-alice")));
+      let key =
+        Option.value_exn (Result.ok (Secret.Key.of_bytes (Bytes.make 32 'k')))
+      in
       ignore
-        (Result.get_ok
-           (Store_sqlite.replace_withings_connection store ~user ~key
-              (credentials "old-access" "old-refresh")));
+        (Option.value_exn
+           (Result.ok
+              (Store_sqlite.replace_withings_connection store ~user ~key
+                 (credentials "old-access" "old-refresh"))));
       let connection =
-        Result.get_ok
-          (Store_sqlite.replace_withings_connection store ~user ~key
-             (credentials "new-access" "new-refresh"))
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.replace_withings_connection store ~user ~key
+                (credentials "new-access" "new-refresh")))
       in
       let saved =
-        Result.get_ok
-          (Store_sqlite.withings_credentials store ~user ~connection ~key)
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.withings_credentials store ~user ~connection ~key))
       in
       Alcotest.(check string) "rotated access" "new-access" saved.access_token;
       Alcotest.(check string)
         "rotated refresh" "new-refresh" saved.refresh_token;
-      Result.get_ok
-        (Store_sqlite.mark_withings_reauthorization store ~user ~connection);
+      Option.value_exn
+        (Result.ok
+           (Store_sqlite.mark_withings_reauthorization store ~user ~connection));
       let status =
-        Result.get_ok (Store_sqlite.get_withings_status store ~user)
+        Option.value_exn
+          (Result.ok (Store_sqlite.get_withings_status store ~user))
       in
       Alcotest.(check bool)
         "reauthorization required" true
@@ -115,16 +132,17 @@ let test_exchange_code_sends_redirect_uri () =
            ~config:Withings.{ client_id = "id"; client_secret = "secret" })
   in
   ignore
-    (Result.get_ok
-       (Client.exchange_code
-          ~redirect_uri:"https://kcal.example.com/withings/callback"
-          ~code:"code"));
+    (Option.value_exn
+       (Result.ok
+          (Client.exchange_code
+             ~redirect_uri:"https://kcal.example.com/withings/callback"
+             ~code:"code")));
   match !calls with
   | [ fields ] ->
       Alcotest.(check (option string))
         "redirect_uri is posted"
         (Some "https://kcal.example.com/withings/callback")
-        (List.assoc_opt "redirect_uri" fields)
+        (List.Assoc.find fields ~equal:String.equal "redirect_uri")
   | _ -> Alcotest.fail "expected exactly one token request"
 
 let test_upstream_status_is_preserved_in_error () =
@@ -151,17 +169,36 @@ let test_upstream_status_is_preserved_in_error () =
   | Error _ -> Alcotest.fail "expected a structured API status"
 
 let test_transport_error_names_the_http_status () =
-  match Withings_transport.error_of_status `Bad_gateway with
-  | Error.Withings_failure (Http_status status) ->
+  let transport =
+    Withings_transport.For_testing.of_post (fun _ _ ->
+        (502, "secret upstream body"))
+  in
+  match transport.post_form ~uri:"https://example.test" ~fields:[] with
+  | Error (Error.Withings_failure (Http_status status)) ->
       Alcotest.(check int) "HTTP status" 502 status
   | _ -> Alcotest.fail "expected a structured HTTP status"
 
 let test_transport_error_names_the_exception () =
-  match Withings_transport.error_of_exn (Failure "connection reset") with
-  | Error.Withings_failure (Transport_failure message) ->
+  let transport =
+    Withings_transport.For_testing.of_post (fun _ _ ->
+        failwith "connection reset")
+  in
+  match transport.post_form ~uri:"https://example.test" ~fields:[] with
+  | Error (Error.Withings_failure (Transport_failure message)) ->
       Alcotest.(check string)
         "exception retained" {|Failure("connection reset")|} message
   | _ -> Alcotest.fail "expected a structured transport failure"
+
+let test_transport_preserves_cancellation_and_bugs () =
+  let cancelled = Eio.Cancel.Cancelled Stdlib.Exit in
+  List.iter
+    ~f:(fun exn ->
+      let transport =
+        Withings_transport.For_testing.of_post (fun _ _ -> raise exn)
+      in
+      Alcotest.check_raises "not swallowed" exn (fun () ->
+          ignore (transport.post_form ~uri:"https://example.test" ~fields:[])))
+    [ cancelled; Invalid_argument "programming bug" ]
 
 let test_complete_pagination () =
   let calls = ref [] in
@@ -171,7 +208,7 @@ let test_complete_pagination () =
         post_form =
           (fun ~uri:_ ~fields ->
             calls := fields :: !calls;
-            match List.assoc_opt "offset" fields with
+            match List.Assoc.find fields ~equal:String.equal "offset" with
             | None ->
                 Ok
                   {|{"status":0,"body":{"lastupdate":100,"more":1,"offset":42,"measuregrps":[]}}|}
@@ -188,14 +225,15 @@ let test_complete_pagination () =
            ~config:Withings.{ client_id = "id"; client_secret = "secret" })
   in
   ignore
-    (Result.get_ok
-       (Client.get_measurements ~access_token:"token" ~lastupdate:(Some 90L)));
+    (Option.value_exn
+       (Result.ok
+          (Client.get_measurements ~access_token:"token" ~lastupdate:(Some 90L))));
   Alcotest.(check int) "all pages fetched" 2 (List.length !calls);
   List.iter
-    (fun fields ->
+    ~f:(fun fields ->
       Alcotest.(check (option string))
         "original query watermark" (Some "90")
-        (List.assoc_opt "lastupdate" fields))
+        (List.Assoc.find fields ~equal:String.equal "lastupdate"))
     !calls
 
 let test_second_page_failure () =
@@ -204,7 +242,7 @@ let test_second_page_failure () =
       {
         post_form =
           (fun ~uri:_ ~fields ->
-            if List.mem_assoc "offset" fields then
+            if List.Assoc.mem fields ~equal:String.equal "offset" then
               Error (Error.Invalid_input "page two")
             else
               Ok
@@ -224,14 +262,14 @@ let test_second_page_failure () =
 
 let test_malformed_continuations () =
   List.iter
-    (fun fixture ->
+    ~f:(fun fixture ->
       let calls = ref 0 in
       let request =
         Withings.
           {
             post_form =
               (fun ~uri:_ ~fields:_ ->
-                incr calls;
+                Int.incr calls;
                 if !calls > 2 then
                   Error (Error.Withings_failure (Http_status 502))
                 else Ok fixture);
@@ -263,10 +301,11 @@ let test_credentials_use_injected_clock () =
     {|{"status":0,"body":{"access_token":"access","refresh_token":"refresh","expires_in":3600,"userid":"42"}}|}
   in
   let first =
-    Result.get_ok (Withings.credentials_of_response ~now:expires body)
+    Option.value_exn
+      (Result.ok (Withings.credentials_of_response ~now:expires body))
   in
   let second_now =
-    Option.get (Ptime.add_span expires (Ptime.Span.of_int_s 90))
+    Option.value_exn (Ptime.add_span expires (Ptime.Span.of_int_s 90))
   in
   let request = Withings.{ post_form = (fun ~uri:_ ~fields:_ -> Ok body) } in
   let module Client =
@@ -275,26 +314,29 @@ let test_credentials_use_injected_clock () =
            ~request
            ~config:Withings.{ client_id = "id"; client_secret = "secret" })
   in
-  let second = Result.get_ok (Client.refresh ~refresh_token:"refresh") in
+  let second =
+    Option.value_exn (Result.ok (Client.refresh ~refresh_token:"refresh"))
+  in
   Alcotest.(check bool)
     "pure expiry" true
     (Ptime.equal first.expires_at
-       (Option.get (Ptime.add_span expires (Ptime.Span.of_int_s 3600))));
+       (Option.value_exn (Ptime.add_span expires (Ptime.Span.of_int_s 3600))));
   Alcotest.(check bool)
     "injected client expiry" true
     (Ptime.equal second.expires_at
-       (Option.get (Ptime.add_span second_now (Ptime.Span.of_int_s 3600))))
+       (Option.value_exn (Ptime.add_span second_now (Ptime.Span.of_int_s 3600))))
 
 let test_final_page_raw_watermark () =
   List.iter
-    (fun (last_page, expected) ->
+    ~f:(fun (last_page, expected) ->
       let request =
         Withings.
           {
             post_form =
               (fun ~uri:_ ~fields ->
                 Ok
-                  (if List.mem_assoc "offset" fields then last_page
+                  (if List.Assoc.mem fields ~equal:String.equal "offset" then
+                     last_page
                    else
                      {|{"status":0,"body":{"more":1,"offset":42,"lastupdate":101,"measuregrps":[]}}|}));
           }
@@ -306,8 +348,10 @@ let test_final_page_raw_watermark () =
                ~config:Withings.{ client_id = "id"; client_secret = "secret" })
       in
       let batch =
-        Result.get_ok
-          (Client.get_measurements ~access_token:"token" ~lastupdate:(Some 100L))
+        Option.value_exn
+          (Result.ok
+             (Client.get_measurements ~access_token:"token"
+                ~lastupdate:(Some 100L)))
       in
       Alcotest.(check (option int64))
         "final page raw watermark" expected batch.lastupdate)
@@ -332,7 +376,7 @@ let test_structured_failures () =
     | Error (Error.Withings_failure (Api_status 401)) -> true
     | _ -> false);
   List.iter
-    (fun body ->
+    ~f:(fun body ->
       Alcotest.(check bool)
         "malformed response variant" true
         (match Withings.measurements_of_response body with
@@ -365,19 +409,24 @@ let test_structured_failures () =
 
 let test_failed_relink_preserves_connection () =
   Test_support.with_store (fun store user ->
-      let key = Result.get_ok (Secret.Key.of_bytes (Bytes.make 32 'k')) in
-      ignore
-        (Result.get_ok
-           (Test_support.ensure_withings_connection store ~user
-              ~withings_user_id:"withings-alice"));
-      let old =
-        Result.get_ok
-          (Store_sqlite.replace_withings_connection store ~user ~key
-             (credentials "old" "old-refresh"))
+      let key =
+        Option.value_exn (Result.ok (Secret.Key.of_bytes (Bytes.make 32 'k')))
       in
-      Result.get_ok
-        (Store_sqlite.persist_withings_import store ~user ~connection:old
-           ~rows:[] ~expected_cursor:None ~cursor:(Some 42L));
+      ignore
+        (Option.value_exn
+           (Result.ok
+              (Test_support.ensure_withings_connection store ~user
+                 ~withings_user_id:"withings-alice")));
+      let old =
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.replace_withings_connection store ~user ~key
+                (credentials "old" "old-refresh")))
+      in
+      Option.value_exn
+        (Result.ok
+           (Store_sqlite.persist_withings_import store ~user ~connection:old
+              ~rows:[] ~expected_cursor:None ~cursor:(Some 42L)));
       ignore
         (Sqlite3.exec
            (Store_sqlite.For_testing.raw_database store)
@@ -396,16 +445,18 @@ let test_failed_relink_preserves_connection () =
            (Store_sqlite.replace_withings_connection store ~user ~key
               replacement));
       let _, current =
-        Result.get_ok
-          (Store_sqlite.withings_connection_for_identity store
-             ~withings_user_id:"withings-alice")
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.withings_connection_for_identity store
+                ~withings_user_id:"withings-alice"))
       in
       Alcotest.(check (option int64))
         "cursor unchanged" (Some 42L) current.sync_cursor;
       let saved =
-        Result.get_ok
-          (Store_sqlite.withings_credentials store ~user ~connection:current
-             ~key)
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.withings_credentials store ~user ~connection:current
+                ~key))
       in
       Alcotest.(check string) "access unchanged" "old" saved.access_token;
       Alcotest.(check string)
@@ -413,11 +464,14 @@ let test_failed_relink_preserves_connection () =
 
 let test_refresh_scoped_to_expected_account () =
   Test_support.with_store (fun store user ->
-      let key = Result.get_ok (Secret.Key.of_bytes (Bytes.make 32 'k')) in
+      let key =
+        Option.value_exn (Result.ok (Secret.Key.of_bytes (Bytes.make 32 'k')))
+      in
       let old =
-        Result.get_ok
-          (Store_sqlite.replace_withings_connection store ~user ~key
-             (credentials "old" "old-refresh"))
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.replace_withings_connection store ~user ~key
+                (credentials "old" "old-refresh")))
       in
       let replacement =
         Withings.
@@ -427,8 +481,10 @@ let test_refresh_scoped_to_expected_account () =
           }
       in
       let current =
-        Result.get_ok
-          (Store_sqlite.replace_withings_connection store ~user ~key replacement)
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.replace_withings_connection store ~user ~key
+                replacement))
       in
       Alcotest.(check bool)
         "stale refresh rejected" true
@@ -442,9 +498,10 @@ let test_refresh_scoped_to_expected_account () =
            (Store_sqlite.mark_withings_reauthorization store ~user
               ~connection:old));
       let saved =
-        Result.get_ok
-          (Store_sqlite.withings_credentials store ~user ~connection:current
-             ~key)
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.withings_credentials store ~user ~connection:current
+                ~key))
       in
       Alcotest.(check string)
         "new identity" "replacement" saved.withings_user_id;
@@ -461,15 +518,17 @@ let test_disconnected_and_incomplete_status () =
         | Ok Withings_connection.Disconnected -> true
         | _ -> false);
       List.iter
-        (fun assignment ->
+        ~f:(fun assignment ->
           ignore
-            (Result.get_ok
-               (Test_support.ensure_withings_connection store ~user
-                  ~withings_user_id:"withings-alice"));
-          Result.get_ok
-            (Migration.For_testing.execute
-               (Store_sqlite.For_testing.raw_database store)
-               ("UPDATE withings_connections SET " ^ assignment));
+            (Option.value_exn
+               (Result.ok
+                  (Test_support.ensure_withings_connection store ~user
+                     ~withings_user_id:"withings-alice")));
+          Option.value_exn
+            (Result.ok
+               (Migration.For_testing.execute
+                  (Store_sqlite.For_testing.raw_database store)
+                  ("UPDATE withings_connections SET " ^ assignment)));
           Alcotest.(check bool)
             "incomplete durable row is a decoding error" true
             (match Service.withings_status service ~user with
@@ -524,5 +583,7 @@ let () =
             test_transport_error_names_the_http_status;
           Alcotest.test_case "transport error names exception" `Quick
             test_transport_error_names_the_exception;
+          Alcotest.test_case "transport preserves cancellation and bugs" `Quick
+            test_transport_preserves_cancellation_and_bugs;
         ] );
     ]

@@ -1,5 +1,9 @@
-let now = Option.get (Ptime.of_float_s 1_800_000_000.)
-let key = Result.get_ok (Secret.Key.of_bytes (Bytes.make 32 'k'))
+module Domain_error = Error
+open Base
+module Error = Domain_error
+
+let now = Option.value_exn (Ptime.of_float_s 1_800_000_000.)
+let key = Option.value_exn (Result.ok (Secret.Key.of_bytes (Bytes.make 32 'k')))
 
 let measurement ?(value = 80000L) ?(date = 1_700_000_000L) group_id =
   Withings.{ group_id; measured_at = date; measure_type = 1; value; unit_ = -3 }
@@ -7,22 +11,25 @@ let measurement ?(value = 80000L) ?(date = 1_700_000_000L) group_id =
 let with_setup measurements f =
   Test_support.with_store (fun store user ->
       ignore
-        (Result.get_ok
-           (Test_support.ensure_withings_connection store ~user
-              ~withings_user_id:"upstream-alice"));
+        (Option.value_exn
+           (Result.ok
+              (Test_support.ensure_withings_connection store ~user
+                 ~withings_user_id:"upstream-alice")));
       let credentials =
         Withings.
           {
             access_token = "access";
             refresh_token = "refresh";
             expires_at =
-              Option.get (Ptime.add_span now (Ptime.Span.of_int_s 3600));
+              Option.value_exn (Ptime.add_span now (Ptime.Span.of_int_s 3600));
             withings_user_id = "upstream-alice";
           }
       in
       let connection =
-        Result.get_ok
-          (Store_sqlite.replace_withings_connection store ~user ~key credentials)
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.replace_withings_connection store ~user ~key
+                credentials))
       in
       let module Client = struct
         let exchange_code ~redirect_uri:_ ~code:_ =
@@ -43,7 +50,7 @@ let sync_cursor store =
       (Store_sqlite.For_testing.raw_database store)
       "SELECT sync_cursor FROM withings_connections"
   in
-  Fun.protect
+  Stdlib.Fun.protect
     ~finally:(fun () -> ignore (Sqlite3.finalize statement))
     (fun () ->
       match Sqlite3.step statement with
@@ -56,23 +63,25 @@ let test_normalizes_deduplicates_and_advances_cursor () =
   with_setup
     [ measurement "one"; measurement "one"; measurement ~value:75000L "two" ]
     (fun store user connection client ->
-      Result.get_ok
-        (Withings_sync.sync
-           (Withings_sync.make ~store ~client ~token_key:key ~now:(fun () ->
-                now))
-           ~user ~connection);
+      Option.value_exn
+        (Result.ok
+           (Withings_sync.sync
+              (Withings_sync.make ~store ~client ~token_key:key ~now:(fun () ->
+                   now))
+              ~user ~connection));
       let rows =
-        Result.get_ok
-          (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None
-             ~limit:10)
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None
+                ~limit:10))
       in
       Alcotest.(check int) "deduplicated" 2 (List.length rows);
       Alcotest.(check (float 0.0001))
-        "kg normalization" 80.0 (List.hd rows).weight_kg;
+        "kg normalization" 80.0 (List.hd_exn rows).weight_kg;
       Alcotest.(check string)
         "imported provenance" "withings"
-        (Weigh_in.source_to_string (List.hd rows).source);
-      (match (List.hd rows).source with
+        (Weigh_in.source_to_string (List.hd_exn rows).source);
+      (match (List.hd_exn rows).source with
       | Weigh_in.Manual -> Alcotest.fail "expected imported identity"
       | Withings identity ->
           Alcotest.(check string)
@@ -101,20 +110,23 @@ let test_upstream_change_preserves_timestamp_and_tombstone () =
              ~now:(fun () -> now))
           ~user ~connection
       in
-      Result.get_ok (sync [ measurement "one" ]);
+      Option.value_exn (Result.ok (sync [ measurement "one" ]));
       let original =
-        List.hd
-          (Result.get_ok
-             (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None
-                ~limit:10))
+        List.hd_exn
+          (Option.value_exn
+             (Result.ok
+                (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None
+                   ~limit:10)))
       in
-      Result.get_ok
-        (sync [ measurement ~value:81000L ~date:1_700_000_100L "one" ]);
+      Option.value_exn
+        (Result.ok
+           (sync [ measurement ~value:81000L ~date:1_700_000_100L "one" ]));
       let changed =
-        List.hd
-          (Result.get_ok
-             (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None
-                ~limit:10))
+        List.hd_exn
+          (Option.value_exn
+             (Result.ok
+                (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None
+                   ~limit:10)))
       in
       Alcotest.(check (float 0.0001))
         "upstream value updated" 81.0 changed.weight_kg;
@@ -122,30 +134,35 @@ let test_upstream_change_preserves_timestamp_and_tombstone () =
         "timestamp preserved"
         (Time.to_utc_string original.measured_at)
         (Time.to_utc_string changed.measured_at);
-      Result.get_ok (Store_sqlite.delete_weigh_in store ~user changed.id);
-      Result.get_ok (sync [ measurement ~value:82000L "one" ]);
+      Option.value_exn
+        (Result.ok (Store_sqlite.delete_weigh_in store ~user changed.id));
+      Option.value_exn (Result.ok (sync [ measurement ~value:82000L "one" ]));
       Alcotest.(check int)
         "tombstone retained" 0
         (List.length
-           (Result.get_ok
-              (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None
-                 ~limit:10))))
+           (Option.value_exn
+              (Result.ok
+                 (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None
+                    ~limit:10)))))
 
 let test_relink_different_account_resets_cursor () =
   with_setup [] (fun store user connection _ ->
-      Result.get_ok
-        (Test_support.persist_withings_import_raw store ~user ~connection
-           ~rows:[] ~cursor:(Some 100L));
+      Option.value_exn
+        (Result.ok
+           (Test_support.persist_withings_import_raw store ~user ~connection
+              ~rows:[] ~cursor:(Some 100L)));
       ignore
-        (Result.get_ok
-           (Test_support.ensure_withings_connection store ~user
-              ~withings_user_id:"upstream-alice"));
+        (Option.value_exn
+           (Result.ok
+              (Test_support.ensure_withings_connection store ~user
+                 ~withings_user_id:"upstream-alice")));
       Alcotest.(check (option int64))
         "same account retains cursor" (Some 100L) (sync_cursor store);
       ignore
-        (Result.get_ok
-           (Test_support.ensure_withings_connection store ~user
-              ~withings_user_id:"upstream-bob"));
+        (Option.value_exn
+           (Result.ok
+              (Test_support.ensure_withings_connection store ~user
+                 ~withings_user_id:"upstream-bob")));
       Alcotest.(check (option int64))
         "different account starts from beginning" None (sync_cursor store))
 
@@ -159,39 +176,46 @@ let test_reconnect_same_account_updates_import () =
             weight_kg = 80.0;
           }
       in
-      Result.get_ok
-        (Test_support.persist_withings_import_raw store ~user ~connection
-           ~rows:[ original ] ~cursor:(Some 100L));
-      Result.get_ok (Store_sqlite.delete_withings_connection store ~user);
+      Option.value_exn
+        (Result.ok
+           (Test_support.persist_withings_import_raw store ~user ~connection
+              ~rows:[ original ] ~cursor:(Some 100L)));
+      Option.value_exn
+        (Result.ok (Store_sqlite.delete_withings_connection store ~user));
       let replacement =
-        Result.get_ok
-          (Test_support.ensure_withings_connection store ~user
-             ~withings_user_id:"upstream-alice")
+        Option.value_exn
+          (Result.ok
+             (Test_support.ensure_withings_connection store ~user
+                ~withings_user_id:"upstream-alice"))
       in
       let corrected = Weigh_in.{ original with weight_kg = 81.0 } in
-      Result.get_ok
-        (Test_support.persist_withings_import_raw store ~user
-           ~connection:replacement ~rows:[ corrected ] ~cursor:(Some 101L));
+      Option.value_exn
+        (Result.ok
+           (Test_support.persist_withings_import_raw store ~user
+              ~connection:replacement ~rows:[ corrected ] ~cursor:(Some 101L)));
       let rows =
-        Result.get_ok
-          (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None
-             ~limit:10)
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None
+                ~limit:10))
       in
       Alcotest.(check int) "no duplicate" 1 (List.length rows);
       Alcotest.(check (float 0.0001))
-        "corrected weight" 81.0 (List.hd rows).weight_kg;
+        "corrected weight" 81.0 (List.hd_exn rows).weight_kg;
       let statement =
         Sqlite3.prepare
           (Store_sqlite.For_testing.raw_database store)
           "SELECT withings_connection_id FROM weigh_ins WHERE external_id = \
            'upstream-alice:one'"
       in
-      Fun.protect
+      Stdlib.Fun.protect
         ~finally:(fun () -> ignore (Sqlite3.finalize statement))
         (fun () ->
           Alcotest.(check bool)
             "import exists" true
-            (Sqlite3.step statement = Sqlite3.Rc.ROW);
+            (match Sqlite3.step statement with
+            | Sqlite3.Rc.ROW -> true
+            | _ -> false);
           Alcotest.(check string)
             "new connection owns import" replacement.id
             (Sqlite3.column_text statement 0)))
@@ -229,18 +253,21 @@ let test_stale_batch_cannot_regress_value_or_cursor () =
             weight_kg = 80.0;
           }
       in
-      Result.get_ok
-        (Test_support.persist_withings_import_raw store ~user ~connection
-           ~rows:[ current ] ~cursor:(Some 100L));
+      Option.value_exn
+        (Result.ok
+           (Test_support.persist_withings_import_raw store ~user ~connection
+              ~rows:[ current ] ~cursor:(Some 100L)));
       let stale = Weigh_in.{ current with weight_kg = 70.0 } in
-      Result.get_ok
-        (Test_support.persist_withings_import_raw store ~user ~connection
-           ~rows:[ stale ] ~cursor:(Some 99L));
+      Option.value_exn
+        (Result.ok
+           (Test_support.persist_withings_import_raw store ~user ~connection
+              ~rows:[ stale ] ~cursor:(Some 99L)));
       let weight =
-        List.hd
-          (Result.get_ok
-             (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None
-                ~limit:10))
+        List.hd_exn
+          (Option.value_exn
+             (Result.ok
+                (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None
+                   ~limit:10)))
       in
       Alcotest.(check (float 0.0001))
         "value is not regressed" 80.0 weight.weight_kg;
@@ -263,10 +290,12 @@ let test_refresh_failure_requires_reauthorization () =
               ~client:(module Fake)
               ~token_key:key
               ~now:(fun () ->
-                Ptime.add_span now (Ptime.Span.of_int_s 7200) |> Option.get))
+                Ptime.add_span now (Ptime.Span.of_int_s 7200)
+                |> Option.value_exn))
            ~user ~connection);
       let status =
-        Result.get_ok (Store_sqlite.get_withings_status store ~user)
+        Option.value_exn
+          (Result.ok (Store_sqlite.get_withings_status store ~user))
       in
       Alcotest.(check bool)
         "reauthorization" true
@@ -292,10 +321,12 @@ let test_transient_refresh_failure_does_not_require_reauthorization () =
                  ~client:(module Fake)
                  ~token_key:key
                  ~now:(fun () ->
-                   Ptime.add_span now (Ptime.Span.of_int_s 7200) |> Option.get))
+                   Ptime.add_span now (Ptime.Span.of_int_s 7200)
+                   |> Option.value_exn))
               ~user ~connection));
       let status =
-        Result.get_ok (Store_sqlite.get_withings_status store ~user)
+        Option.value_exn
+          (Result.ok (Store_sqlite.get_withings_status store ~user))
       in
       Alcotest.(check bool)
         "transient failure retains authorization" false
@@ -320,12 +351,14 @@ let test_refresh_race_with_account_replacement () =
         let refresh ~refresh_token:_ =
           let raw = Store_sqlite.For_testing.raw_database store in
           (* A network boundary must be outside every database transaction. *)
-          Result.get_ok
-            (Migration.For_testing.execute raw "BEGIN IMMEDIATE; ROLLBACK");
+          Option.value_exn
+            (Result.ok
+               (Migration.For_testing.execute raw "BEGIN IMMEDIATE; ROLLBACK"));
           ignore
-            (Result.get_ok
-               (Service.connect_withings (Service.make ~store) ~user ~key
-                  replacement));
+            (Option.value_exn
+               (Result.ok
+                  (Service.connect_withings (Service.make ~store) ~user ~key
+                     replacement)));
           Ok
             Withings.
               {
@@ -339,20 +372,22 @@ let test_refresh_race_with_account_replacement () =
           ~client:(module Fake)
           ~token_key:key
           ~now:(fun () ->
-            Option.get (Ptime.add_span now (Ptime.Span.of_int_s 7200)))
+            Option.value_exn (Ptime.add_span now (Ptime.Span.of_int_s 7200)))
       in
       Alcotest.(check bool)
         "stale refresh fails through sync" true
         (Result.is_error (Withings_sync.sync sync ~user ~connection));
       let _, current =
-        Result.get_ok
-          (Store_sqlite.withings_connection_for_identity store
-             ~withings_user_id:"replacement")
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.withings_connection_for_identity store
+                ~withings_user_id:"replacement"))
       in
       let saved =
-        Result.get_ok
-          (Store_sqlite.withings_credentials store ~user ~connection:current
-             ~key)
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.withings_credentials store ~user ~connection:current
+                ~key))
       in
       Alcotest.(check string)
         "replacement token preserved" "new" saved.access_token;
@@ -366,13 +401,16 @@ let test_import_does_not_repair_corrupt_weight () =
       let sync =
         Withings_sync.make ~store ~client ~token_key:key ~now:(fun () -> now)
       in
-      Result.get_ok (Withings_sync.sync sync ~user ~connection);
+      Option.value_exn (Result.ok (Withings_sync.sync sync ~user ~connection));
       Alcotest.(check bool)
-        "inject infinity" true
-        (Sqlite3.exec
-           (Store_sqlite.For_testing.raw_database store)
-           "UPDATE weigh_ins SET weight_kg = 1e309"
-        = Sqlite3.Rc.OK);
+        "inject Float.infinity" true
+        (match
+           Sqlite3.exec
+             (Store_sqlite.For_testing.raw_database store)
+             "UPDATE weigh_ins SET weight_kg = 1e309"
+         with
+        | Sqlite3.Rc.OK -> true
+        | _ -> false);
       Alcotest.(check bool)
         "corrupt correction rejected" true
         (match Withings_sync.sync sync ~user ~connection with
@@ -382,30 +420,33 @@ let test_import_does_not_repair_corrupt_weight () =
       ignore
         (Sqlite3.exec
            (Store_sqlite.For_testing.raw_database store)
-           ~cb:(fun row _ -> weight := float_of_string (Option.get row.(0)))
+           ~cb:(fun row _ ->
+             weight := Float.of_string (Option.value_exn row.(0)))
            "SELECT weight_kg FROM weigh_ins");
       Alcotest.(check bool)
-        "original corrupt value untouched" true
-        (Float.is_infinite !weight);
+        "original corrupt value untouched" true (Float.is_inf !weight);
       Alcotest.(check (option int64))
         "cursor unchanged" (Some 77L) (sync_cursor store))
 
 let test_full_sync_rejects_stale_watermark () =
   with_setup [] (fun store user connection _ ->
-      Result.get_ok
-        (Test_support.persist_withings_import_raw store ~user ~connection
-           ~rows:
-             [
-               Weigh_in.
-                 {
-                   external_id = "upstream-alice:one";
-                   measured_at = now;
-                   weight_kg = 80.0;
-                 };
-             ]
-           ~cursor:(Some 100L));
+      Option.value_exn
+        (Result.ok
+           (Test_support.persist_withings_import_raw store ~user ~connection
+              ~rows:
+                [
+                  Weigh_in.
+                    {
+                      external_id = "upstream-alice:one";
+                      measured_at = now;
+                      weight_kg = 80.0;
+                    };
+                ]
+              ~cursor:(Some 100L)));
       let _, connection =
-        List.hd (Result.get_ok (Store_sqlite.withings_connections store))
+        List.hd_exn
+          (Option.value_exn
+             (Result.ok (Store_sqlite.withings_connections store)))
       in
       let request =
         Withings.
@@ -414,7 +455,7 @@ let test_full_sync_rejects_stale_watermark () =
               (fun ~uri:_ ~fields ->
                 Alcotest.(check (option string))
                   "fetch uses stored cursor" (Some "100")
-                  (List.assoc_opt "lastupdate" fields);
+                  (List.Assoc.find fields ~equal:String.equal "lastupdate");
                 Ok
                   {|{"status":0,"body":{"lastupdate":99,"more":0,"measuregrps":[{"grpid":"one","date":1700000000,"measures":[{"type":1,"value":70000,"unit":-3}]}]}}|});
           }
@@ -425,16 +466,18 @@ let test_full_sync_rejects_stale_watermark () =
           ~request
           ~config:Withings.{ client_id = "id"; client_secret = "secret" }
       in
-      Result.get_ok
-        (Withings_sync.sync
-           (Withings_sync.make ~store ~client ~token_key:key ~now:(fun () ->
-                now))
-           ~user ~connection);
+      Option.value_exn
+        (Result.ok
+           (Withings_sync.sync
+              (Withings_sync.make ~store ~client ~token_key:key ~now:(fun () ->
+                   now))
+              ~user ~connection));
       let row =
-        List.hd
-          (Result.get_ok
-             (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None
-                ~limit:10))
+        List.hd_exn
+          (Option.value_exn
+             (Result.ok
+                (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None
+                   ~limit:10)))
       in
       Alcotest.(check (float 0.0001))
         "stale full sync retains weight" 80.0 row.weight_kg;
@@ -458,7 +501,7 @@ let batch_json ?(more = `Int 0) ?(offset = `Null) cursor measurements =
                ( "measuregrps",
                  `List
                    (List.map
-                      (fun (m : Withings.measurement) ->
+                      ~f:(fun (m : Withings.measurement) ->
                         `Assoc
                           [
                             ("grpid", `String m.group_id);
@@ -502,15 +545,17 @@ let store_batch store user connection cursor weight =
           };
       ]
     ~cursor
-  |> Result.get_ok
+  |> fun result -> Option.value_exn (Result.ok result)
 
 let check_state store user cursor weight =
   let rows =
-    Result.get_ok
-      (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None ~limit:10)
+    Option.value_exn
+      (Result.ok
+         (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None
+            ~limit:10))
   in
   Alcotest.(check (float 0.0001))
-    "stored weight" weight (List.hd rows).weight_kg;
+    "stored weight" weight (List.hd_exn rows).weight_kg;
   Alcotest.(check (option int64)) "stored cursor" cursor (sync_cursor store)
 
 let test_missing_watermark_race () =
@@ -528,7 +573,7 @@ let test_missing_watermark_race () =
                 Ok (batch_json None [ measurement ~value:70000L "one" ]));
           }
       in
-      Result.get_ok (sync_request store user connection request);
+      Option.value_exn (Result.ok (sync_request store user connection request));
       check_state store user (Some 101L) 81.0)
 
 let test_missing_watermark_baseline_and_equal_correction () =
@@ -538,7 +583,7 @@ let test_missing_watermark_baseline_and_equal_correction () =
         Test_support.connection_with_cursor connection (Some 100L)
       in
       List.iter
-        (fun (cursor, value, weight) ->
+        ~f:(fun (cursor, value, weight) ->
           let request =
             Withings.
               {
@@ -547,7 +592,8 @@ let test_missing_watermark_baseline_and_equal_correction () =
                     Ok (batch_json cursor [ measurement ~value "one" ]));
               }
           in
-          Result.get_ok (sync_request store user connection request);
+          Option.value_exn
+            (Result.ok (sync_request store user connection request));
           check_state store user (Some 100L) weight)
         [ (None, 81000L, 81.0); (Some 100L, 82000L, 82.0) ])
 
@@ -563,7 +609,7 @@ let test_page_two_failure_does_not_persist () =
           {
             post_form =
               (fun ~uri:_ ~fields:_ ->
-                incr calls;
+                Int.incr calls;
                 if !calls = 1 then
                   Ok
                     (batch_json ~more:(`Int 1) ~offset:(`Int 42) (Some 101L)
@@ -589,9 +635,10 @@ let test_account_identity_checked_with_missing_watermark () =
             post_form =
               (fun ~uri:_ ~fields:_ ->
                 ignore
-                  (Result.get_ok
-                     (Test_support.ensure_withings_connection store ~user
-                        ~withings_user_id:"replacement"));
+                  (Option.value_exn
+                     (Result.ok
+                        (Test_support.ensure_withings_connection store ~user
+                           ~withings_user_id:"replacement")));
                 Ok (batch_json None [ measurement ~value:70000L "one" ]));
           }
       in
@@ -602,7 +649,7 @@ let test_account_identity_checked_with_missing_watermark () =
 
 let test_import_requires_account_and_group () =
   List.iter
-    (fun external_id ->
+    ~f:(fun external_id ->
       Alcotest.(check bool)
         "incomplete imported identity rejected" true
         (Result.is_error
@@ -612,14 +659,14 @@ let test_import_requires_account_and_group () =
 
 let draw_observations tc step =
   let count = Hegel.draw tc (Hegel.integers ~min_value:0 ~max_value:8 ()) in
-  List.init count (fun group ->
+  List.init count ~f:(fun group ->
       let value =
         Int64.of_int (Hegel.draw tc (Hegel.integers ~min_value:1 ()))
       in
       measurement ~value
         ~date:(Int64.of_int (1_700_000_000 + (step * 100) + group))
-        (string_of_int group))
-  |> List.concat_map (fun observation ->
+        (Int.to_string group))
+  |> List.concat_map ~f:(fun observation ->
       if Hegel.draw tc (Hegel.booleans ()) then [ observation; observation ]
       else [ observation ])
 
@@ -633,8 +680,8 @@ let draw_partition tc observations =
             (Hegel.integers ~min_value:1 ~max_value:(List.length observations)
                ())
         in
-        let page, rest = Base.List.split_n observations count in
-        if Base.List.is_empty rest then [ page ] else page :: partition rest
+        let page, rest = List.split_n observations count in
+        if List.is_empty rest then [ page ] else page :: partition rest
   in
   partition observations
 
@@ -646,16 +693,16 @@ let request_pages ~cursor ~baseline ?fail_at pages =
         post_form =
           (fun ~uri:_ ~fields ->
             let index =
-              match List.assoc_opt "offset" fields with
+              match List.Assoc.find fields ~equal:String.equal "offset" with
               | None -> 0
-              | Some value -> int_of_string value / 7
+              | Some value -> Int.of_string value / 7
             in
             Alcotest.(check int) "continuation order" !calls index;
             Alcotest.(check (option string))
               "fetch baseline unchanged"
-              (Option.map Int64.to_string baseline)
-              (List.assoc_opt "lastupdate" fields);
-            incr calls;
+              (Option.map ~f:Int64.to_string baseline)
+              (List.Assoc.find fields ~equal:String.equal "lastupdate");
+            Int.incr calls;
             if Option.equal Int.equal fail_at (Some index) then
               Error (Error.Withings_failure (Http_status 502))
             else
@@ -663,20 +710,21 @@ let request_pages ~cursor ~baseline ?fail_at pages =
                 (batch_json
                    ~more:(`Int (if index + 1 = List.length pages then 0 else 1))
                    ~offset:(`Int ((index + 1) * 7))
-                   cursor (List.nth pages index)));
+                   cursor (List.nth_exn pages index)));
       }
   in
   (request, calls)
 
 let visible_map store user =
-  Result.get_ok
-    (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None ~limit:100)
-  |> List.fold_left
-       (fun rows (row : Weigh_in.t) ->
-         Base.Map.set rows
-           ~key:(Option.get row.external_id)
+  Option.value_exn
+    (Result.ok
+       (Store_sqlite.query_weigh_ins store ~user ~from:None ~to_:None ~limit:100))
+  |> List.fold
+       ~f:(fun rows (row : Weigh_in.t) ->
+         Map.set rows
+           ~key:(Option.value_exn row.external_id)
            ~data:(row.weight_kg, row.measured_at))
-       (Base.Map.empty (module Base.String))
+       ~init:(Map.empty (module String))
 
 let%hegel_test page_partition_equivalence tc =
   let observations = draw_observations tc 0 in
@@ -684,7 +732,7 @@ let%hegel_test page_partition_equivalence tc =
   let cursor = Some (Int64.of_int (Hegel.draw tc (Hegel.integers ()))) in
   with_setup [] (fun store user connection _ ->
       let request, calls = request_pages ~cursor ~baseline:None pages in
-      Result.get_ok (sync_request store user connection request);
+      Option.value_exn (Result.ok (sync_request store user connection request));
       Alcotest.(check int)
         "all generated pages fetched" (List.length pages) !calls;
       let partitioned = visible_map store user in
@@ -692,11 +740,12 @@ let%hegel_test page_partition_equivalence tc =
           let request, _ =
             request_pages ~cursor ~baseline:None [ observations ]
           in
-          Result.get_ok
-            (sync_request whole_store whole_user whole_connection request);
+          Option.value_exn
+            (Result.ok
+               (sync_request whole_store whole_user whole_connection request));
           let whole = visible_map whole_store whole_user in
           assert (
-            Base.Map.equal
+            Map.equal
               (fun (a, at) (b, bt) -> Float.equal a b && Ptime.equal at bt)
               whole partitioned);
           assert (
@@ -722,7 +771,7 @@ let%hegel_test paginated_failure_is_atomic tc =
       assert (Result.is_error (sync_request store user connection request));
       Alcotest.(check int) "requests stop at failing page" (fail_at + 1) !calls;
       assert (
-        Base.Map.equal
+        Map.equal
           (fun (a, at) (b, bt) -> Float.equal a b && Ptime.equal at bt)
           before (visible_map store user));
       Alcotest.(check (option int64))
@@ -734,7 +783,7 @@ let%hegel_test paginated_failure_is_atomic tc =
 let%hegel_test sync_state_matches_map_and_cursor_model tc =
   let steps = Hegel.draw tc (Hegel.integers ~min_value:1 ~max_value:20 ()) in
   with_setup [] (fun store user connection _ ->
-      let model = ref (Base.Map.empty (module Base.String)) in
+      let model = ref (Map.empty (module Base.String)) in
       let revision = ref (-1) in
       for step = 0 to steps - 1 do
         let observations = draw_observations tc step in
@@ -750,14 +799,15 @@ let%hegel_test sync_state_matches_map_and_cursor_model tc =
           else
             Some (Hegel.draw tc (Hegel.integers ~min_value:0 ~max_value:10 ()))
         in
-        let cursor = Option.map Int64.of_int received in
+        let cursor = Option.map ~f:Int64.of_int received in
         let request, _ =
           request_pages ~cursor ~baseline (draw_partition tc observations)
         in
-        Result.get_ok
-          (sync_request store user
-             (Test_support.connection_with_cursor connection baseline)
-             request);
+        Option.value_exn
+          (Result.ok
+             (sync_request store user
+                (Test_support.connection_with_cursor connection baseline)
+                request));
         let accepted =
           match received with
           | None -> baseline_revision = !revision
@@ -765,27 +815,28 @@ let%hegel_test sync_state_matches_map_and_cursor_model tc =
         in
         if accepted then (
           List.iter
-            (fun (m : Withings.measurement) ->
+            ~f:(fun (m : Withings.measurement) ->
               let id = "upstream-alice:" ^ m.group_id in
               let at =
-                match Base.Map.find !model id with
+                match Map.find !model id with
                 | Some (_, at) -> at
                 | None ->
-                    Option.get (Ptime.of_float_s (Int64.to_float m.measured_at))
+                    Option.value_exn
+                      (Ptime.of_float_s (Int64.to_float m.measured_at))
               in
               model :=
-                Base.Map.set !model ~key:id
+                Map.set !model ~key:id
                   ~data:(Int64.to_float m.value /. 1000., at))
             observations;
-          Option.iter (fun next -> revision := next) received);
+          Option.iter ~f:(fun next -> revision := next) received);
         let actual = visible_map store user in
         assert (
-          Base.Map.equal
+          Map.equal
             (fun (expected, at) (weight, bt) ->
               (* Independent division versus multiplication by 10^-3 can
                  round differently; allow four floating-point roundoffs. *)
-              Float.abs (expected -. weight)
-              <= 4. *. Float.epsilon *. Float.abs expected
+              Float.(
+                abs (expected -. weight) <= 4. *. epsilon_float *. abs expected)
               && Ptime.equal at bt)
             !model actual);
         let expected_cursor =
@@ -814,7 +865,7 @@ type lifecycle_observation = {
 type lifecycle_model = {
   link : lifecycle_link option;
   observations :
-    (string, lifecycle_observation, Base.String.comparator_witness) Base.Map.t;
+    (string, lifecycle_observation, String.comparator_witness) Map.t;
   snapshots : Withings_connection.connected list;
   sequence : int;
 }
@@ -834,9 +885,10 @@ let%hegel_test connection_import_lifecycle_model tc =
       in
       let current identity =
         snd
-          (Result.get_ok
-             (Store_sqlite.withings_connection_for_identity store
-                ~withings_user_id:identity))
+          (Option.value_exn
+             (Result.ok
+                (Store_sqlite.withings_connection_for_identity store
+                   ~withings_user_id:identity)))
       in
       let history () =
         let statement =
@@ -845,7 +897,7 @@ let%hegel_test connection_import_lifecycle_model tc =
              external_id,id,weight_kg,deleted_at,measured_at,created_at,withings_connection_id \
              FROM weigh_ins ORDER BY external_id"
         in
-        Fun.protect
+        Stdlib.Fun.protect
           ~finally:(fun () -> ignore (Sqlite3.finalize statement))
           (fun () ->
             let rec rows acc =
@@ -865,14 +917,16 @@ let%hegel_test connection_import_lifecycle_model tc =
                          else Some (Sqlite3.column_text statement 6));
                     }
                   in
-                  rows (Base.Map.set acc ~key:external_id ~data:row)
+                  rows (Map.set acc ~key:external_id ~data:row)
               | _ -> failwith "history query failed"
             in
-            rows (Base.Map.empty (module Base.String)))
+            rows (Map.empty (module Base.String)))
       in
       let invariant model =
         (match
-           (model.link, Result.get_ok (Service.withings_status service ~user))
+           ( model.link,
+             Option.value_exn
+               (Result.ok (Service.withings_status service ~user)) )
          with
         | None, Withings_connection.Disconnected -> ()
         | Some expected, Connected connection ->
@@ -883,17 +937,18 @@ let%hegel_test connection_import_lifecycle_model tc =
             assert (
               Option.equal Int64.equal expected.cursor connection.sync_cursor);
             let saved =
-              Result.get_ok
-                (Store_sqlite.withings_credentials store ~user ~connection ~key)
+              Option.value_exn
+                (Result.ok
+                   (Store_sqlite.withings_credentials store ~user ~connection
+                      ~key))
             in
             assert (String.equal saved.access_token expected.access);
             assert (String.equal saved.refresh_token expected.refresh)
         | _ -> failwith "connection differs from independent model");
         let actual = history () in
-        assert (Base.Map.length actual = Base.Map.length model.observations);
-        Base.Map.iteri model.observations
-          ~f:(fun ~key:external_id ~data:expected ->
-            let found = Base.Map.find_exn actual external_id in
+        assert (Map.length actual = Map.length model.observations);
+        Map.iteri model.observations ~f:(fun ~key:external_id ~data:expected ->
+            let found = Map.find_exn actual external_id in
             assert (Float.equal expected.weight found.weight);
             assert (Bool.equal expected.deleted found.deleted);
             assert (String.equal expected.observation_id found.observation_id);
@@ -901,9 +956,13 @@ let%hegel_test connection_import_lifecycle_model tc =
             assert (String.equal expected.created found.created);
             assert (Option.equal String.equal expected.linkage found.linkage));
         let statement = Sqlite3.prepare raw "PRAGMA foreign_key_check" in
-        Fun.protect
+        Stdlib.Fun.protect
           ~finally:(fun () -> ignore (Sqlite3.finalize statement))
-          (fun () -> assert (Sqlite3.step statement = Sqlite3.Rc.DONE))
+          (fun () ->
+            assert (
+              match Sqlite3.step statement with
+              | Sqlite3.Rc.DONE -> true
+              | _ -> false))
       in
       let rule ~name ~step =
         Hegel.Stateful.Rule.create ~name
@@ -915,12 +974,13 @@ let%hegel_test connection_import_lifecycle_model tc =
             let identity =
               if Hegel.draw tc (Hegel.booleans ()) then "a" else "b"
             in
-            let access = "access-" ^ string_of_int model.sequence in
-            let refresh = "refresh-" ^ string_of_int model.sequence in
+            let access = "access-" ^ Int.to_string model.sequence in
+            let refresh = "refresh-" ^ Int.to_string model.sequence in
             let connection =
-              Result.get_ok
-                (Service.connect_withings service ~user ~key
-                   (credentials identity access refresh))
+              Option.value_exn
+                (Result.ok
+                   (Service.connect_withings service ~user ~key
+                      (credentials identity access refresh)))
             in
             let cursor =
               match model.link with
@@ -944,18 +1004,20 @@ let%hegel_test connection_import_lifecycle_model tc =
       in
       let failed_relink =
         rule ~name:"failed_relink_is_atomic" ~step:(fun _tc model ->
-            Result.get_ok
-              (Migration.For_testing.execute raw
-                 "CREATE TRIGGER fail_relink BEFORE UPDATE ON \
-                  withings_connections BEGIN SELECT RAISE(ABORT,'injected'); \
-                  END; CREATE TRIGGER fail_first_link BEFORE INSERT ON \
-                  withings_connections BEGIN SELECT RAISE(ABORT,'injected'); \
-                  END");
-            Fun.protect
+            Option.value_exn
+              (Result.ok
+                 (Migration.For_testing.execute raw
+                    "CREATE TRIGGER fail_relink BEFORE UPDATE ON \
+                     withings_connections BEGIN SELECT \
+                     RAISE(ABORT,'injected'); END; CREATE TRIGGER \
+                     fail_first_link BEFORE INSERT ON withings_connections \
+                     BEGIN SELECT RAISE(ABORT,'injected'); END"));
+            Stdlib.Fun.protect
               ~finally:(fun () ->
-                Result.get_ok
-                  (Migration.For_testing.execute raw
-                     "DROP TRIGGER fail_relink; DROP TRIGGER fail_first_link"))
+                Option.value_exn
+                  (Result.ok
+                     (Migration.For_testing.execute raw
+                        "DROP TRIGGER fail_relink; DROP TRIGGER fail_first_link")))
               (fun () ->
                 assert (
                   Result.is_error
@@ -965,42 +1027,45 @@ let%hegel_test connection_import_lifecycle_model tc =
       in
       let disconnect =
         rule ~name:"disconnect_preserves_history" ~step:(fun _tc model ->
-            Result.get_ok (Service.disconnect_withings service ~user);
+            Option.value_exn
+              (Result.ok (Service.disconnect_withings service ~user));
             {
               model with
               link = None;
               observations =
-                Base.Map.map model.observations ~f:(fun row ->
+                Map.map model.observations ~f:(fun row ->
                     { row with linkage = None });
             })
       in
       let import =
         rule ~name:"import_and_tombstone_corrections" ~step:(fun tc model ->
             Hegel.assume tc (Option.is_some model.link);
-            let link = Option.get model.link in
+            let link = Option.value_exn model.link in
             let connection = current link.identity in
             let group =
-              string_of_int
+              Int.to_string
                 (Hegel.draw tc (Hegel.integers ~min_value:0 ~max_value:3 ()))
             in
             let external_id = link.identity ^ ":" ^ group in
             let weight =
-              float_of_int
+              Float.of_int
                 (Hegel.draw tc (Hegel.integers ~min_value:1 ~max_value:200 ()))
             in
             let cursor =
               Hegel.draw tc
                 (Hegel.optional (Hegel.integers ~min_value:0 ~max_value:10 ()))
-              |> Option.map Int64.of_int
+              |> Option.map ~f:Int64.of_int
             in
-            Result.get_ok
-              (Test_support.persist_withings_import_raw store ~user ~connection
-                 ~rows:
-                   [
-                     Weigh_in.
-                       { external_id; measured_at = now; weight_kg = weight };
-                   ]
-                 ~cursor);
+            Option.value_exn
+              (Result.ok
+                 (Test_support.persist_withings_import_raw store ~user
+                    ~connection
+                    ~rows:
+                      [
+                        Weigh_in.
+                          { external_id; measured_at = now; weight_kg = weight };
+                      ]
+                    ~cursor));
             let accepted =
               match (cursor, link.cursor) with
               | Some received, Some stored -> Int64.compare received stored >= 0
@@ -1009,17 +1074,17 @@ let%hegel_test connection_import_lifecycle_model tc =
             if not accepted then model
             else
               let observations =
-                match Base.Map.find model.observations external_id with
+                match Map.find model.observations external_id with
                 | Some old when old.deleted -> model.observations
                 | Some old ->
-                    Base.Map.set model.observations ~key:external_id
+                    Map.set model.observations ~key:external_id
                       ~data:
                         { old with weight; linkage = Some link.connection_id }
                 | None ->
-                    let observed = Base.Map.find_exn (history ()) external_id in
+                    let observed = Map.find_exn (history ()) external_id in
                     (* IDs and creation time are generated by SQLite's caller; the model
                    captures them once, then requires stability across transitions. *)
-                    Base.Map.set model.observations ~key:external_id
+                    Map.set model.observations ~key:external_id
                       ~data:
                         {
                           observed with
@@ -1046,19 +1111,22 @@ let%hegel_test connection_import_lifecycle_model tc =
       let delete =
         rule ~name:"delete_import_leaves_tombstone" ~step:(fun tc model ->
             let visible =
-              Base.Map.to_alist model.observations
-              |> List.filter (fun (_, row) -> not row.deleted)
+              Map.to_alist model.observations
+              |> List.filter ~f:(fun (_, row) -> not row.deleted)
             in
             Hegel.assume tc (not (List.is_empty visible));
             let external_id, row =
               Hegel.draw_silent tc (Hegel.sampled_from visible)
             in
-            let id = Option.get (Weigh_in_id.of_string row.observation_id) in
-            Result.get_ok (Store_sqlite.delete_weigh_in store ~user id);
+            let id =
+              Option.value_exn (Weigh_in_id.of_string row.observation_id)
+            in
+            Option.value_exn
+              (Result.ok (Store_sqlite.delete_weigh_in store ~user id));
             {
               model with
               observations =
-                Base.Map.set model.observations ~key:external_id
+                Map.set model.observations ~key:external_id
                   ~data:{ row with deleted = true };
             })
       in
@@ -1071,8 +1139,8 @@ let%hegel_test connection_import_lifecycle_model tc =
             let identity =
               Withings_connection.Account.to_string connection.account
             in
-            let access = "refreshed-" ^ string_of_int model.sequence in
-            let refresh = "rotated-" ^ string_of_int model.sequence in
+            let access = "refreshed-" ^ Int.to_string model.sequence in
+            let refresh = "rotated-" ^ Int.to_string model.sequence in
             let result =
               Store_sqlite.refresh_withings_credentials store ~user ~connection
                 ~key
@@ -1082,7 +1150,7 @@ let%hegel_test connection_import_lifecycle_model tc =
             | Some link
               when String.equal link.identity identity
                    && String.equal link.connection_id connection.id ->
-                ignore (Result.get_ok result);
+                ignore (Option.value_exn (Result.ok result));
                 {
                   model with
                   link = Some { link with access; refresh };
@@ -1113,7 +1181,7 @@ let%hegel_test connection_import_lifecycle_model tc =
           (ref
              {
                link = None;
-               observations = Base.Map.empty (module Base.String);
+               observations = Map.empty (module Base.String);
                snapshots = [];
                sequence = 0;
              }))

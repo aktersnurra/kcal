@@ -1,6 +1,6 @@
 (data_only_dirs migrations)
 
-; Warning 70 is staged only until Task 6 seals all library interfaces.
+; Library interfaces are enforced by lib/dune; entry points and tests have no public API.
 
 (env
  (dev

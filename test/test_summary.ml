@@ -1,33 +1,42 @@
+module Domain_error = Error
+open Base
+module Error = Domain_error
+
 let daily_series_ok zone range ~meals ~weigh_ins =
-  Result.get_ok (Summary.daily_series zone range ~meals ~weigh_ins)
+  Option.value_exn
+    (Result.ok (Summary.daily_series zone range ~meals ~weigh_ins))
 
 let summarise_ok ?calorie_target ?protein_target zone range ~meals ~weigh_ins =
-  Result.get_ok
-    (Summary.summarise ?calorie_target ?protein_target zone range ~meals
-       ~weigh_ins)
+  Option.value_exn
+    (Result.ok
+       (Summary.summarise ?calorie_target ?protein_target zone range ~meals
+          ~weigh_ins))
 
-let time value = Result.get_ok (Time.parse_offset_datetime value)
-let zone value = Result.get_ok (Time.parse_zone value)
-let date value = Result.get_ok (Date.of_string value)
+let time value = Option.value_exn (Result.ok (Time.parse_offset_datetime value))
+let zone value = Option.value_exn (Result.ok (Time.parse_zone value))
+let date value = Option.value_exn (Result.ok (Date.of_string value))
 let stockholm = zone "Europe/Stockholm"
 
 let meal ?(protein_g = 10.0) ?carbs_g ?fat_g at calories_kcal : Meal.t =
   let at = time at in
-  Result.get_ok
-    (Meal.of_storage ~id:(Meal_id.fresh ()) ~user_id:(User_id.fresh ())
-       ~eaten_at:at ~description:"m" ~calories_kcal ~protein_g ~carbs_g ~fat_g
-       ~confidence:None ~estimate_source:None ~notes:None ~created_at:at
-       ~updated_at:at ~deleted_at:None)
+  Option.value_exn
+    (Result.ok
+       (Meal.of_storage ~id:(Meal_id.fresh ()) ~user_id:(User_id.fresh ())
+          ~eaten_at:at ~description:"m" ~calories_kcal ~protein_g ~carbs_g
+          ~fat_g ~confidence:None ~estimate_source:None ~notes:None
+          ~created_at:at ~updated_at:at ~deleted_at:None))
 
 let weigh_in at weight_kg : Weigh_in.t =
   let at = time at in
-  Result.get_ok
-    (Weigh_in.of_storage ~id:(Weigh_in_id.fresh ()) ~user_id:(User_id.fresh ())
-       ~measured_at:at ~weight_kg ~source:Weigh_in.Manual ~created_at:at
-       ~updated_at:at ~deleted_at:None)
+  Option.value_exn
+    (Result.ok
+       (Weigh_in.of_storage ~id:(Weigh_in_id.fresh ())
+          ~user_id:(User_id.fresh ()) ~measured_at:at ~weight_kg
+          ~source:Weigh_in.Manual ~created_at:at ~updated_at:at ~deleted_at:None))
 
 let range first last =
-  Result.get_ok (Date_range.make ~first:(date first) ~last:(date last))
+  Option.value_exn
+    (Result.ok (Date_range.make ~first:(date first) ~last:(date last)))
 
 let check_float msg expected actual =
   Alcotest.(check (float 1e-6)) msg expected actual
@@ -78,7 +87,9 @@ let test_zone_offsets () =
 
 let test_local_day_bounds () =
   let bounds zone value =
-    let start, stop = Result.get_ok (Time.local_day_bounds zone (date value)) in
+    let start, stop =
+      Option.value_exn (Result.ok (Time.local_day_bounds zone (date value)))
+    in
     (utc_string start, utc_string stop)
   in
   Alcotest.(check (pair string string))
@@ -115,7 +126,7 @@ let test_date_range () =
   Alcotest.(check (list string))
     "inclusive"
     [ "2026-02-27"; "2026-02-28"; "2026-03-01" ]
-    (List.map Date.to_string
+    (List.map ~f:Date.to_string
        (Date_range.dates (range "2026-02-27" "2026-03-01")));
   Alcotest.(check bool)
     "reversed named" true
@@ -137,8 +148,9 @@ let test_date_range () =
         true
     | _ -> false);
   let start, stop =
-    Result.get_ok
-      (Date_range.utc_bounds stockholm (range "2026-07-14" "2026-07-15"))
+    Option.value_exn
+      (Result.ok
+         (Date_range.utc_bounds stockholm (range "2026-07-14" "2026-07-15")))
   in
   Alcotest.(check (pair string string))
     "exact utc bounds"
@@ -146,7 +158,7 @@ let test_date_range () =
     (utc_string start, utc_string stop)
 
 let calories (day : Summary.day) =
-  Option.map (fun (totals : Meal.totals) -> totals.calories_kcal) day.meals
+  Option.map ~f:(fun (totals : Meal.totals) -> totals.calories_kcal) day.meals
 
 (* 23:30 UTC on the 14th is 01:30 on the 15th in Stockholm summer time. *)
 let test_late_meal_lands_on_the_local_day () =
@@ -158,10 +170,10 @@ let test_late_meal_lands_on_the_local_day () =
   in
   Alcotest.(check (list (option int)))
     "utc" [ Some 400; Some 600 ]
-    (List.map calories (series Time.utc));
+    (List.map ~f:calories (series Time.utc));
   Alcotest.(check (list (option int)))
     "stockholm" [ None; Some 1000 ]
-    (List.map calories (series stockholm))
+    (List.map ~f:calories (series stockholm))
 
 let test_series_carries_daily_weight () =
   let weigh_ins =
@@ -178,9 +190,9 @@ let test_series_carries_daily_weight () =
   in
   let weights =
     List.map
-      (fun (day : Summary.day) ->
+      ~f:(fun (day : Summary.day) ->
         Option.map
-          (fun (w : Summary.daily_weight) ->
+          ~f:(fun (w : Summary.daily_weight) ->
             (w.weigh_in_count, w.mean_weight_kg))
           day.weight)
       series
@@ -190,8 +202,11 @@ let test_series_carries_daily_weight () =
     [ Some (2, 80.5); None ]
     weights
 
-let calorie_target value = Result.get_ok (Summary.Calorie_target.of_kcal value)
-let protein_target value = Result.get_ok (Summary.Protein_target.of_g value)
+let calorie_target value =
+  Option.value_exn (Result.ok (Summary.Calorie_target.of_kcal value))
+
+let protein_target value =
+  Option.value_exn (Result.ok (Summary.Protein_target.of_g value))
 
 let test_intake_ignores_unlogged_days_and_counts_targets () =
   let meals =
@@ -207,19 +222,19 @@ let test_intake_ignores_unlogged_days_and_counts_targets () =
       ~meals ~weigh_ins:[]
   in
   Alcotest.(check int) "days" 3 summary.day_count;
-  let logged = Option.get summary.logged_intake in
+  let logged = Option.value_exn summary.logged_intake in
   Alcotest.(check int) "logged" 2 logged.logged_day_count;
   check_float "avg kcal" 2200.0 logged.avg_calories_kcal;
   check_float "avg protein" 125.0 logged.avg_protein_g;
   Alcotest.(check (option int))
     "under" (Some 1)
     (Option.map
-       (fun (r : _ Summary.target_result) -> r.days_met)
+       ~f:(fun (r : _ Summary.target_result) -> r.days_met)
        summary.calorie_target);
   Alcotest.(check (option int))
     "protein" (Some 1)
     (Option.map
-       (fun (r : _ Summary.target_result) -> r.days_met)
+       ~f:(fun (r : _ Summary.target_result) -> r.days_met)
        summary.protein_target);
   Alcotest.(check bool)
     "nonpositive targets rejected" true
@@ -307,11 +322,11 @@ let test_weight_trend_and_maintenance () =
 let test_rejects_nonfinite_target () =
   Alcotest.(check bool)
     "infinite target rejected" true
-    (Result.is_error (Summary.Protein_target.of_g infinity))
+    (Result.is_error (Summary.Protein_target.of_g Float.infinity))
 
 let test_calorie_total_does_not_wrap () =
   let meals =
-    [ meal "2026-07-14T10:00:00Z" max_int; meal "2026-07-14T10:00:00Z" 1 ]
+    [ meal "2026-07-14T10:00:00Z" Int.max_value; meal "2026-07-14T10:00:00Z" 1 ]
   in
   Alcotest.(check bool)
     "typed overflow" true
@@ -335,7 +350,7 @@ let test_calorie_total_does_not_wrap () =
 let%hegel_test checked_calorie_totals tc =
   let a = Hegel.draw tc (Hegel.integers ~min_value:0 ()) in
   let b = Hegel.draw tc (Hegel.integers ~min_value:0 ()) in
-  let expected = Int64.add (Int64.of_int a) (Int64.of_int b) in
+  let expected = Int64.( + ) (Int64.of_int a) (Int64.of_int b) in
   let meals =
     [ meal "2026-07-14T10:00:00Z" a; meal "2026-07-14T10:00:00Z" b ]
   in
@@ -345,15 +360,15 @@ let%hegel_test checked_calorie_totals tc =
       ~meals ~weigh_ins:[]
   with
   | Error (Error.Numeric_overflow Calories_kcal) ->
-      assert (Int64.compare expected (Int64.of_int max_int) > 0)
+      assert (Int64.compare expected (Int64.of_int Int.max_value) > 0)
   | Ok [ day ] ->
       assert (
         Option.equal Int64.equal (Some expected)
-          (Option.map Int64.of_int (calories day)))
+          (Option.map ~f:Int64.of_int (calories day)))
   | _ -> assert false
 
 let test_checked_float_totals_and_stable_means () =
-  let maximum = Float.max_float in
+  let maximum = Float.max_finite_value in
   let at = "2026-07-14T10:00:00Z" in
   let meals = [ meal ~protein_g:maximum at 0; meal ~protein_g:maximum at 0 ] in
   Alcotest.(check bool)
@@ -376,7 +391,7 @@ let test_checked_float_totals_and_stable_means () =
   in
   Alcotest.(check bool)
     "representable mean avoids sum overflow" true
-    (Float.equal maximum (Option.get summary.logged_intake).avg_protein_g);
+    (Float.equal maximum (Option.value_exn summary.logged_intake).avg_protein_g);
   let weigh_ins = [ weigh_in at maximum; weigh_in at maximum ] in
   let series =
     daily_series_ok Time.utc
@@ -386,7 +401,8 @@ let test_checked_float_totals_and_stable_means () =
   Alcotest.(check bool)
     "mean weight avoids sum overflow" true
     (match series with
-    | [ day ] -> Float.equal maximum (Option.get day.weight).mean_weight_kg
+    | [ day ] ->
+        Float.equal maximum (Option.value_exn day.weight).mean_weight_kg
     | _ -> false);
   let weigh_ins =
     [ weigh_in at maximum; weigh_in "2026-07-15T10:00:00Z" 1.0 ]
@@ -432,7 +448,7 @@ let%hegel_test checked_protein_totals tc =
   | Ok [ day ] ->
       assert (
         Float.is_finite expected
-        && Float.equal expected (Option.get day.meals).protein_g)
+        && Float.equal expected (Option.value_exn day.meals).protein_g)
   | _ -> assert false
 
 let%hegel_test checked_optional_macro_totals_preserve_unknown tc =
@@ -448,11 +464,11 @@ let%hegel_test checked_optional_macro_totals_preserve_unknown tc =
   let meals =
     [ meal ?carbs_g:a ?fat_g:b at 0; meal ?carbs_g:b ?fat_g:a at 0 ]
   in
-  let present = List.filter_map Fun.id [ a; b ] in
+  let present = List.filter_map ~f:Fn.id [ a; b ] in
   let expected =
     match present with
     | [] -> None
-    | values -> Some (List.fold_left ( +. ) 0.0 values)
+    | values -> Some (List.fold values ~init:0.0 ~f:( +. ))
   in
   match
     Summary.daily_series Time.utc
@@ -461,11 +477,11 @@ let%hegel_test checked_optional_macro_totals_preserve_unknown tc =
   with
   | Error (Error.Unrepresentable_result Daily_meals) ->
       assert (
-        Option.fold ~none:false
-          ~some:(fun n -> not (Float.is_finite n))
+        Option.value_map ~default:false
+          ~f:(fun n -> not (Float.is_finite n))
           expected)
   | Ok [ day ] ->
-      let totals = Option.get day.meals in
+      let totals = Option.value_exn day.meals in
       assert (Option.equal Float.equal expected totals.carbs_g);
       assert (Option.equal Float.equal expected totals.fat_g)
   | _ -> assert false
@@ -546,7 +562,7 @@ module Calendar_properties = struct
     let zone =
       ok
         (Time.parse_zone
-           (Printf.sprintf "%c%02d:%02d"
+           (Stdlib.Printf.sprintf "%c%02d:%02d"
               (if minutes < 0 then '-' else '+')
               (Int.abs minutes / 60)
               (Int.abs minutes % 60)))
@@ -677,7 +693,8 @@ module Calendar_properties = struct
                   in
                   actual_offset = offset
                   && String.equal
-                       (Printf.sprintf "%04d-%02d-%02d" year month day_of_month)
+                       (Stdlib.Printf.sprintf "%04d-%02d-%02d" year month
+                          day_of_month)
                        (Date.to_string day.date))
             in
             assert (
@@ -705,11 +722,14 @@ module Calendar_properties = struct
   let%hegel_test eu_transitions_match_gregorian_weekday_oracle tc =
     let year = Hegel.draw tc (Hegel.integers ~min_value:0 ~max_value:9999 ()) in
     let month = if Hegel.draw tc (Hegel.booleans ()) then 3 else 10 in
-    let last = ok (Date.of_string (Printf.sprintf "%04d-%02d-31" year month)) in
+    let last =
+      ok (Date.of_string (Stdlib.Printf.sprintf "%04d-%02d-31" year month))
+    in
     (* Gregorian 0000-01-01 was Saturday: Sunday has index 0 here. *)
     let day = 31 - ((Calendar.ordinal last + 6) % 7) in
     let date =
-      ok (Date.of_string (Printf.sprintf "%04d-%02d-%02d" year month day))
+      ok
+        (Date.of_string (Stdlib.Printf.sprintf "%04d-%02d-%02d" year month day))
     in
     let transition =
       Option.value_exn (Ptime.of_date_time ((year, month, day), ((1, 0, 0), 0)))

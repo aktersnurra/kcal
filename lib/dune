@@ -31,3 +31,10 @@
   (with-stdout-to
    %{target}
    (run %{exe:../tools/embed_migrations.exe} %{deps}))))
+
+; Executable/test modules have no exported API; every library module must.
+
+(env
+ (dev
+  (flags
+   (:standard -w @70))))

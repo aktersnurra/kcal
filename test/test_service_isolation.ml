@@ -1,10 +1,15 @@
+module Domain_error = Error
+open Base
+module Error = Domain_error
+
 let test_service_hides_foreign_meal () =
   Test_support.with_two_users (fun store alice bob ->
       let service = Service.make ~store in
       let meal =
-        Result.get_ok
-          (Test_support.record_meal_raw service ~user:alice
-             (Test_support.meal_input ()))
+        Option.value_exn
+          (Result.ok
+             (Test_support.record_meal_raw service ~user:alice
+                (Test_support.meal_input ())))
       in
       Alcotest.(check bool)
         "not found" true
@@ -16,9 +21,10 @@ let test_service_records_for_authenticated_user () =
   Test_support.with_two_users (fun store alice _ ->
       let service = Service.make ~store in
       let meal =
-        Result.get_ok
-          (Test_support.record_meal_raw service ~user:alice
-             (Test_support.meal_input ()))
+        Option.value_exn
+          (Result.ok
+             (Test_support.record_meal_raw service ~user:alice
+                (Test_support.meal_input ())))
       in
       Alcotest.(check string)
         "owner"

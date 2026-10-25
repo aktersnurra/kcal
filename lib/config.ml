@@ -1,3 +1,7 @@
+module Domain_error = Error
+open Base
+module Error = Domain_error
+
 type t = {
   database_path : string;
   listen_address : string;
@@ -10,8 +14,8 @@ type t = {
 }
 
 let required name =
-  match Sys.getenv_opt name with
-  | Some value when String.trim value <> "" -> Ok value
+  match Stdlib.Sys.getenv_opt name with
+  | Some value when not (String.equal (String.strip value) "") -> Ok value
   | _ -> Error (Error.Invalid_input "missing required configuration")
 
 let encryption_key () =
@@ -20,9 +24,12 @@ let encryption_key () =
       try
         Secret.Key.of_bytes
           (Bytes.of_string
-             (String.init 32 (fun i ->
-                  Char.chr (int_of_string ("0x" ^ String.sub value (i * 2) 2)))))
-      with _ -> Error (Error.Invalid_input "invalid encryption key"))
+             (String.init 32 ~f:(fun i ->
+                  Char.of_int_exn
+                    (Int.of_string
+                       ("0x" ^ String.sub value ~pos:(i * 2) ~len:2)))))
+      with Failure _ | Invalid_argument _ ->
+        Error (Error.Invalid_input "invalid encryption key"))
   | _ -> Error (Error.Invalid_input "invalid encryption key")
 
 let load_from_environment () =

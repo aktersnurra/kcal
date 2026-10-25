@@ -1,3 +1,5 @@
+open Base
+
 exception Fixture_failure
 
 let check_closed store =
@@ -22,7 +24,7 @@ let test_exception fixture () =
       fixture (fun store ->
           captured := Some store;
           raise Fixture_failure));
-  check_closed (Option.get !captured)
+  check_closed (Option.value_exn !captured)
 
 let one f = Test_support.with_store (fun store _ -> f store)
 

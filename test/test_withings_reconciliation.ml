@@ -1,49 +1,58 @@
-let key = Result.get_ok (Secret.Key.of_bytes (Bytes.make 32 'k'))
-let now = Option.get (Ptime.of_float_s 1_800_000_000.)
+module Domain_error = Error
+open Base
+module Error = Domain_error
+
+let key = Option.value_exn (Result.ok (Secret.Key.of_bytes (Bytes.make 32 'k')))
+let now = Option.value_exn (Ptime.of_float_s 1_800_000_000.)
 
 let connected store user identity =
   ignore
-    (Result.get_ok
-       (Test_support.ensure_withings_connection store ~user
-          ~withings_user_id:identity));
-  Result.get_ok
-    (Store_sqlite.replace_withings_connection store ~user ~key
-       Withings.
-         {
-           access_token = "access";
-           refresh_token = "refresh";
-           expires_at = now;
-           withings_user_id = identity;
-         })
+    (Option.value_exn
+       (Result.ok
+          (Test_support.ensure_withings_connection store ~user
+             ~withings_user_id:identity)));
+  Option.value_exn
+    (Result.ok
+       (Store_sqlite.replace_withings_connection store ~user ~key
+          Withings.
+            {
+              access_token = "access";
+              refresh_token = "refresh";
+              expires_at = now;
+              withings_user_id = identity;
+            }))
 
 let test_reconciles_each_connected_user () =
   Test_support.with_store (fun store first ->
       let second =
-        Result.get_ok
-          (Store_sqlite.resolve_user store ~issuer:"issuer" ~subject:"second")
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.resolve_user store ~issuer:"issuer" ~subject:"second"))
       in
       let first_connection = connected store first "upstream-first" in
       let second_connection = connected store second "upstream-second" in
       let seen = ref [] in
-      Result.get_ok
-        (Withings_reconciliation.sync_all ~store ~sync:(fun ~user ~connection ->
-             seen :=
-               ( User_id.to_string user.User.id,
-                 connection.Withings_connection.id )
-               :: !seen;
-             Ok ()));
+      Option.value_exn
+        (Result.ok
+           (Withings_reconciliation.sync_all ~store
+              ~sync:(fun ~user ~connection ->
+                seen :=
+                  ( User_id.to_string user.User.id,
+                    connection.Withings_connection.id )
+                  :: !seen;
+                Ok ())));
       Alcotest.(check int) "independent connections" 2 (List.length !seen);
       Alcotest.(check bool)
         "first connection" true
         (List.exists
-           (fun (user_id, connection_id) ->
+           ~f:(fun (user_id, connection_id) ->
              String.equal user_id (User_id.to_string first.User.id)
              && String.equal connection_id first_connection.id)
            !seen);
       Alcotest.(check bool)
         "second connection" true
         (List.exists
-           (fun (user_id, connection_id) ->
+           ~f:(fun (user_id, connection_id) ->
              String.equal user_id (User_id.to_string second.User.id)
              && String.equal connection_id second_connection.id)
            !seen))
@@ -51,8 +60,9 @@ let test_reconciles_each_connected_user () =
 let test_continues_after_first_sync_failure () =
   Test_support.with_store (fun store first ->
       let second =
-        Result.get_ok
-          (Store_sqlite.resolve_user store ~issuer:"issuer" ~subject:"second")
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.resolve_user store ~issuer:"issuer" ~subject:"second"))
       in
       ignore (connected store first "upstream-first");
       ignore (connected store second "upstream-second");

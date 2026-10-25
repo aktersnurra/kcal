@@ -1,5 +1,7 @@
+open Base
+
 let pp_level ppf level =
-  Format.pp_print_string ppf
+  Stdlib.Format.pp_print_string ppf
     (match level with
     | Logs.App -> "APP"
     | Logs.Error -> "ERROR"
@@ -16,20 +18,30 @@ let timestamp () =
    timestamp and the emitting source name, which the default reporters omit. *)
 let reporter =
   let report src level ~over k msgf =
-    let k _ = over (); k () in
+    let k _ =
+      over ();
+      k ()
+    in
     msgf (fun ?header ?tags fmt ->
         ignore tags;
-        let header = match header with Some header -> header | None -> Format.asprintf "%a" pp_level level in
-        Format.kfprintf k Format.err_formatter
-          ("%s %s [%s] @[" ^^ fmt ^^ "@]@.")
+        let header =
+          match header with
+          | Some header -> header
+          | None -> Stdlib.Format.asprintf "%a" pp_level level
+        in
+        Stdlib.Format.kfprintf k Stdlib.Format.err_formatter
+          Stdlib.("%s %s [%s] @[" ^^ fmt ^^ "@]@.")
           (timestamp ()) header (Logs.Src.name src))
   in
   { Logs.report }
 
 let level_of_env ~default =
-  match Sys.getenv_opt "KCAL_LOG_LEVEL" with
+  match Stdlib.Sys.getenv_opt "KCAL_LOG_LEVEL" with
   | None -> default
-  | Some value -> ( match Logs.level_of_string value with Ok level -> level | Error (`Msg _) -> default)
+  | Some value -> (
+      match Logs.level_of_string value with
+      | Ok level -> level
+      | Error (`Msg _) -> default)
 
 let setup () =
   Logs.set_reporter reporter;

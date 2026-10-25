@@ -1,3 +1,5 @@
+open Base
+
 let auth store scopes =
   let claims =
     Oidc.
@@ -5,7 +7,7 @@ let auth store scopes =
         issuer = "https://issuer.example";
         subject = "alice";
         audience = [ "kcal-client" ];
-        expires_at = Option.get (Ptime.of_float_s 2_000_000_000.);
+        expires_at = Option.value_exn (Ptime.of_float_s 2_000_000_000.);
         scopes;
       }
   in
@@ -74,10 +76,11 @@ let test_unconfigured_protected_resource_is_not_found () =
           .status)
 
 let challenge response =
-  List.assoc_opt "www-authenticate"
+  List.Assoc.find
     (List.map
-       (fun (k, v) -> (String.lowercase_ascii k, v))
+       ~f:(fun (k, v) -> (String.lowercase k, v))
        response.Http_adapter.headers)
+    ~equal:String.equal "www-authenticate"
 
 let protected_request store ?(headers = []) () =
   Http_adapter.handle ~protected_resource ~auth:(auth store [])
@@ -117,7 +120,8 @@ let test_health_and_unauthenticated_mcp () =
 let test_http_response_has_fixed_length () =
   Test_support.with_store (fun store _ ->
       let response =
-        Http_adapter.framed_response (request store `GET "/health" "")
+        Http_adapter.For_testing.framed_response
+          (request store `GET "/health" "")
       in
       Alcotest.(check (option string))
         "content length" (Some "15")
@@ -182,7 +186,7 @@ let nonfinite_request tool arguments table () =
         ]
       in
       let body =
-        Printf.sprintf
+        Stdlib.Printf.sprintf
           {|{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"%s","arguments":%s}}|}
           tool arguments
       in
@@ -204,7 +208,7 @@ let nonfinite_request tool arguments table () =
       let rc =
         Sqlite3.exec
           (Store_sqlite.For_testing.raw_database store)
-          ~cb:(fun row _ -> count := int_of_string (Option.get row.(0)))
+          ~cb:(fun row _ -> count := Int.of_string (Option.value_exn row.(0)))
           ("SELECT count(*) FROM " ^ table)
       in
       Alcotest.(check bool)
@@ -215,7 +219,7 @@ let nonfinite_request tool arguments table () =
         if String.equal table "meals" then "query_meals" else "query_weights"
       in
       let read =
-        Printf.sprintf
+        Stdlib.Printf.sprintf
           {|{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"%s","arguments":{}}}|}
           read_tool
       in
@@ -241,7 +245,7 @@ let test_overflow_reaches_http_as_tool_error () =
       in
       let call name arguments =
         let body =
-          Printf.sprintf
+          Stdlib.Printf.sprintf
             {|{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"%s","arguments":%s}}|}
             name arguments
         in
@@ -255,10 +259,10 @@ let test_overflow_reaches_http_as_tool_error () =
       in
       let open Yojson.Safe.Util in
       List.iter
-        (fun calories ->
+        ~f:(fun calories ->
           let response =
             call "record_meal"
-              (Printf.sprintf
+              (Stdlib.Printf.sprintf
                  {|{"description":"large","calories_kcal":%d,"protein_g":1,"eaten_at":"2026-07-14T10:00:00Z"}|}
                  calories)
           in
@@ -275,9 +279,9 @@ let test_overflow_reaches_http_as_tool_error () =
             "integer calories preserved on the wire" calories
             (response |> member "result" |> member "structuredContent"
            |> member "calories_kcal" |> to_int))
-        [ max_int; 1 ];
+        [ Int.max_value; 1 ];
       List.iter
-        (fun name ->
+        ~f:(fun name ->
           let arguments =
             if String.equal name "get_daily_totals" then
               {|{"date":"2026-07-14"}|}
@@ -294,7 +298,7 @@ let test_overflow_reaches_http_as_tool_error () =
 let test_calendar_endpoint_http date timezone () =
   Test_support.with_store (fun store _ ->
       let body =
-        Printf.sprintf
+        Stdlib.Printf.sprintf
           {|{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_daily_totals","arguments":{"date":"%s","timezone":"%s"}}}|}
           date timezone
       in
@@ -314,12 +318,19 @@ let test_calendar_endpoint_http date timezone () =
         "actionable tool error" true
         (Yojson.Safe.equal (member "isError" result) (`Bool true));
       let message =
-        result |> member "content" |> to_list |> Base.List.hd_exn
-        |> member "text" |> to_string
+        result |> member "content" |> to_list |> List.hd_exn |> member "text"
+        |> to_string
       in
       Alcotest.(check bool)
         "explains calendar limit" true
-        (Base.String.is_prefix message ~prefix:"calendar limit:"))
+        (String.is_prefix message ~prefix:"calendar limit:"))
+
+let test_upstream_status_survives_framing () =
+  let response =
+    Http_adapter.For_testing.framed_response
+      { status = 502; headers = []; body = "upstream failure" }
+  in
+  Alcotest.(check int) "wire status" 502 (Httpun.Status.to_code response.status)
 
 let () =
   Alcotest.run "http"
@@ -363,6 +374,8 @@ let () =
             test_health_and_unauthenticated_mcp;
           Alcotest.test_case "fixed response length" `Quick
             test_http_response_has_fixed_length;
+          Alcotest.test_case "502 wire framing" `Quick
+            test_upstream_status_survives_framing;
           Alcotest.test_case "media type and parse error" `Quick
             test_media_type_and_parse_error;
           Alcotest.test_case "notification accepted without response" `Quick
