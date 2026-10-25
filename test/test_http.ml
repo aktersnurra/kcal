@@ -290,11 +290,45 @@ let test_overflow_reaches_http_as_tool_error () =
                (`Bool true)))
         [ "get_daily_totals"; "get_daily_series"; "get_summary" ])
 
+let test_calendar_endpoint_http date timezone () =
+  Test_support.with_store (fun store _ ->
+      let body =
+        Printf.sprintf
+          {|{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_daily_totals","arguments":{"date":"%s","timezone":"%s"}}}|}
+          date timezone
+      in
+      let response =
+        request store ~scopes:[ "ledger:read" ]
+          ~headers:
+            [
+              ("authorization", "Bearer token");
+              ("content-type", "application/json");
+            ]
+          `POST "/mcp" body
+      in
+      Alcotest.(check int) "HTTP tool error framing" 200 response.status;
+      let open Yojson.Safe.Util in
+      let result = Yojson.Safe.from_string response.body |> member "result" in
+      Alcotest.(check bool)
+        "actionable tool error" true
+        (Yojson.Safe.equal (member "isError" result) (`Bool true));
+      let message =
+        result |> member "content" |> to_list |> Base.List.hd_exn
+        |> member "text" |> to_string
+      in
+      Alcotest.(check bool)
+        "explains calendar limit" true
+        (Base.String.is_prefix message ~prefix:"calendar limit:"))
+
 let () =
   Alcotest.run "http"
     [
       ( "boundary",
         [
+          Alcotest.test_case "upper calendar endpoint HTTP" `Quick
+            (test_calendar_endpoint_http "9999-12-31" "UTC");
+          Alcotest.test_case "lower calendar endpoint HTTP" `Quick
+            (test_calendar_endpoint_http "0000-01-01" "+02:00");
           Alcotest.test_case "protected resource metadata alias" `Quick
             test_protected_resource_metadata_alias;
           Alcotest.test_case "overflow reaches HTTP as tool error" `Quick

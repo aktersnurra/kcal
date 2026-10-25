@@ -1111,11 +1111,42 @@ let test_query_meals_search_composes_with_dates_and_limit () =
         (response_has_error_code (-32602)
            (handle "query_weights" [ ("search", `String "whey") ])))
 
+let test_calendar_endpoint_mcp date timezone () =
+  let open Base in
+  Test_support.with_store (fun store user ->
+      (* Any accidental query would now fail instead of yielding a calendar error. *)
+      Alcotest.(check bool)
+        "remove query tables" true
+        (match Sqlite3.exec store "DROP TABLE meals; DROP TABLE weigh_ins" with
+        | Sqlite3.Rc.OK -> true
+        | _ -> false);
+      List.iter [ "get_daily_totals"; "get_daily_series"; "get_summary" ]
+        ~f:(fun name ->
+          let dates =
+            if String.equal name "get_daily_totals" then
+              [ ("date", `String date) ]
+            else [ ("from_date", `String date); ("to_date", `String date) ]
+          in
+          let response =
+            Mcp.handle ~service:(Service.make ~store)
+              ~identity:(identity user [ "ledger:read" ])
+              (call name (`Assoc (("timezone", `String timezone) :: dates)))
+          in
+          check_tool_error "calendar error before queries" "calendar limit:"
+            response;
+          check_tool_error "requested date explained" date response;
+          check_tool_error "requested timezone explained" timezone response;
+          check_tool_error "actionable alternative" "choose a date" response))
+
 let () =
   Alcotest.run "mcp"
     [
       ( "boundary",
         [
+          Alcotest.test_case "upper calendar endpoint MCP" `Quick
+            (test_calendar_endpoint_mcp "9999-12-31" "UTC");
+          Alcotest.test_case "lower calendar endpoint MCP" `Quick
+            (test_calendar_endpoint_mcp "0000-01-01" "+02:00");
           Alcotest.test_case "product schemas" `Quick test_product_schemas;
           Alcotest.test_case "product save search replace" `Quick
             test_product_save_search_replace;

@@ -229,9 +229,96 @@ let test_all_numeric_inputs_reject_nonfinite () =
            }))
     [ infinity; neg_infinity; nan ]
 
+module Calendar_properties = struct
+  module Domain_error = Error
+  open Base
+  module Error = Domain_error
+  module Calendar = Calendar_test_support
+
+  let ok = function
+    | Ok value -> value
+    | Error error -> failwith (Error.to_string error)
+
+  let%hegel_test date_round_trips_through_its_string tc =
+    let date = Calendar.draw_date tc in
+    assert (Date.equal (ok (Date.of_string (Date.to_string date))) date)
+
+  let%hegel_test date_addition_matches_gregorian_ordinals tc =
+    let date = Calendar.draw_date tc in
+    let days = Hegel.draw tc (Hegel.integers ()) in
+    let expected = Int64.(of_int (Calendar.ordinal date) + of_int days) in
+    let representable =
+      Int64.(expected >= 0L && expected <= of_int Calendar.last_ordinal)
+    in
+    match Date.add_days date days with
+    | Ok added ->
+        assert representable;
+        assert (Int64.equal (Int64.of_int (Calendar.ordinal added)) expected)
+    | Error (Error.Calendar_date_addition _) -> assert (not representable)
+    | Error _ -> assert false
+
+  let%hegel_test date_range_lists_consecutive_dates_from_first_to_last tc =
+    let first = Calendar.draw_date tc in
+    let available = Calendar.last_ordinal - Calendar.ordinal first + 1 in
+    let length =
+      Hegel.draw tc
+        (Hegel.integers ~min_value:1
+           ~max_value:(Int.min Date_range.max_day_count available)
+           ())
+    in
+    let last = ok (Date.add_days first (length - 1)) in
+    let range = ok (Date_range.make ~first ~last) in
+    let dates = Date_range.dates range in
+    assert (List.length dates = length && Date_range.day_count range = length);
+    List.iteri dates ~f:(fun index date ->
+        assert (Calendar.ordinal date = Calendar.ordinal first + index));
+    assert (Date.equal (List.last_exn dates) last);
+    if available > Date_range.max_day_count then
+      assert (
+        Result.is_error
+          (Date_range.make ~first
+             ~last:(ok (Date.add_days first Date_range.max_day_count))));
+    assert (
+      length = 1 || Result.is_error (Date_range.make ~first:last ~last:first))
+
+  let test_calendar_endpoints () =
+    List.iter
+      [
+        "0000-01-01";
+        "0000-02-29";
+        "0001-01-01";
+        "1900-02-28";
+        "2000-02-29";
+        "9999-12-31";
+      ] ~f:(fun text ->
+        assert (String.equal text (Date.to_string (ok (Date.of_string text)))));
+    let first = ok (Date.of_string "0000-01-01") in
+    assert (Result.is_error (Date.add_days first (-1)));
+    assert (Result.is_error (Date.add_days Calendar.last_date 1));
+    List.iter [ first; Calendar.last_date ] ~f:(fun date ->
+        let range = ok (Date_range.make ~first:date ~last:date) in
+        assert (List.equal Date.equal (Date_range.dates range) [ date ]));
+    assert (
+      Date.equal
+        (ok (Date.add_days first Calendar.last_ordinal))
+        Calendar.last_date)
+end
+
 let () =
   Alcotest.run "domain"
     [
+      ( "calendar",
+        [
+          Alcotest.test_case "full-calendar roundtrip property" `Quick
+            Calendar_properties.date_round_trips_through_its_string;
+          Alcotest.test_case "date addition ordinal property" `Quick
+            Calendar_properties.date_addition_matches_gregorian_ordinals;
+          Alcotest.test_case "inclusive date range property" `Quick
+            Calendar_properties
+            .date_range_lists_consecutive_dates_from_first_to_last;
+          Alcotest.test_case "calendar endpoints and leap days" `Quick
+            Calendar_properties.test_calendar_endpoints;
+        ] );
       ( "validation",
         [
           Alcotest.test_case "rejects negative meal calories" `Quick

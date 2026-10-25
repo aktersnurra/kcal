@@ -78,7 +78,7 @@ let test_zone_offsets () =
 
 let test_local_day_bounds () =
   let bounds zone value =
-    let start, stop = Time.local_day_bounds zone (date value) in
+    let start, stop = Result.get_ok (Time.local_day_bounds zone (date value)) in
     (utc_string start, utc_string stop)
   in
   Alcotest.(check (pair string string))
@@ -137,7 +137,8 @@ let test_date_range () =
         true
     | _ -> false);
   let start, stop =
-    Date_range.utc_bounds stockholm (range "2026-07-14" "2026-07-15")
+    Result.get_ok
+      (Date_range.utc_bounds stockholm (range "2026-07-14" "2026-07-15"))
   in
   Alcotest.(check (pair string string))
     "exact utc bounds"
@@ -469,11 +470,325 @@ let%hegel_test checked_optional_macro_totals_preserve_unknown tc =
       assert (Option.equal Float.equal expected totals.fat_g)
   | _ -> assert false
 
+module Calendar_properties = struct
+  module Domain_error = Error
+  open Base
+  module Error = Domain_error
+  module Calendar = Calendar_test_support
+
+  let ok = function
+    | Ok value -> value
+    | Error error -> failwith (Error.to_string error)
+
+  let check_bounds zone date =
+    match
+      (Time.local_day_bounds zone date, Calendar.expected_bounds zone date)
+    with
+    | Ok (start, stop), Some (expected_start, expected_stop) ->
+        assert (
+          Ptime.equal start expected_start && Ptime.equal stop expected_stop)
+    | Error (Error.Calendar_day_bounds _), None -> ()
+    | _ -> assert false
+
+  let%hegel_test
+      local_day_bounds_contain_exactly_the_instants_on_that_local_date tc =
+    let zone = Calendar.draw_zone tc in
+    let instant = Calendar.draw_instant tc in
+    let offset = Time.utc_offset_s_at zone instant in
+    let _, (_, actual_offset) =
+      Ptime.to_date_time ~tz_offset_s:offset instant
+    in
+    match Time.local_date zone instant with
+    | Error (Error.Calendar_local_date _) -> assert (actual_offset <> offset)
+    | Error _ -> assert false
+    | Ok date -> (
+        assert (actual_offset = offset);
+        check_bounds zone date;
+        match Time.local_day_bounds zone date with
+        | Error _ ->
+            assert (Option.is_none (Calendar.expected_bounds zone date))
+        | Ok (start, stop) ->
+            assert (
+              Ptime.compare start instant <= 0 && Ptime.compare instant stop < 0);
+            assert (Date.equal (ok (Time.local_date zone start)) date);
+            assert (
+              Date.equal
+                (ok
+                   (Time.local_date zone
+                      (Option.value_exn (Calendar.add_seconds stop (-1)))))
+                date);
+            assert (
+              Date.equal
+                (ok (Time.local_date zone stop))
+                (ok (Date.add_days date 1))))
+
+  let%hegel_test local_days_are_23_24_or_25_hours_and_tile_the_timeline tc =
+    let zone = Calendar.draw_zone tc in
+    let date = Calendar.draw_date tc in
+    check_bounds zone date;
+    match Time.local_day_bounds zone date with
+    | Error _ ->
+        () (* check_bounds independently verified unrepresentability. *)
+    | Ok (start, stop) -> (
+        let hours = Ptime.Span.to_float_s (Ptime.diff stop start) /. 3600.0 in
+        assert (List.exists [ 23.0; 24.0; 25.0 ] ~f:(Float.equal hours));
+        let next = ok (Date.add_days date 1) in
+        match Time.local_day_bounds zone next with
+        | Ok (next_start, _) -> assert (Ptime.equal stop next_start)
+        | Error _ ->
+            assert (Option.is_none (Calendar.expected_bounds zone next)))
+
+  let%hegel_test fixed_zone_bounds_match_offset_datetime_constructor tc =
+    let date = Calendar.draw_date tc in
+    let minutes =
+      Hegel.draw tc (Hegel.integers ~min_value:(-840) ~max_value:840 ())
+    in
+    let zone =
+      ok
+        (Time.parse_zone
+           (Printf.sprintf "%c%02d:%02d"
+              (if minutes < 0 then '-' else '+')
+              (Int.abs minutes / 60)
+              (Int.abs minutes % 60)))
+    in
+    let midnight ymd = Ptime.of_date_time (ymd, ((0, 0, 0), minutes * 60)) in
+    let expected =
+      Option.bind (Calendar.next_ymd date) ~f:(fun next ->
+          Option.both
+            (midnight (Ptime.to_date (Date.midnight_utc date)))
+            (midnight next))
+    in
+    match (Time.local_day_bounds zone date, expected) with
+    | Ok (start, stop), Some (a, b) ->
+        assert (Ptime.equal start a && Ptime.equal stop b)
+    | Error (Error.Calendar_day_bounds _), None -> ()
+    | _ -> assert false
+
+  let%hegel_test local_date_conversion_never_accepts_utc_fallback tc =
+    let instant = Calendar.draw_instant tc in
+    let utc_offset_s = Hegel.draw tc (Hegel.integers ()) in
+    let ymd, ((hour, minute, second), _) = Ptime.to_date_time instant in
+    let seconds_of_day = (hour * 3600) + (minute * 60) + second in
+    let shifted_seconds =
+      Int64.(
+        (of_int (Calendar.ordinal_ymd ymd) * 86400L)
+        + of_int seconds_of_day + of_int utc_offset_s)
+    in
+    let representable =
+      Int64.(
+        shifted_seconds >= 0L
+        && shifted_seconds < (of_int Calendar.last_ordinal + 1L) * 86400L)
+    in
+    match Date.of_instant ~utc_offset_s instant with
+    | Ok date ->
+        assert representable;
+        assert (
+          Int64.equal
+            (Int64.of_int (Calendar.ordinal date))
+            Int64.(shifted_seconds / 86400L))
+    | Error (Error.Calendar_local_date _) -> assert (not representable)
+    | Error _ -> assert false
+
+  let%hegel_test range_bounds_cover_inclusive_dates tc =
+    let first = Calendar.draw_date tc in
+    let zone = Calendar.draw_zone tc in
+    let available = Calendar.last_ordinal - Calendar.ordinal first in
+    let last =
+      ok
+        (Date.add_days first
+           (Hegel.draw tc
+              (Hegel.integers ~min_value:0
+                 ~max_value:(Int.min available (Date_range.max_day_count - 1))
+                 ())))
+    in
+    let range = ok (Date_range.make ~first ~last) in
+    match
+      ( Date_range.utc_bounds zone range,
+        Calendar.expected_bounds zone first,
+        Calendar.expected_bounds zone last )
+    with
+    | Ok (start, stop), Some (a, _), Some (_, b) ->
+        assert (Ptime.equal start a && Ptime.equal stop b)
+    | Error (Error.Calendar_day_bounds _), a, b ->
+        assert (Option.is_none a || Option.is_none b)
+    | _ -> assert false
+
+  let meal_at eaten_at =
+    ok
+      (Meal.of_storage ~id:(Meal_id.fresh ()) ~user_id:(User_id.fresh ())
+         ~eaten_at ~description:"m" ~calories_kcal:100 ~protein_g:1.0
+         ~carbs_g:None ~fat_g:None ~confidence:None ~estimate_source:None
+         ~notes:None ~created_at:eaten_at ~updated_at:eaten_at ~deleted_at:None)
+
+  let%hegel_test daily_series_keeps_every_in_range_meal_exactly_once tc =
+    let zone = Calendar.draw_zone tc in
+    let first = Calendar.draw_date tc in
+    let available = Calendar.last_ordinal - Calendar.ordinal first in
+    let last =
+      ok
+        (Date.add_days first
+           (Hegel.draw tc
+              (Hegel.integers ~min_value:0 ~max_value:(Int.min available 5) ())))
+    in
+    let range = ok (Date_range.make ~first ~last) in
+    match Date_range.utc_bounds zone range with
+    | Error _ ->
+        assert (
+          Result.is_error
+            (Summary.daily_series zone range ~meals:[] ~weigh_ins:[]))
+    | Ok (start, stop) ->
+        (* Out-of-calendar instants are not representable input records. *)
+        let meals =
+          List.filter_map
+            (List.init
+               (Hegel.draw tc (Hegel.integers ~min_value:0 ~max_value:20 ()))
+               ~f:Fn.id)
+            ~f:(fun _ ->
+              Option.map
+                (Calendar.add_seconds start
+                   (Hegel.draw tc
+                      (Hegel.integers ~min_value:(-Time.seconds_per_day)
+                         ~max_value:(8 * Time.seconds_per_day) ())))
+                ~f:meal_at)
+        in
+        (* Independent interval membership, not the production local-date bucketer. *)
+        let in_range =
+          List.count meals ~f:(fun (meal : Meal.t) ->
+              Ptime.compare start meal.eaten_at <= 0
+              && Ptime.compare meal.eaten_at stop < 0)
+        in
+        let series =
+          ok (Summary.daily_series zone range ~meals ~weigh_ins:[])
+        in
+        let counted =
+          List.fold series ~init:0 ~f:(fun count (day : Summary.day) ->
+              count
+              + Option.value_map day.meals ~default:0
+                  ~f:(fun (totals : Meal.totals) -> totals.meal_count))
+        in
+        assert (List.length series = Date_range.day_count range);
+        assert (counted = in_range);
+        List.iter series ~f:(fun (day : Summary.day) ->
+            let expected =
+              List.count meals ~f:(fun (meal : Meal.t) ->
+                  let offset = Time.utc_offset_s_at zone meal.eaten_at in
+                  let (year, month, day_of_month), (_, actual_offset) =
+                    Ptime.to_date_time ~tz_offset_s:offset meal.eaten_at
+                  in
+                  actual_offset = offset
+                  && String.equal
+                       (Printf.sprintf "%04d-%02d-%02d" year month day_of_month)
+                       (Date.to_string day.date))
+            in
+            assert (
+              Option.value_map day.meals ~default:0 ~f:(fun (t : Meal.totals) ->
+                  t.meal_count)
+              = expected);
+            assert (Bool.equal (Option.is_none day.meals) (expected = 0)))
+
+  let test_calendar_endpoint_bounds () =
+    List.iter
+      (Time.supported_zone_names @ [ "-14:00"; "+14:00"; "-00:01"; "+00:01" ])
+      ~f:(fun name ->
+        let zone = ok (Time.parse_zone name) in
+        List.iter
+          [
+            "0000-01-01"; "0000-01-02"; "0000-02-29"; "9999-12-30"; "9999-12-31";
+          ] ~f:(fun text -> check_bounds zone (ok (Date.of_string text))));
+    List.iter
+      [ (Ptime.min, "-14:00"); (Ptime.max, "+14:00") ]
+      ~f:(fun (instant, name) ->
+        match Time.local_date (ok (Time.parse_zone name)) instant with
+        | Error (Error.Calendar_local_date _) -> ()
+        | _ -> assert false)
+
+  let%hegel_test eu_transitions_match_gregorian_weekday_oracle tc =
+    let year = Hegel.draw tc (Hegel.integers ~min_value:0 ~max_value:9999 ()) in
+    let month = if Hegel.draw tc (Hegel.booleans ()) then 3 else 10 in
+    let last = ok (Date.of_string (Printf.sprintf "%04d-%02d-31" year month)) in
+    (* Gregorian 0000-01-01 was Saturday: Sunday has index 0 here. *)
+    let day = 31 - ((Calendar.ordinal last + 6) % 7) in
+    let date =
+      ok (Date.of_string (Printf.sprintf "%04d-%02d-%02d" year month day))
+    in
+    let transition =
+      Option.value_exn (Ptime.of_date_time ((year, month, day), ((1, 0, 0), 0)))
+    in
+    List.iter
+      [
+        ("Europe/London", 0);
+        ("Europe/Stockholm", 3600);
+        ("Europe/Helsinki", 7200);
+      ]
+      ~f:(fun (name, standard) ->
+        let zone = ok (Time.parse_zone name) in
+        let before = Option.value_exn (Calendar.add_seconds transition (-1)) in
+        let expected_before, expected_after, hours =
+          if month = 3 then (standard, standard + 3600, 23.)
+          else (standard + 3600, standard, 25.)
+        in
+        assert (Time.utc_offset_s_at zone before = expected_before);
+        assert (Time.utc_offset_s_at zone transition = expected_after);
+        let start, stop = ok (Time.local_day_bounds zone date) in
+        assert (
+          Float.equal
+            (Ptime.Span.to_float_s (Ptime.diff stop start))
+            (hours *. 3600.)))
+
+  let test_known_dst_boundaries () =
+    (* Published EU transition dates; these fixtures do not calculate Sundays. *)
+    List.iter
+      [
+        ("2024-03-31", "2024-10-27");
+        ("2025-03-30", "2025-10-26");
+        ("2026-03-29", "2026-10-25");
+      ]
+      ~f:(fun (spring, autumn) ->
+        List.iter [ "Europe/London"; "Europe/Stockholm"; "Europe/Helsinki" ]
+          ~f:(fun name ->
+            let zone = ok (Time.parse_zone name) in
+            List.iter
+              [ (spring, 23.); (autumn, 25.) ]
+              ~f:(fun (text, hours) ->
+                let date = ok (Date.of_string text) in
+                let start, stop = ok (Time.local_day_bounds zone date) in
+                assert (
+                  Float.equal
+                    (Ptime.Span.to_float_s (Ptime.diff stop start))
+                    (hours *. 3600.));
+                let before, _ =
+                  ok (Time.local_day_bounds zone (ok (Date.add_days date (-1))))
+                in
+                assert (
+                  Float.equal
+                    (Ptime.Span.to_float_s (Ptime.diff start before))
+                    86400.))))
+end
+
 let () =
   Alcotest.run "summary"
     [
       ( "time",
         [
+          Alcotest.test_case "day containment property" `Quick
+            Calendar_properties
+            .local_day_bounds_contain_exactly_the_instants_on_that_local_date;
+          Alcotest.test_case "day length and tiling property" `Quick
+            Calendar_properties
+            .local_days_are_23_24_or_25_hours_and_tile_the_timeline;
+          Alcotest.test_case "fixed offset oracle property" `Quick
+            Calendar_properties
+            .fixed_zone_bounds_match_offset_datetime_constructor;
+          Alcotest.test_case "no local date fallback property" `Quick
+            Calendar_properties.local_date_conversion_never_accepts_utc_fallback;
+          Alcotest.test_case "inclusive range bounds property" `Quick
+            Calendar_properties.range_bounds_cover_inclusive_dates;
+          Alcotest.test_case "endpoint bounds" `Quick
+            Calendar_properties.test_calendar_endpoint_bounds;
+          Alcotest.test_case "Gregorian EU transition oracle property" `Quick
+            Calendar_properties.eu_transitions_match_gregorian_weekday_oracle;
+          Alcotest.test_case "known DST dates" `Quick
+            Calendar_properties.test_known_dst_boundaries;
           Alcotest.test_case "zone offsets" `Quick test_zone_offsets;
           Alcotest.test_case "local day bounds" `Quick test_local_day_bounds;
           Alcotest.test_case "date parsing" `Quick test_date_parsing;
@@ -481,6 +796,9 @@ let () =
         ] );
       ( "summary",
         [
+          Alcotest.test_case "in-range meal conservation property" `Quick
+            Calendar_properties
+            .daily_series_keeps_every_in_range_meal_exactly_once;
           Alcotest.test_case "checked optional macros property" `Quick
             checked_optional_macro_totals_preserve_unknown;
           Alcotest.test_case "checked totals property" `Quick

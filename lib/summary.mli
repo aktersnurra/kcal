@@ -30,7 +30,8 @@ val daily_series :
   meals:Meal.t list ->
   weigh_ins:Weigh_in.t list ->
   (day list, Error.t) result
-(** One [day] per date in the range, in order. *)
+(** One [day] per date in the range, in order. Fails if the zoned UTC bounds
+    cannot be represented, even for an empty input. *)
 
 type logged_intake = {
   logged_day_count : int;

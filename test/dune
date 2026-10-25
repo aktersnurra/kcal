@@ -1,3 +1,9 @@
+(library
+ (name calendar_test_support)
+ (wrapped false)
+ (modules calendar_test_support)
+ (libraries base kcal hegel))
+
 (test
  (name test_migration)
  (modules test_migration test_support)
@@ -42,7 +48,7 @@
 (test
  (name test_domain)
  (modules test_domain)
- (libraries alcotest kcal hegel)
+ (libraries alcotest kcal hegel calendar_test_support)
  (preprocess (pps ppx_jane ppx_hegel_test)))
 
 (test
@@ -97,7 +103,7 @@
 (test
  (name test_summary)
  (modules test_summary)
- (libraries alcotest kcal hegel)
+ (libraries alcotest kcal hegel calendar_test_support)
  (preprocess (pps ppx_jane ppx_hegel_test)))
 
 (test

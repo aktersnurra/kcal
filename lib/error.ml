@@ -42,6 +42,9 @@ type t =
   | Invalid_input of string
   | Conflict of string
   | Storage_error of string
+  | Calendar_date_addition of { date : string; days : int }
+  | Calendar_day_bounds of { date : string; timezone : string }
+  | Calendar_local_date of { instant : string; utc_offset_s : int }
   | Invalid_date of string
   | Unsupported_timezone of string
   | Reversed_date_range of { from_date : string; to_date : string }
@@ -93,6 +96,23 @@ let to_string = function
   | Invalid_input reason -> "invalid input: " ^ reason
   | Conflict reason -> "conflict: " ^ reason
   | Storage_error reason -> "storage error: " ^ reason
+  | Calendar_date_addition { date; days } ->
+      Printf.sprintf
+        "calendar limit: adding %d days to %s leaves years 0000-9999; choose a \
+         date or day count within that calendar"
+        days date
+  | Calendar_day_bounds { date; timezone } ->
+      Printf.sprintf
+        "calendar limit: day %s in timezone %s requires a following date or \
+         UTC bound outside years 0000-9999; choose a date away from the \
+         calendar endpoint or another timezone"
+        date timezone
+  | Calendar_local_date { instant; utc_offset_s } ->
+      Printf.sprintf
+        "calendar limit: %s at UTC offset %d seconds has a local date outside \
+         years 0000-9999; choose an instant away from the calendar endpoint or \
+         another timezone"
+        instant utc_offset_s
   | Invalid_date value ->
       Printf.sprintf "invalid date %S: expected YYYY-MM-DD" value
   | Unsupported_timezone value -> Printf.sprintf "unsupported timezone %S" value

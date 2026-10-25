@@ -634,7 +634,11 @@ let parse_day_request fields =
   in
   let* zone = parse_zone_argument fields in
   let* date = parse_date_argument "date" fields in
-  let date = Option.value date ~default:(Time.local_date zone (now ())) in
+  let* date =
+    match date with
+    | Some date -> Ok date
+    | None -> Time.local_date zone (now ())
+  in
   let* range = Date_range.make ~first:date ~last:date in
   Ok { zone; range }
 
@@ -644,7 +648,11 @@ let parse_range fields =
     Result.bind (required_string "from_date" fields) Date.of_string
   in
   let* last = parse_date_argument "to_date" fields in
-  let last = Option.value last ~default:(Time.local_date zone (now ())) in
+  let* last =
+    match last with
+    | Some date -> Ok date
+    | None -> Time.local_date zone (now ())
+  in
   let* range = Date_range.make ~first ~last in
   Ok { zone; range }
 
@@ -822,7 +830,7 @@ let call_query_meals service ~user fields =
     (Service.query_meals ?search service ~user ~from ~to_ ~limit)
 
 let records_in_range service ~user { zone; range } =
-  let start, stop = Date_range.utc_bounds zone range in
+  let* start, stop = Date_range.utc_bounds zone range in
   let* meals = Service.meals_between service ~user ~start ~stop in
   let* weigh_ins = Service.weigh_ins_between service ~user ~start ~stop in
   Ok (meals, weigh_ins)
@@ -1003,9 +1011,11 @@ let call_response ~request_id = function
   | Error Error.Not_found ->
       response ~id:request_id (tool_error "record not found")
   | Error
-      (( Error.Invalid_date _ | Error.Unsupported_timezone _
-       | Error.Reversed_date_range _ | Error.Date_range_too_long _
-       | Error.Nonpositive_argument _ ) as error) ->
+      (( Error.Calendar_date_addition _ | Error.Calendar_day_bounds _
+       | Error.Calendar_local_date _ | Error.Invalid_date _
+       | Error.Unsupported_timezone _ | Error.Reversed_date_range _
+       | Error.Date_range_too_long _ | Error.Nonpositive_argument _ ) as error)
+    ->
       response ~id:request_id (tool_error (argument_error_message error))
   | Error
       (Error.Invalid_field

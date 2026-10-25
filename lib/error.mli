@@ -40,6 +40,9 @@ type t =
   | Invalid_input of string
   | Conflict of string
   | Storage_error of string
+  | Calendar_date_addition of { date : string; days : int }
+  | Calendar_day_bounds of { date : string; timezone : string }
+  | Calendar_local_date of { instant : string; utc_offset_s : int }
   | Invalid_date of string
   | Unsupported_timezone of string
   | Reversed_date_range of { from_date : string; to_date : string }

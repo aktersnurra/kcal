@@ -110,11 +110,13 @@ end
 
 (* Out-of-range observations must not affect arithmetic or uncertainty. *)
 let bucket zone range ~instant ~add records =
+  let* start, stop = Date_range.utc_bounds zone range in
   List.fold_result records
     ~init:(Map.empty (module Date_key))
     ~f:(fun buckets record ->
-      let date = Time.local_date zone (instant record) in
-      if Date_range.mem range date then
+      let time = instant record in
+      if Ptime.compare start time <= 0 && Ptime.compare time stop < 0 then
+        let* date = Time.local_date zone time in
         let* value = add record (Map.find buckets date) in
         Ok (Map.set buckets ~key:date ~data:value)
       else Ok buckets)
@@ -210,12 +212,14 @@ let least_squares_slope points =
   finite Error.Weight_regression (sxy /. sxx *. 7. *. scale)
 
 let weight_trend zone range (weigh_ins : Weigh_in.t list) =
+  let* start, stop = Date_range.utc_bounds zone range in
   let sorted =
     List.stable_sort
       ~compare:(fun (a : Weigh_in.t) (b : Weigh_in.t) ->
         Ptime.compare a.measured_at b.measured_at)
       (List.filter weigh_ins ~f:(fun weigh_in ->
-           Date_range.mem range (Time.local_date zone weigh_in.measured_at)))
+           Ptime.compare start weigh_in.measured_at <= 0
+           && Ptime.compare weigh_in.measured_at stop < 0))
   in
   match (sorted, List.rev sorted) with
   | [], _ | _, [] -> Ok None
