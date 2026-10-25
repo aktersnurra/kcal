@@ -314,14 +314,6 @@ let handle ?protected_resource ~auth ~service ~method_ ~path ~headers ~body () =
     ~schedule_sync:(fun sync -> sync ())
     ~withings:None ~auth ~service ~method_ ~path ~headers ~body
 
-let split_address value =
-  match String.rindex value ':' with
-  | Some index when index > 0 && index < String.length value - 1 ->
-      ( String.sub value ~pos:0 ~len:index,
-        String.sub value ~pos:(index + 1) ~len:(String.length value - index - 1)
-      )
-  | _ -> invalid_arg "invalid listen address"
-
 let status = function
   | 200 -> `OK
   | 202 -> `Accepted
@@ -420,17 +412,16 @@ let run ~withings env ~config ~auth service : unit =
   let protected_resource =
     Some
       {
-        resource = config.Config.oidc_audience;
+        resource = config.Config.protected_resource;
         authorization_server = config.oidc_issuer;
-        metadata_url =
-          Config.protected_resource_metadata_url
-            ~audience:config.Config.oidc_audience;
+        metadata_url = config.Config.metadata_url;
       }
   in
-  let host, port = split_address config.Config.listen_address in
+  let { Config.host; port } = config.Config.listener in
   Eio.Switch.run @@ fun sw ->
   let address =
-    List.hd_exn (Eio.Net.getaddrinfo_stream ~service:port env#net host)
+    List.hd_exn
+      (Eio.Net.getaddrinfo_stream ~service:(Int.to_string port) env#net host)
   in
   let listener =
     Eio.Net.listen ~sw ~reuse_addr:true ~backlog:128 env#net address

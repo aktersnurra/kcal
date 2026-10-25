@@ -46,7 +46,7 @@ val handle_withings :
 val run :
   withings:withings_config option ->
   < net : _ Eio.Net.t ; .. > ->
-  config:Config.t ->
+  config:Config.server ->
   auth:Auth.t ->
   Service.t ->
   unit

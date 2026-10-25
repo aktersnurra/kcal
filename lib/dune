@@ -5,6 +5,7 @@
   (pps ppx_jane))
  (libraries
   base
+  core
   jose
   ptime
   sqlite3

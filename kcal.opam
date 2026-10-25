@@ -33,7 +33,6 @@ depends: [
   "yojson"
   "ptime"
   "uuidm"
-  "cmdliner"
   "logs"
   "alcotest" {with-test}
   "hegel" {with-test}
