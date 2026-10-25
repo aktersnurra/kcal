@@ -2,7 +2,7 @@ let test_recorded_weight_is_manual () =
   Test_support.with_store (fun store user ->
       let weight =
         Result.get_ok
-          (Store_sqlite.create_manual_weigh_in store ~user
+          (Test_support.create_manual_weigh_in_raw store ~user
              Weigh_in.{ measured_at = None; weight_kg = 79.6 })
       in
       Alcotest.(check string)
@@ -15,7 +15,7 @@ let test_cannot_update_another_users_weight () =
       Alcotest.(check bool)
         "hidden" true
         (match
-           Store_sqlite.update_manual_weigh_in store ~user:bob weight.id
+           Test_support.update_manual_weigh_in_raw store ~user:bob weight.id
              Weigh_in.empty_patch
          with
         | Error Error.Not_found -> true
@@ -33,7 +33,7 @@ let test_foreign_weight_operations_are_hidden () =
       Alcotest.(check bool)
         "foreign update" true
         (hidden
-           (Store_sqlite.update_manual_weigh_in store ~user:bob weight.id
+           (Test_support.update_manual_weigh_in_raw store ~user:bob weight.id
               Weigh_in.empty_patch));
       Alcotest.(check bool)
         "foreign delete" true
@@ -53,7 +53,7 @@ let test_weight_crud_and_delete () =
       let weight = Test_support.create_weight store user in
       let updated =
         Result.get_ok
-          (Store_sqlite.update_manual_weigh_in store ~user weight.id
+          (Test_support.update_manual_weigh_in_raw store ~user weight.id
              Weigh_in.{ empty_patch with weight_kg = Some 80.0 })
       in
       Alcotest.(check (float 0.001)) "updated weight" 80.0 updated.weight_kg;
@@ -70,7 +70,7 @@ let test_partial_update_leaves_omitted_field_unchanged () =
       let weight = Test_support.create_weight store user in
       let weight_only =
         Result.get_ok
-          (Store_sqlite.update_manual_weigh_in store ~user weight.id
+          (Test_support.update_manual_weigh_in_raw store ~user weight.id
              Weigh_in.{ empty_patch with weight_kg = Some 80.0 })
       in
       Alcotest.(check (float 0.0001))
@@ -84,7 +84,7 @@ let test_partial_update_leaves_omitted_field_unchanged () =
       in
       let date_only =
         Result.get_ok
-          (Store_sqlite.update_manual_weigh_in store ~user weight.id
+          (Test_support.update_manual_weigh_in_raw store ~user weight.id
              Weigh_in.{ empty_patch with measured_at = Some new_measured_at })
       in
       Alcotest.(check string)
@@ -109,7 +109,7 @@ let test_locked_weight_get_and_update_are_storage_errors () =
       Alcotest.(check bool)
         "locked update is sanitized" true
         (is_storage_error
-           (Store_sqlite.update_manual_weigh_in store ~user weight.id patch)))
+           (Test_support.update_manual_weigh_in_raw store ~user weight.id patch)))
 
 let test_weight_queries_are_ordered_and_bounded () =
   Test_support.with_store (fun store user ->
@@ -121,12 +121,12 @@ let test_weight_queries_are_ordered_and_bounded () =
       in
       let second =
         Result.get_ok
-          (Store_sqlite.create_manual_weigh_in store ~user
+          (Test_support.create_manual_weigh_in_raw store ~user
              Weigh_in.{ measured_at = Some later; weight_kg = 80.0 })
       in
       let first =
         Result.get_ok
-          (Store_sqlite.create_manual_weigh_in store ~user
+          (Test_support.create_manual_weigh_in_raw store ~user
              Weigh_in.{ measured_at = Some earlier; weight_kg = 79.0 })
       in
       let weights =
@@ -153,7 +153,7 @@ let test_weigh_ins_between_is_half_open () =
       let at value = Result.get_ok (Time.parse_offset_datetime value) in
       let record value weight_kg =
         Result.get_ok
-          (Store_sqlite.create_manual_weigh_in store ~user
+          (Test_support.create_manual_weigh_in_raw store ~user
              Weigh_in.{ measured_at = Some (at value); weight_kg })
       in
       ignore (record "2026-09-21T23:59:59Z" 81.0);
@@ -182,11 +182,11 @@ let test_latest_weigh_in_returns_the_most_recent () =
       in
       ignore
         (Result.get_ok
-           (Store_sqlite.create_manual_weigh_in store ~user
+           (Test_support.create_manual_weigh_in_raw store ~user
               Weigh_in.{ measured_at = Some earlier; weight_kg = 79.0 }));
       let latest =
         Result.get_ok
-          (Store_sqlite.create_manual_weigh_in store ~user
+          (Test_support.create_manual_weigh_in_raw store ~user
              Weigh_in.{ measured_at = Some later; weight_kg = 80.0 })
       in
       let found = Result.get_ok (Store_sqlite.latest_weigh_in store ~user) in
@@ -216,10 +216,34 @@ let test_rejects_invalid_weight_update () =
       Alcotest.(check bool)
         "invalid" true
         (match
-           Store_sqlite.update_manual_weigh_in store ~user weight.id
+           Test_support.update_manual_weigh_in_raw store ~user weight.id
              Weigh_in.{ empty_patch with weight_kg = Some 0.0 }
          with
-        | Error (Error.Invalid_input _) -> true
+        | Error
+            (Error.Invalid_field
+               { field = Numeric Weight_kg; reason = Nonpositive }) ->
+            true
+        | _ -> false))
+
+let test_corrupt_weight_is_not_repaired () =
+  Test_support.with_store (fun store user ->
+      let weight = Test_support.create_weight store user in
+      Alcotest.(check bool)
+        "inject infinity" true
+        (Sqlite3.exec store "UPDATE weigh_ins SET weight_kg = 1e309"
+        = Sqlite3.Rc.OK);
+      Alcotest.(check bool)
+        "query rejects corrupt weight" true
+        (match Store_sqlite.latest_weigh_in store ~user with
+        | Error (Error.Storage_decoding _) -> true
+        | _ -> false);
+      Alcotest.(check bool)
+        "update rejects corrupt weight" true
+        (match
+           Test_support.update_manual_weigh_in_raw store ~user weight.id
+             Weigh_in.{ empty_patch with weight_kg = Some 80.0 }
+         with
+        | Error (Error.Storage_decoding _) -> true
         | _ -> false))
 
 let () =
@@ -229,6 +253,8 @@ let () =
         [
           Alcotest.test_case "recorded weight is manual" `Quick
             test_recorded_weight_is_manual;
+          Alcotest.test_case "corrupt weight is not repaired" `Quick
+            test_corrupt_weight_is_not_repaired;
           Alcotest.test_case "users cannot update each other's weights" `Quick
             test_cannot_update_another_users_weight;
           Alcotest.test_case "foreign weight operations are hidden" `Quick

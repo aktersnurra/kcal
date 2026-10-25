@@ -33,7 +33,8 @@ let test_foreign_meal_operations_are_hidden () =
       Alcotest.(check bool)
         "foreign update" true
         (hidden
-           (Store_sqlite.update_meal store ~user:bob meal.id Meal.empty_patch));
+           (Test_support.update_meal_raw store ~user:bob meal.id
+              Meal.empty_patch));
       Alcotest.(check bool)
         "foreign delete" true
         (hidden (Store_sqlite.delete_meal store ~user:bob meal.id));
@@ -56,7 +57,7 @@ let test_meal_crud_and_soft_delete () =
           }
       in
       let updated =
-        Result.get_ok (Store_sqlite.update_meal store ~user meal.id patch)
+        Result.get_ok (Test_support.update_meal_raw store ~user meal.id patch)
       in
       Alcotest.(check string) "description" "Stew" updated.description;
       Alcotest.(check int) "calories" 300 updated.calories_kcal;
@@ -84,7 +85,7 @@ let test_partial_update_leaves_omitted_fields_unchanged () =
       let meal = Test_support.create_meal store user in
       let updated =
         Result.get_ok
-          (Store_sqlite.update_meal store ~user meal.id
+          (Test_support.update_meal_raw store ~user meal.id
              Meal.{ empty_patch with confidence = Some 0.5 })
       in
       Alcotest.(check (float 0.0001))
@@ -122,14 +123,15 @@ let test_locked_meal_get_and_update_are_storage_errors () =
         (is_storage_error (Store_sqlite.get_meal store ~user meal.id));
       Alcotest.(check bool)
         "locked update is sanitized" true
-        (is_storage_error (Store_sqlite.update_meal store ~user meal.id patch)))
+        (is_storage_error
+           (Test_support.update_meal_raw store ~user meal.id patch)))
 
 let test_meals_between_is_half_open_and_skips_deleted () =
   Test_support.with_store (fun store user ->
       let at value = Result.get_ok (Time.parse_offset_datetime value) in
       let create value =
         Result.get_ok
-          (Store_sqlite.create_meal store ~user
+          (Test_support.create_meal_raw store ~user
              (Test_support.meal_input ~eaten_at:(at value) ()))
       in
       let first = create "2026-09-22T00:00:00Z" in
@@ -179,7 +181,7 @@ let test_search_matches_literal_text_and_scopes_results () =
   Test_support.with_two_users (fun store user foreign ->
       let create user description estimate_source notes =
         Result.get_ok
-          (Store_sqlite.create_meal store ~user
+          (Test_support.create_meal_raw store ~user
              Meal.
                {
                  (Test_support.meal_input ()) with
@@ -228,7 +230,7 @@ let test_search_composes_with_dates_order_and_limit () =
       let at value = Result.get_ok (Time.parse_offset_datetime value) in
       let create time description =
         Result.get_ok
-          (Store_sqlite.create_meal store ~user
+          (Test_support.create_meal_raw store ~user
              Meal.
                {
                  (Test_support.meal_input ~eaten_at:(at time) ()) with
@@ -278,11 +280,59 @@ let test_search_rejects_blank_text_and_invalid_limits () =
             | _ -> false))
         [ ("", 100); (" \t\r\n", 100); ("whey", 0); ("whey", 501) ])
 
+let test_invalid_durable_numeric_row () =
+  Test_support.with_store (fun store user ->
+      let meal = Test_support.create_meal store user in
+      Alcotest.(check bool)
+        "inject infinity" true
+        (Sqlite3.exec store "UPDATE meals SET protein_g = 1e309" = Sqlite3.Rc.OK);
+      Alcotest.(check bool)
+        "corrupt row rejected" true
+        (match Store_sqlite.get_meal store ~user meal.id with
+        | Error (Error.Storage_decoding _) -> true
+        | _ -> false);
+      Alcotest.(check bool)
+        "corrupt row cannot be silently repaired" true
+        (match
+           Test_support.update_meal_raw store ~user meal.id
+             Meal.{ empty_patch with protein_g = Some 1.0 }
+         with
+        | Error (Error.Storage_decoding _) -> true
+        | _ -> false);
+      let protein = ref 0.0 in
+      ignore
+        (Sqlite3.exec store
+           ~cb:(fun row _ -> protein := float_of_string (Option.get row.(0)))
+           "SELECT protein_g FROM meals");
+      Alcotest.(check bool)
+        "durable infinity untouched" true
+        (Float.is_infinite !protein))
+
+let test_durable_calories_are_not_coerced () =
+  List.iter
+    (fun value ->
+      Test_support.with_store (fun store user ->
+          let meal = Test_support.create_meal store user in
+          Alcotest.(check bool)
+            "inject invalid durable calories" true
+            (Sqlite3.exec store ("UPDATE meals SET calories_kcal = " ^ value)
+            = Sqlite3.Rc.OK);
+          Alcotest.(check bool)
+            "storage decoding error" true
+            (match Store_sqlite.get_meal store ~user meal.id with
+            | Error (Error.Storage_decoding _) -> true
+            | _ -> false)))
+    [ "9223372036854775807"; "1.5"; "'not-a-number'" ]
+
 let () =
   Alcotest.run "meal store"
     [
       ( "persistence",
         [
+          Alcotest.test_case "invalid durable numeric row" `Quick
+            test_invalid_durable_numeric_row;
+          Alcotest.test_case "durable calories are not coerced" `Quick
+            test_durable_calories_are_not_coerced;
           Alcotest.test_case "literal search across fields is owner scoped"
             `Quick test_search_matches_literal_text_and_scopes_results;
           Alcotest.test_case "search composes with dates ordering and limit"

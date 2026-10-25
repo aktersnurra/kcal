@@ -82,12 +82,51 @@ let meal_input ?eaten_at () =
       eaten_at;
     }
 
+let create_meal_raw store ~user raw =
+  Result.bind (Meal.Create.of_raw raw) (Store_sqlite.create_meal store ~user)
+
+let update_meal_raw store ~user id raw =
+  Result.bind (Meal.Patch.of_raw raw) (Store_sqlite.update_meal store ~user id)
+
+let save_product_raw store ~user ~id raw =
+  Result.bind
+    (Product.Create.of_raw raw)
+    (Store_sqlite.save_product store ~user ~id)
+
+let create_manual_weigh_in_raw store ~user raw =
+  Result.bind
+    (Weigh_in.Create.of_raw raw)
+    (Store_sqlite.create_manual_weigh_in store ~user)
+
+let update_manual_weigh_in_raw store ~user id raw =
+  Result.bind
+    (Weigh_in.Patch.of_raw raw)
+    (Store_sqlite.update_manual_weigh_in store ~user id)
+
+let persist_withings_import_raw store ~user ~connection ~rows ~cursor =
+  let rec parse = function
+    | [] -> Ok []
+    | row :: rest ->
+        Result.bind (Weigh_in.Import.of_raw row) (fun row ->
+            Result.map (fun rest -> row :: rest) (parse rest))
+  in
+  Result.bind (parse rows) (fun rows ->
+      Store_sqlite.persist_withings_import store ~user ~connection ~rows ~cursor)
+
+let record_meal_raw service ~user raw =
+  Result.bind (Meal.Create.of_raw raw) (Service.record_meal service ~user)
+
+let record_manual_weigh_in_raw service ~user raw =
+  Result.bind
+    (Weigh_in.Create.of_raw raw)
+    (Service.record_manual_weigh_in service ~user)
+
 let create_meal store user =
-  Result.get_ok (Store_sqlite.create_meal store ~user (meal_input ()))
+  Result.get_ok (create_meal_raw store ~user (meal_input ()))
 
 let create_weight store user =
   Result.get_ok
-    (Store_sqlite.create_manual_weigh_in store ~user
+    (create_manual_weigh_in_raw store ~user
        Weigh_in.{ measured_at = None; weight_kg = 79.6 })
 
 let equal_product (left : Product.t) (right : Product.t) =

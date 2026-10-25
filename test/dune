@@ -42,7 +42,8 @@
 (test
  (name test_domain)
  (modules test_domain)
- (libraries alcotest kcal))
+ (libraries alcotest kcal hegel)
+ (preprocess (pps ppx_jane ppx_hegel_test)))
 
 (test
  (name test_meal_store)
@@ -96,7 +97,8 @@
 (test
  (name test_summary)
  (modules test_summary)
- (libraries alcotest kcal))
+ (libraries alcotest kcal hegel)
+ (preprocess (pps ppx_jane ppx_hegel_test)))
 
 (test
  (name test_product_store)

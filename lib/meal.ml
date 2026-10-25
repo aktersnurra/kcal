@@ -1,3 +1,7 @@
+module Domain_error = Error
+open Base
+module Error = Domain_error
+
 type t = {
   id : Meal_id.t;
   user_id : User_id.t;
@@ -47,25 +51,38 @@ type totals = {
   fat_g : float option;
 }
 
-let invalid_input = Error.Invalid_input "invalid meal"
+let ( let* ) result f = Result.bind result ~f
 
-let is_nonnegative value = value >= 0.0
-
-let validate_create input =
-  let valid_optional_macro = function None -> true | Some value -> is_nonnegative value in
-  let valid_confidence = function
-    | None -> true
-    | Some value -> value >= 0.0 && value <= 1.0
-  in
-  if
-    String.trim input.description = ""
-    || input.calories_kcal < 0
-    || not (is_nonnegative input.protein_g)
-    || not (valid_optional_macro input.carbs_g)
-    || not (valid_optional_macro input.fat_g)
-    || not (valid_confidence input.confidence)
-  then Error invalid_input
+let nonblank field value =
+  if String.is_empty (String.strip value) then
+    Error (Error.Invalid_field { field; reason = Blank })
   else Ok ()
+
+let grams field value =
+  Result.map_error (Nutrition.Grams.of_float value) ~f:(function
+    | Error.Invalid_field { reason; _ } ->
+        Error.Invalid_field { field = Numeric field; reason }
+    | error -> error)
+
+let optional f = function
+  | None -> Ok ()
+  | Some value -> Result.map (f value) ~f:(fun _ -> ())
+
+let validate_create (input : create) =
+  let* () = nonblank Description input.description in
+  let* _ = Nutrition.Calories.of_int input.calories_kcal in
+  let* _ = grams Protein_g input.protein_g in
+  let* () = optional (grams Carbs_g) input.carbs_g in
+  let* () = optional (grams Fat_g) input.fat_g in
+  optional Nutrition.Confidence.of_float input.confidence
+
+let validate_patch (input : patch) =
+  let* () = optional (nonblank Description) input.description in
+  let* () = optional Nutrition.Calories.of_int input.calories_kcal in
+  let* () = optional (grams Protein_g) input.protein_g in
+  let* () = optional (grams Carbs_g) input.carbs_g in
+  let* () = optional (grams Fat_g) input.fat_g in
+  optional Nutrition.Confidence.of_float input.confidence
 
 let empty_patch : patch =
   {
@@ -79,3 +96,60 @@ let empty_patch : patch =
     notes = None;
     eaten_at = None;
   }
+
+module Create = struct
+  type raw = create
+  type t = raw
+
+  let of_raw input =
+    let* () = validate_create input in
+    Ok input
+
+  let to_raw input = input
+end
+
+module Patch = struct
+  type raw = patch
+  type t = raw
+
+  let of_raw input =
+    let* () = validate_patch input in
+    Ok input
+
+  let to_raw input = input
+end
+
+let of_storage ~id ~user_id ~eaten_at ~description ~calories_kcal ~protein_g
+    ~carbs_g ~fat_g ~confidence ~estimate_source ~notes ~created_at ~updated_at
+    ~deleted_at =
+  let* () =
+    validate_create
+      {
+        description;
+        calories_kcal;
+        protein_g;
+        carbs_g;
+        fat_g;
+        confidence;
+        estimate_source;
+        notes;
+        eaten_at = Some eaten_at;
+      }
+  in
+  Ok
+    {
+      id;
+      user_id;
+      eaten_at;
+      description;
+      calories_kcal;
+      protein_g;
+      carbs_g;
+      fat_g;
+      confidence;
+      estimate_source;
+      notes;
+      created_at;
+      updated_at;
+      deleted_at;
+    }

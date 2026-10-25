@@ -12,7 +12,7 @@ let input : Product.input =
   }
 
 let save store user ?id value =
-  Result.get_ok (Store_sqlite.save_product store ~user ~id value)
+  Result.get_ok (Test_support.save_product_raw store ~user ~id value)
 
 let search store user ?(limit = 100) query =
   Result.get_ok
@@ -20,6 +20,11 @@ let search store user ?(limit = 100) query =
 
 let check_equal = Alcotest.check
 let invalid = function Error (Error.Invalid_input _) -> true | _ -> false
+
+let invalid_field = function
+  | Error (Error.Invalid_field _) -> true
+  | _ -> false
+
 let hidden = function Error Error.Not_found -> true | _ -> false
 
 let test_save_and_replace () =
@@ -92,9 +97,10 @@ let test_validation () =
       List.iter
         (fun value ->
           check_equal Alcotest.bool "domain invalid" true
-            (invalid (Product.validate_input value));
+            (invalid_field (Product.Create.of_raw value));
           check_equal Alcotest.bool "save invalid" true
-            (invalid (Store_sqlite.save_product store ~user ~id:None value)))
+            (invalid_field
+               (Test_support.save_product_raw store ~user ~id:None value)))
         values;
       ignore
         (save store user
@@ -128,7 +134,8 @@ let test_isolation () =
         (fun id ->
           check_equal Alcotest.bool "unknown or foreign update hidden" true
             (hidden
-               (Store_sqlite.save_product store ~user:bob ~id:(Some id) input)))
+               (Test_support.save_product_raw store ~user:bob ~id:(Some id)
+                  input)))
         [ product.id; Product_id.fresh () ];
       check_equal
         Alcotest.(list Test_support.product)
@@ -186,14 +193,38 @@ let test_storage_errors () =
         | _ -> false
       in
       check_equal Alcotest.bool "locked insert" true
-        (sanitized (Store_sqlite.save_product store ~user ~id:None input));
+        (sanitized (Test_support.save_product_raw store ~user ~id:None input));
       check_equal Alcotest.bool "locked update" true
         (sanitized
-           (Store_sqlite.save_product store ~user ~id:(Some product.id) input));
+           (Test_support.save_product_raw store ~user ~id:(Some product.id)
+              input));
       check_equal Alcotest.bool "locked search" true
         (sanitized
            (Store_sqlite.search_products store ~user
               ~query:(parsed store "whey") ~limit:100)))
+
+let test_corrupt_product_is_not_repaired () =
+  Test_support.with_store (fun store user ->
+      let product = save store user input in
+      Alcotest.(check bool)
+        "inject infinity" true
+        (Sqlite3.exec store "UPDATE products SET protein_g = 1e309"
+        = Sqlite3.Rc.OK);
+      Alcotest.(check bool)
+        "search rejects corrupt product" true
+        (match
+           Store_sqlite.search_products store ~user ~query:(parsed store "whey")
+             ~limit:100
+         with
+        | Error (Error.Storage_decoding _) -> true
+        | _ -> false);
+      Alcotest.(check bool)
+        "replacement rejects corrupt product" true
+        (match
+           Test_support.save_product_raw store ~user ~id:(Some product.id) input
+         with
+        | Error (Error.Storage_decoding _) -> true
+        | _ -> false))
 
 let () =
   Alcotest.run "product store"
@@ -203,6 +234,8 @@ let () =
           (fun (name, test) -> Alcotest.test_case name `Quick test)
           [
             ("save and replace", test_save_and_replace);
+            ( "corrupt product is not repaired",
+              test_corrupt_product_is_not_repaired );
             ("validation", test_validation);
             ("isolation", test_isolation);
             ("literal search and order", test_literal_search_and_order);

@@ -1,14 +1,26 @@
 module type S = sig
   type t
 
-  val resolve_user : t -> issuer:string -> subject:string -> (User.t, Error.t) result
+  val resolve_user :
+    t -> issuer:string -> subject:string -> (User.t, Error.t) result
+
   val save_product :
-    t -> user:User.t -> id:Product_id.t option -> Product.input -> (Product.t, Error.t) result
+    t ->
+    user:User.t ->
+    id:Product_id.t option ->
+    Product.Create.t ->
+    (Product.t, Error.t) result
 
   val search_products :
-    t -> user:User.t -> query:Search_query.t -> limit:int -> (Product.t list, Error.t) result
+    t ->
+    user:User.t ->
+    query:Search_query.t ->
+    limit:int ->
+    (Product.t list, Error.t) result
 
-  val create_meal : t -> user:User.t -> Meal.create -> (Meal.t, Error.t) result
+  val create_meal :
+    t -> user:User.t -> Meal.Create.t -> (Meal.t, Error.t) result
+
   val get_meal : t -> user:User.t -> Meal_id.t -> (Meal.t, Error.t) result
 
   val query_meals :
@@ -20,14 +32,23 @@ module type S = sig
     limit:int ->
     (Meal.t list, Error.t) result
 
-  val update_meal : t -> user:User.t -> Meal_id.t -> Meal.patch -> (Meal.t, Error.t) result
+  val update_meal :
+    t -> user:User.t -> Meal_id.t -> Meal.Patch.t -> (Meal.t, Error.t) result
+
   val delete_meal : t -> user:User.t -> Meal_id.t -> (unit, Error.t) result
 
-  val meals_between : t -> user:User.t -> start:Ptime.t -> stop:Ptime.t -> (Meal.t list, Error.t) result
+  val meals_between :
+    t ->
+    user:User.t ->
+    start:Ptime.t ->
+    stop:Ptime.t ->
+    (Meal.t list, Error.t) result
 
   val create_manual_weigh_in :
-    t -> user:User.t -> Weigh_in.manual_create -> (Weigh_in.t, Error.t) result
-  val get_weigh_in : t -> user:User.t -> Weigh_in_id.t -> (Weigh_in.t, Error.t) result
+    t -> user:User.t -> Weigh_in.Create.t -> (Weigh_in.t, Error.t) result
+
+  val get_weigh_in :
+    t -> user:User.t -> Weigh_in_id.t -> (Weigh_in.t, Error.t) result
 
   val query_weigh_ins :
     t ->
@@ -38,33 +59,72 @@ module type S = sig
     (Weigh_in.t list, Error.t) result
 
   val update_manual_weigh_in :
-    t -> user:User.t -> Weigh_in_id.t -> Weigh_in.patch -> (Weigh_in.t, Error.t) result
-  val delete_weigh_in : t -> user:User.t -> Weigh_in_id.t -> (unit, Error.t) result
+    t ->
+    user:User.t ->
+    Weigh_in_id.t ->
+    Weigh_in.Patch.t ->
+    (Weigh_in.t, Error.t) result
 
-  val weigh_ins_between : t -> user:User.t -> start:Ptime.t -> stop:Ptime.t -> (Weigh_in.t list, Error.t) result
+  val delete_weigh_in :
+    t -> user:User.t -> Weigh_in_id.t -> (unit, Error.t) result
+
+  val weigh_ins_between :
+    t ->
+    user:User.t ->
+    start:Ptime.t ->
+    stop:Ptime.t ->
+    (Weigh_in.t list, Error.t) result
+
   val latest_weigh_in : t -> user:User.t -> (Weigh_in.t, Error.t) result
 
   val create_withings_oauth_state :
-    t -> user:User.t -> state_hash:string -> expires_at:Ptime.t -> (unit, Error.t) result
+    t ->
+    user:User.t ->
+    state_hash:string ->
+    expires_at:Ptime.t ->
+    (unit, Error.t) result
 
   val consume_withings_oauth_state :
-    t -> user:User.t -> state_hash:string -> now:Ptime.t -> (unit, Error.t) result
+    t ->
+    user:User.t ->
+    state_hash:string ->
+    now:Ptime.t ->
+    (unit, Error.t) result
 
   val create_withings_connection :
-    t -> user:User.t -> withings_user_id:string -> (Withings_connection.t, Error.t) result
+    t ->
+    user:User.t ->
+    withings_user_id:string ->
+    (Withings_connection.t, Error.t) result
 
   val get_withings_status :
     t -> user:User.t -> (Withings_connection.status, Error.t) result
 
   val save_withings_credentials :
-    t -> user:User.t -> key:bytes -> Withings.credentials -> (Withings_connection.t, Error.t) result
+    t ->
+    user:User.t ->
+    key:bytes ->
+    Withings.credentials ->
+    (Withings_connection.t, Error.t) result
 
   val withings_credentials :
-    t -> user:User.t -> connection:Withings_connection.t -> key:bytes -> (Withings.credentials, Error.t) result
+    t ->
+    user:User.t ->
+    connection:Withings_connection.t ->
+    key:bytes ->
+    (Withings.credentials, Error.t) result
 
   val mark_withings_reauthorization :
-    t -> user:User.t -> connection:Withings_connection.t -> (unit, Error.t) result
+    t ->
+    user:User.t ->
+    connection:Withings_connection.t ->
+    (unit, Error.t) result
 
   val persist_withings_import :
-    t -> user:User.t -> connection:Withings_connection.t -> rows:Weigh_in.import list -> cursor:int64 option -> (unit, Error.t) result
+    t ->
+    user:User.t ->
+    connection:Withings_connection.t ->
+    rows:Weigh_in.Import.t list ->
+    cursor:int64 option ->
+    (unit, Error.t) result
 end

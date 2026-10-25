@@ -174,6 +174,122 @@ let test_mcp_scope_failures_are_forbidden () =
         (request ~scopes:[ "ledger:read" ] store ~headers `POST "/mcp" body)
           .status)
 
+let nonfinite_request tool arguments table () =
+  Test_support.with_store (fun store _ ->
+      let headers =
+        [
+          ("authorization", "Bearer token"); ("content-type", "application/json");
+        ]
+      in
+      let body =
+        Printf.sprintf
+          {|{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"%s","arguments":%s}}|}
+          tool arguments
+      in
+      let response =
+        request store
+          ~scopes:[ "ledger:write"; "ledger:read" ]
+          ~headers `POST "/mcp" body
+      in
+      Alcotest.(check int) "valid JSON is not a parse error" 200 response.status;
+      let json = Yojson.Safe.from_string response.body in
+      let open Yojson.Safe.Util in
+      Alcotest.(check bool)
+        "domain error response" true
+        ((not (Yojson.Safe.equal (member "error" json) `Null))
+        || Yojson.Safe.equal
+             (member "isError" (member "result" json))
+             (`Bool true));
+      let count = ref (-1) in
+      let rc =
+        Sqlite3.exec store
+          ~cb:(fun row _ -> count := int_of_string (Option.get row.(0)))
+          ("SELECT count(*) FROM " ^ table)
+      in
+      Alcotest.(check bool)
+        "count query" true
+        (match rc with Sqlite3.Rc.OK -> true | _ -> false);
+      Alcotest.(check int) "nothing persisted" 0 !count;
+      let read_tool =
+        if String.equal table "meals" then "query_meals" else "query_weights"
+      in
+      let read =
+        Printf.sprintf
+          {|{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"%s","arguments":{}}}|}
+          read_tool
+      in
+      let response =
+        request store ~scopes:[ "ledger:read" ] ~headers `POST "/mcp" read
+      in
+      Alcotest.(check int) "subsequent read succeeds" 200 response.status;
+      let result = Yojson.Safe.from_string response.body |> member "result" in
+      let rows =
+        result |> member "structuredContent"
+        |> member (if String.equal table "meals" then "meals" else "weights")
+      in
+      Alcotest.(check bool)
+        "successful empty read" true
+        (Yojson.Safe.equal rows (`List [])))
+
+let test_overflow_reaches_http_as_tool_error () =
+  Test_support.with_store (fun store _ ->
+      let headers =
+        [
+          ("authorization", "Bearer token"); ("content-type", "application/json");
+        ]
+      in
+      let call name arguments =
+        let body =
+          Printf.sprintf
+            {|{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"%s","arguments":%s}}|}
+            name arguments
+        in
+        let response =
+          request store
+            ~scopes:[ "ledger:read"; "ledger:write" ]
+            ~headers `POST "/mcp" body
+        in
+        Alcotest.(check int) "HTTP success framing" 200 response.status;
+        Yojson.Safe.from_string response.body
+      in
+      let open Yojson.Safe.Util in
+      List.iter
+        (fun calories ->
+          let response =
+            call "record_meal"
+              (Printf.sprintf
+                 {|{"description":"large","calories_kcal":%d,"protein_g":1,"eaten_at":"2026-07-14T10:00:00Z"}|}
+                 calories)
+          in
+          Alcotest.(check bool)
+            "valid meal accepted" true
+            (Yojson.Safe.equal (member "error" response) `Null);
+          Alcotest.(check bool)
+            "valid meal not a tool error" true
+            (not
+               (Yojson.Safe.equal
+                  (member "isError" (member "result" response))
+                  (`Bool true)));
+          Alcotest.(check int)
+            "integer calories preserved on the wire" calories
+            (response |> member "result" |> member "structuredContent"
+           |> member "calories_kcal" |> to_int))
+        [ max_int; 1 ];
+      List.iter
+        (fun name ->
+          let arguments =
+            if String.equal name "get_daily_totals" then
+              {|{"date":"2026-07-14"}|}
+            else {|{"from_date":"2026-07-14","to_date":"2026-07-14"}|}
+          in
+          let response = call name arguments in
+          Alcotest.(check bool)
+            "overflow is a tool error, not wrapped data" true
+            (Yojson.Safe.equal
+               (member "isError" (member "result" response))
+               (`Bool true)))
+        [ "get_daily_totals"; "get_daily_series"; "get_summary" ])
+
 let () =
   Alcotest.run "http"
     [
@@ -181,6 +297,23 @@ let () =
         [
           Alcotest.test_case "protected resource metadata alias" `Quick
             test_protected_resource_metadata_alias;
+          Alcotest.test_case "overflow reaches HTTP as tool error" `Quick
+            test_overflow_reaches_http_as_tool_error;
+          Alcotest.test_case "nonfinite meal" `Quick
+            (nonfinite_request "record_meal"
+               {|{"description":"overflow","calories_kcal":1,"protein_g":1e309}|}
+               "meals");
+          Alcotest.test_case "nonfinite meal carbs" `Quick
+            (nonfinite_request "record_meal"
+               {|{"description":"overflow","calories_kcal":1,"protein_g":1,"carbs_g":1e309}|}
+               "meals");
+          Alcotest.test_case "nonfinite meal fat" `Quick
+            (nonfinite_request "record_meal"
+               {|{"description":"overflow","calories_kcal":1,"protein_g":1,"fat_g":1e309}|}
+               "meals");
+          Alcotest.test_case "nonfinite weight" `Quick
+            (nonfinite_request "record_weight" {|{"weight_kg":1e309}|}
+               "weigh_ins");
           Alcotest.test_case "path specific protected resource metadata" `Quick
             test_protected_resource_metadata_path_specific;
           Alcotest.test_case "metadata endpoints are identical" `Quick

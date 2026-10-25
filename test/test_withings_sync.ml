@@ -126,8 +126,8 @@ let test_upstream_change_preserves_timestamp_and_tombstone () =
 let test_relink_different_account_resets_cursor () =
   with_setup [] (fun store user connection _ ->
       Result.get_ok
-        (Store_sqlite.persist_withings_import store ~user ~connection ~rows:[]
-           ~cursor:(Some 100L));
+        (Test_support.persist_withings_import_raw store ~user ~connection
+           ~rows:[] ~cursor:(Some 100L));
       ignore
         (Result.get_ok
            (Store_sqlite.ensure_withings_connection store ~user
@@ -152,7 +152,7 @@ let test_reconnect_same_account_updates_import () =
           }
       in
       Result.get_ok
-        (Store_sqlite.persist_withings_import store ~user ~connection
+        (Test_support.persist_withings_import_raw store ~user ~connection
            ~rows:[ original ] ~cursor:(Some 100L));
       Result.get_ok (Store_sqlite.delete_withings_connection store ~user);
       let replacement =
@@ -162,7 +162,7 @@ let test_reconnect_same_account_updates_import () =
       in
       let corrected = Weigh_in.{ original with weight_kg = 81.0 } in
       Result.get_ok
-        (Store_sqlite.persist_withings_import store ~user
+        (Test_support.persist_withings_import_raw store ~user
            ~connection:replacement ~rows:[ corrected ] ~cursor:(Some 101L));
       let rows =
         Result.get_ok
@@ -196,7 +196,7 @@ let test_failed_transaction_retains_cursor () =
       Alcotest.(check bool)
         "transaction fails" true
         (Result.is_error
-           (Store_sqlite.persist_withings_import store ~user ~connection
+           (Test_support.persist_withings_import_raw store ~user ~connection
               ~rows:
                 [
                   Weigh_in.
@@ -220,11 +220,11 @@ let test_stale_batch_cannot_regress_value_or_cursor () =
           }
       in
       Result.get_ok
-        (Store_sqlite.persist_withings_import store ~user ~connection
+        (Test_support.persist_withings_import_raw store ~user ~connection
            ~rows:[ current ] ~cursor:(Some 100L));
       let stale = Weigh_in.{ current with weight_kg = 70.0 } in
       Result.get_ok
-        (Store_sqlite.persist_withings_import store ~user ~connection
+        (Test_support.persist_withings_import_raw store ~user ~connection
            ~rows:[ stale ] ~cursor:(Some 99L));
       let weight =
         List.hd
@@ -288,11 +288,41 @@ let test_transient_refresh_failure_does_not_require_reauthorization () =
         "transient failure retains authorization" false
         status.requires_reauthorization)
 
+let test_import_does_not_repair_corrupt_weight () =
+  with_setup
+    [ measurement "one" ]
+    (fun store user connection client ->
+      let sync =
+        Withings_sync.make ~store ~client ~token_key:key ~now:(fun () -> now)
+      in
+      Result.get_ok (Withings_sync.sync sync ~user ~connection);
+      Alcotest.(check bool)
+        "inject infinity" true
+        (Sqlite3.exec store "UPDATE weigh_ins SET weight_kg = 1e309"
+        = Sqlite3.Rc.OK);
+      Alcotest.(check bool)
+        "corrupt correction rejected" true
+        (match Withings_sync.sync sync ~user ~connection with
+        | Error (Error.Storage_decoding _) -> true
+        | _ -> false);
+      let weight = ref 0.0 in
+      ignore
+        (Sqlite3.exec store
+           ~cb:(fun row _ -> weight := float_of_string (Option.get row.(0)))
+           "SELECT weight_kg FROM weigh_ins");
+      Alcotest.(check bool)
+        "original corrupt value untouched" true
+        (Float.is_infinite !weight);
+      Alcotest.(check (option int64))
+        "cursor unchanged" (Some 77L) (sync_cursor store))
+
 let () =
   Alcotest.run "withings sync"
     [
       ( "sync",
         [
+          Alcotest.test_case "import does not repair corrupt weight" `Quick
+            test_import_does_not_repair_corrupt_weight;
           Alcotest.test_case "normalization, duplicate and cursor" `Quick
             test_normalizes_deduplicates_and_advances_cursor;
           Alcotest.test_case "update and tombstone" `Quick

@@ -196,7 +196,8 @@ let test_update_meal_partial_patch_leaves_other_fields_unchanged () =
       let service = Service.make ~store in
       let meal =
         Result.get_ok
-          (Service.record_meal service ~user (Test_support.meal_input ()))
+          (Test_support.record_meal_raw service ~user
+             (Test_support.meal_input ()))
       in
       let response =
         Mcp.handle ~service
@@ -239,7 +240,8 @@ let test_get_daily_totals_defaults_to_today_and_respects_scope () =
       let service = Service.make ~store in
       ignore
         (Result.get_ok
-           (Service.record_meal service ~user (Test_support.meal_input ())));
+           (Test_support.record_meal_raw service ~user
+              (Test_support.meal_input ())));
       Alcotest.(check bool)
         "read allowed with omitted arguments" true
         (Result.is_ok
@@ -311,7 +313,7 @@ let test_get_daily_totals_uses_the_requested_timezone () =
       in
       ignore
         (Result.get_ok
-           (Service.record_meal service ~user
+           (Test_support.record_meal_raw service ~user
               (Test_support.meal_input ~eaten_at ())));
       let totals arguments =
         let fields =
@@ -346,11 +348,11 @@ let test_get_daily_series_returns_intake_and_weight_per_day () =
       let at value = Result.get_ok (Time.parse_offset_datetime value) in
       ignore
         (Result.get_ok
-           (Service.record_meal service ~user
+           (Test_support.record_meal_raw service ~user
               (Test_support.meal_input ~eaten_at:(at "2026-07-02T10:00:00Z") ())));
       ignore
         (Result.get_ok
-           (Service.record_manual_weigh_in service ~user
+           (Test_support.record_manual_weigh_in_raw service ~user
               Weigh_in.
                 {
                   measured_at = Some (at "2026-07-02T07:00:00Z");
@@ -358,7 +360,7 @@ let test_get_daily_series_returns_intake_and_weight_per_day () =
                 }));
       ignore
         (Result.get_ok
-           (Service.record_manual_weigh_in service ~user
+           (Test_support.record_manual_weigh_in_raw service ~user
               Weigh_in.
                 {
                   measured_at = Some (at "2026-07-02T21:00:00Z");
@@ -366,7 +368,7 @@ let test_get_daily_series_returns_intake_and_weight_per_day () =
                 }));
       ignore
         (Result.get_ok
-           (Service.record_manual_weigh_in service ~user
+           (Test_support.record_manual_weigh_in_raw service ~user
               Weigh_in.
                 {
                   measured_at = Some (at "2026-07-03T07:00:00Z");
@@ -474,11 +476,11 @@ let test_get_summary_reports_averages_targets_and_trend () =
       let at value = Result.get_ok (Time.parse_offset_datetime value) in
       ignore
         (Result.get_ok
-           (Service.record_meal service ~user
+           (Test_support.record_meal_raw service ~user
               (Test_support.meal_input ~eaten_at:(at "2026-07-02T10:00:00Z") ())));
       ignore
         (Result.get_ok
-           (Service.record_manual_weigh_in service ~user
+           (Test_support.record_manual_weigh_in_raw service ~user
               Weigh_in.
                 {
                   measured_at = Some (at "2026-07-01T07:00:00Z");
@@ -486,7 +488,7 @@ let test_get_summary_reports_averages_targets_and_trend () =
                 }));
       ignore
         (Result.get_ok
-           (Service.record_manual_weigh_in service ~user
+           (Test_support.record_manual_weigh_in_raw service ~user
               Weigh_in.
                 {
                   measured_at = Some (at "2026-07-09T07:00:00Z");
@@ -1059,7 +1061,8 @@ let test_query_meals_search_composes_with_dates_and_limit () =
           let input =
             { (Test_support.meal_input ~eaten_at ()) with description }
           in
-          ignore (Result.get_ok (Service.record_meal service ~user input)))
+          ignore
+            (Result.get_ok (Test_support.record_meal_raw service ~user input)))
         [
           ("2026-07-01T10:00:00Z", "Whey old");
           ("2026-07-02T10:00:00Z", "Soup");

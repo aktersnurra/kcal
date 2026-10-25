@@ -1,5 +1,8 @@
 open Hegel
 
+let daily_series_ok zone range ~meals ~weigh_ins =
+  Result.get_ok (Summary.daily_series zone range ~meals ~weigh_ins)
+
 (* Years within [1000, 9999] fit Date.to_string's %04d-%02d-%02d shape and
    Date.of_string's strict "YYYY-MM-DD" check exactly, so bounding the
    generators here avoids exercising unrelated formatting edge cases.  The top
@@ -91,22 +94,11 @@ let%hegel_test date_range_lists_consecutive_dates_from_first_to_last tc =
     length = 1 || Result.is_error (Date_range.make ~first:last ~last:first))
 
 let meal_at eaten_at : Meal.t =
-  {
-    id = Meal_id.fresh ();
-    user_id = User_id.fresh ();
-    eaten_at;
-    description = "m";
-    calories_kcal = 100;
-    protein_g = 1.0;
-    carbs_g = None;
-    fat_g = None;
-    confidence = None;
-    estimate_source = None;
-    notes = None;
-    created_at = eaten_at;
-    updated_at = eaten_at;
-    deleted_at = None;
-  }
+  Result.get_ok
+    (Meal.of_storage ~id:(Meal_id.fresh ()) ~user_id:(User_id.fresh ())
+       ~eaten_at ~description:"m" ~calories_kcal:100 ~protein_g:1.0
+       ~carbs_g:None ~fat_g:None ~confidence:None ~estimate_source:None
+       ~notes:None ~created_at:eaten_at ~updated_at:eaten_at ~deleted_at:None)
 
 let%hegel_test daily_series_keeps_every_in_range_meal_exactly_once tc =
   let zone = draw_zone tc in
@@ -136,7 +128,7 @@ let%hegel_test daily_series_keeps_every_in_range_meal_exactly_once tc =
         Date_range.mem range (Time.local_date zone meal.eaten_at))
       meals
   in
-  let series = Summary.daily_series zone range ~meals ~weigh_ins:[] in
+  let series = daily_series_ok zone range ~meals ~weigh_ins:[] in
   let counted =
     List.fold_left
       (fun sum (day : Summary.day) ->
@@ -159,9 +151,9 @@ let%hegel_test meal_patch_touches_only_the_included_fields tc =
       let include_calories = draw tc (booleans ()) in
       let include_protein = draw tc (booleans ()) in
       let new_description = "item " ^ draw tc (text ()) in
-      let new_calories = draw tc (integers ~min_value:0 ~max_value:5000 ()) in
+      let new_calories = draw tc (integers ~min_value:0 ()) in
       let new_protein =
-        float_of_int (draw tc (integers ~min_value:0 ~max_value:500 ()))
+        draw tc (floats ~min_value:0.0 ~allow_infinity:false ())
       in
       let patch =
         Meal.
@@ -175,7 +167,7 @@ let%hegel_test meal_patch_touches_only_the_included_fields tc =
           }
       in
       let updated =
-        Result.get_ok (Store_sqlite.update_meal store ~user meal.id patch)
+        Result.get_ok (Test_support.update_meal_raw store ~user meal.id patch)
       in
       assert (
         updated.description

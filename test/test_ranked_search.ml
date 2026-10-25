@@ -17,11 +17,11 @@ let product name =
     }
 
 let save db user name =
-  Result.get_ok (Store_sqlite.save_product db ~user ~id:None (product name))
+  Result.get_ok (Test_support.save_product_raw db ~user ~id:None (product name))
 
 let meal db user description =
   Result.get_ok
-    (Store_sqlite.create_meal db ~user
+    (Test_support.create_meal_raw db ~user
        Meal.
          {
            (Test_support.meal_input ()) with
@@ -248,7 +248,7 @@ let test_index_lifecycle () =
       in
       let changed =
         Result.get_ok
-          (Store_sqlite.save_product db ~user ~id:(Some p.id)
+          (Test_support.save_product_raw db ~user ~id:(Some p.id)
              (product "newword"))
       in
       check json_rows "replacement removes old terms" []
@@ -265,7 +265,7 @@ let test_index_lifecycle () =
       in
       ignore
         (Result.get_ok
-           (Store_sqlite.update_meal db ~user m.id
+           (Test_support.update_meal_raw db ~user m.id
               Meal.{ empty_patch with description = Some "newmeal" }));
       check json_rows "meal update removes old terms" [] (find_meals "oldmeal");
       check Alcotest.int "meal update adds new terms" 1
@@ -290,7 +290,7 @@ let test_meal_ranked_filters () =
       let create owner time description =
         let eaten_at = Result.get_ok (Time.parse_offset_datetime time) in
         Result.get_ok
-          (Store_sqlite.create_meal db ~user:owner
+          (Test_support.create_meal_raw db ~user:owner
              Meal.
                {
                  (Test_support.meal_input ~eaten_at ()) with
@@ -327,7 +327,7 @@ let test_meal_stable_ties () =
       in
       let create () =
         Result.get_ok
-          (Store_sqlite.create_meal db ~user
+          (Test_support.create_meal_raw db ~user
              Meal.
                {
                  (Test_support.meal_input ~eaten_at ()) with

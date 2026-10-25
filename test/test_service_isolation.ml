@@ -3,7 +3,8 @@ let test_service_hides_foreign_meal () =
       let service = Service.make ~store in
       let meal =
         Result.get_ok
-          (Service.record_meal service ~user:alice (Test_support.meal_input ()))
+          (Test_support.record_meal_raw service ~user:alice
+             (Test_support.meal_input ()))
       in
       Alcotest.(check bool)
         "not found" true
@@ -16,7 +17,8 @@ let test_service_records_for_authenticated_user () =
       let service = Service.make ~store in
       let meal =
         Result.get_ok
-          (Service.record_meal service ~user:alice (Test_support.meal_input ()))
+          (Test_support.record_meal_raw service ~user:alice
+             (Test_support.meal_input ()))
       in
       Alcotest.(check string)
         "owner"
