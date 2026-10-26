@@ -2,10 +2,10 @@
  (name kcal)
  (wrapped false)
  (preprocess
-  (pps ppx_jane))
+  (pps ppx_sexp_conv ppx_compare ppx_let))
  (libraries
   base
-  core
+  cmdliner
   jose
   ptime
   sqlite3

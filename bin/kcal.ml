@@ -71,28 +71,33 @@ let serve (config : Config.server) =
       Http_adapter.run ~withings env ~config ~auth (Service.make ~store);
       0)
 
-let command ~summary param run =
-  Core.Command.basic ~summary
-    (Core.Command.Param.map param ~f:(fun config () ->
-         match config with
-         | Error error ->
-             Stdlib.Printf.eprintf "%s\n%!" (Config.error_to_string error);
-             Stdlib.exit 1
-         | Ok config -> Stdlib.exit (run config)))
+let command name ~doc param run =
+  let open Cmdliner in
+  let open Term.Syntax in
+  Cmd.v (Cmd.info name ~doc)
+    (let+ config = param in
+     match config with
+     | Error error ->
+         Stdlib.Printf.eprintf "%s\n%!" (Config.error_to_string error);
+         1
+     | Ok config -> run config)
 
 let () =
   Logging.setup ();
-  Command_unix.run
-    ~argv:(Config.normalize_argv (Array.to_list Stdlib.Sys.argv))
-    (Core.Command.group ~summary:"Portable local calorie ledger"
-       [
-         ( "migrate",
-           command ~summary:"Apply SQLite migrations" (Config.migrate_param ())
-             (fun database -> with_database database (fun _ -> 0)) );
-         ( "serve",
-           command ~summary:"Run the kcal HTTP service" (Config.serve_param ())
-             serve );
-         ( "sync-withings",
-           command ~summary:"Synchronize connected Withings accounts"
-             (Config.sync_param ()) reconciliation );
-       ])
+  let open Cmdliner in
+  Stdlib.exit
+    (Cmd.eval'
+       ~argv:
+         (Array.of_list (Config.normalize_argv (Array.to_list Stdlib.Sys.argv)))
+       (Cmd.group
+          (Cmd.info "kcal" ~doc:"Portable local calorie ledger")
+          [
+            command "migrate" ~doc:"Apply SQLite migrations"
+              (Config.migrate_param ()) (fun database ->
+                with_database database (fun _ -> 0));
+            command "serve" ~doc:"Run the kcal HTTP service"
+              (Config.serve_param ()) serve;
+            command "sync-withings"
+              ~doc:"Synchronize connected Withings accounts"
+              (Config.sync_param ()) reconciliation;
+          ]))

@@ -52,14 +52,15 @@ val server :
   withings:withings option ->
   (server, error) result
 
-val migrate_param : unit -> (database, error) result Core.Command.Param.t
-val serve_param : unit -> (server, error) result Core.Command.Param.t
+val migrate_param : unit -> (database, error) result Cmdliner.Term.t
+val serve_param : unit -> (server, error) result Cmdliner.Term.t
 
-val sync_param : unit -> (sync, error) result Core.Command.Param.t
-(** Flags override environment inputs before validation. No credentials are
-    parsed by Command's exception printer, which includes the raw argument on
-    failure. *)
+val sync_param : unit -> (sync, error) result Cmdliner.Term.t
+(** Flags override environment inputs before validation. Every flag is a plain
+    string, so the parser never reports a raw value; validation errors name the
+    field, never its value. *)
 
 val normalize_argv : string list -> string list
-(** Splits known inline configuration flags into Command's space-separated form.
-    Preserves value tokens and everything after the [--] delimiter. *)
+(** Rewrites each known configuration flag ([-name], [--name], a unique
+    [-prefix], inline or separate value) as [--name=VALUE], and [-help] as
+    [--help]. Preserves value tokens and everything after the [--] delimiter. *)

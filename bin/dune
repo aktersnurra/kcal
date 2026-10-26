@@ -1,5 +1,3 @@
 (executable
  (name kcal)
- (preprocess
-  (pps ppx_jane))
- (libraries core core_unix.command_unix kcal eio_main logs))
+ (libraries cmdliner kcal eio_main logs))

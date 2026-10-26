@@ -232,8 +232,10 @@ module Fields = struct
     ]
 end
 
-(* Command does not accept inline values and includes unknown flags verbatim in
-   errors. Split only our known value-taking flags, never their value tokens. *)
+(* Cmdliner reads a single-dash word as a cluster of short options. Rewrite each
+   known flag, in every form the CLI accepts (-name or --name, a unique -prefix,
+   an inline =value), as --name=VALUE, so a value token is never parsed again,
+   even one that looks like a flag. *)
 let normalize_argv argv =
   let names = List.map Fields.all ~f:fst in
   let known_flag argument =
@@ -252,48 +254,59 @@ let normalize_argv argv =
   let rec normalize = function
     | [] -> []
     | "--" :: _ as arguments -> arguments
+    | "-help" :: rest -> "--help" :: normalize rest
     | argument :: rest -> (
-        match String.lsplit2 argument ~on:'=' with
-        | Some (flag, value) when Option.is_some (known_flag flag) ->
-            ("-" ^ Option.value_exn (known_flag flag))
-            :: value :: normalize rest
-        | _ -> (
-            match (known_flag argument, rest) with
-            | Some _, value :: rest -> argument :: value :: normalize rest
-            | _ -> argument :: normalize rest))
+        let flag, inline =
+          match String.lsplit2 argument ~on:'=' with
+          | Some (flag, value) -> (flag, Some value)
+          | None -> (argument, None)
+        in
+        match (known_flag flag, inline, rest) with
+        | Some name, Some value, _ ->
+            ("--" ^ name ^ "=" ^ value) :: normalize rest
+        | Some name, None, value :: rest ->
+            ("--" ^ name ^ "=" ^ value) :: normalize rest
+        | Some name, None, [] -> [ "--" ^ name ]
+        | None, _, _ -> argument :: normalize rest)
   in
   match argv with
   | [] -> []
   | executable :: arguments -> executable :: normalize arguments
 
-(* Command's parser prints invalid raw arguments. Accept strings here and validate
-   only the selected flag/environment input, using value-free structured errors. *)
+(* A string option never fails to parse, so Cmdliner never prints a raw value;
+   only the selected flag or environment input is validated, with value-free
+   structured errors. *)
 let input (flag_name, env_name) =
-  let open Core.Command.Param in
-  map
-    (flag flag_name (optional string) ~doc:("VALUE overrides " ^ env_name))
-    ~f:(fun flag ->
-      match flag with Some _ -> flag | None -> Stdlib.Sys.getenv_opt env_name)
+  let open Cmdliner in
+  let open Term.Syntax in
+  let+ flag =
+    Arg.(
+      value
+      & opt (some string) None
+      & info [ flag_name ] ~docv:"VALUE" ~doc:("Overrides " ^ env_name ^ "."))
+  in
+  match flag with Some _ -> flag | None -> Stdlib.Sys.getenv_opt env_name
 
 let migrate_param () =
-  Core.Command.Param.map (input Fields.database_path) ~f:(fun path ->
-      database ~path:(Option.value path ~default:""))
+  let open Cmdliner.Term.Syntax in
+  let+ path = input Fields.database_path in
+  database ~path:(Option.value path ~default:"")
 
 let withings_inputs () =
-  let open Core.Command.Let_syntax in
-  let%map_open client_id = input Fields.withings_client_id
-  and client_secret = input Fields.withings_client_secret
-  and token_encryption_key = input Fields.token_encryption_key in
+  let open Cmdliner.Term.Syntax in
+  let+ client_id = input Fields.withings_client_id
+  and+ client_secret = input Fields.withings_client_secret
+  and+ token_encryption_key = input Fields.token_encryption_key in
   (client_id, client_secret, token_encryption_key)
 
 let serve_param () =
-  let open Core.Command.Let_syntax in
-  let%map_open database = migrate_param ()
-  and listen_address = input Fields.listen_address
-  and public_base_url = input Fields.public_base_url
-  and oidc_issuer = input Fields.oidc_issuer
-  and oidc_audience = input Fields.oidc_audience
-  and integration = withings_inputs () in
+  let open Cmdliner.Term.Syntax in
+  let+ database = migrate_param ()
+  and+ listen_address = input Fields.listen_address
+  and+ public_base_url = input Fields.public_base_url
+  and+ oidc_issuer = input Fields.oidc_issuer
+  and+ oidc_audience = input Fields.oidc_audience
+  and+ integration = withings_inputs () in
   let open Result.Let_syntax in
   let%bind database = database in
   let client_id, client_secret, token_encryption_key = integration in
@@ -308,9 +321,8 @@ let serve_param () =
     ~withings
 
 let sync_param () =
-  let open Core.Command.Let_syntax in
-  let%map_open database = migrate_param ()
-  and integration = withings_inputs () in
+  let open Cmdliner.Term.Syntax in
+  let+ database = migrate_param () and+ integration = withings_inputs () in
   let open Result.Let_syntax in
   let%bind database = database in
   let client_id, client_secret, token_encryption_key = integration in
