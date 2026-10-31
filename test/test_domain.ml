@@ -3,7 +3,7 @@ open Base
 module Error = Domain_error
 
 let valid_meal () =
-  Meal.
+  Meal_item.
     {
       description = "Soup";
       calories_kcal = 250;
@@ -13,48 +13,49 @@ let valid_meal () =
       confidence = None;
       estimate_source = None;
       notes = None;
-      eaten_at = None;
     }
 
 let test_rejects_negative_meal_calories () =
-  let input = Meal.{ (valid_meal ()) with calories_kcal = -1 } in
+  let input = Meal_item.{ (valid_meal ()) with calories_kcal = -1 } in
   Alcotest.(check bool)
     "invalid" true
-    (Result.is_error (Meal.Create.of_raw input))
+    (Result.is_error (Meal_item.Create.of_raw input))
 
 let test_rejects_blank_meal_description () =
-  let input = Meal.{ (valid_meal ()) with description = "  \t" } in
+  let input = Meal_item.{ (valid_meal ()) with description = "  \t" } in
   Alcotest.(check bool)
     "invalid" true
-    (Result.is_error (Meal.Create.of_raw input))
+    (Result.is_error (Meal_item.Create.of_raw input))
 
 let test_rejects_negative_meal_macros () =
-  let input = Meal.{ (valid_meal ()) with protein_g = -0.1 } in
+  let input = Meal_item.{ (valid_meal ()) with protein_g = -0.1 } in
   Alcotest.(check bool)
     "invalid protein" true
-    (Result.is_error (Meal.Create.of_raw input));
-  let input = Meal.{ (valid_meal ()) with carbs_g = Some (-0.1) } in
+    (Result.is_error (Meal_item.Create.of_raw input));
+  let input = Meal_item.{ (valid_meal ()) with carbs_g = Some (-0.1) } in
   Alcotest.(check bool)
     "invalid carbs" true
-    (Result.is_error (Meal.Create.of_raw input));
-  let input = Meal.{ (valid_meal ()) with fat_g = Some (-0.1) } in
+    (Result.is_error (Meal_item.Create.of_raw input));
+  let input = Meal_item.{ (valid_meal ()) with fat_g = Some (-0.1) } in
   Alcotest.(check bool)
     "invalid fat" true
-    (Result.is_error (Meal.Create.of_raw input))
+    (Result.is_error (Meal_item.Create.of_raw input))
 
 let test_rejects_invalid_confidence () =
   List.iter
     ~f:(fun confidence ->
-      let input = Meal.{ (valid_meal ()) with confidence = Some confidence } in
+      let input =
+        Meal_item.{ (valid_meal ()) with confidence = Some confidence }
+      in
       Alcotest.(check bool)
         "invalid" true
-        (Result.is_error (Meal.Create.of_raw input)))
+        (Result.is_error (Meal_item.Create.of_raw input)))
     [ -0.1; 1.1 ]
 
 let test_accepts_valid_meal () =
   Alcotest.(check bool)
     "valid" true
-    (Result.is_ok (Meal.Create.of_raw (valid_meal ())))
+    (Result.is_ok (Meal_item.Create.of_raw (valid_meal ())))
 
 let test_rejects_nonpositive_manual_weight () =
   Alcotest.(check bool)
@@ -78,7 +79,7 @@ let test_uuid_wrappers_accept_only_uuid_values () =
     (Option.is_none (Meal_id.of_string "not-a-uuid"))
 
 let test_patch_defaults_leave_values_unchanged () =
-  let meal = Meal.empty_patch in
+  let meal = Meal_item.empty_patch in
   Alcotest.(check bool)
     "meal description unchanged" true
     (Option.is_none meal.description);
@@ -120,7 +121,7 @@ let test_rejects_nonfinite_inputs () =
       Alcotest.(check bool)
         "meal rejects nonfinite protein" true
         (Result.is_error
-           (Meal.Create.of_raw { (valid_meal ()) with protein_g = value }));
+           (Meal_item.Create.of_raw { (valid_meal ()) with protein_g = value }));
       Alcotest.(check bool)
         "weight rejects nonfinite" true
         (Result.is_error
@@ -136,7 +137,8 @@ let%hegel_test meal_optional_macros_obey_finite_nonnegative_contract tc =
   assert (
     Bool.equal
       (Result.is_ok
-         (Meal.Create.of_raw { (valid_meal ()) with protein_g; carbs_g; fat_g }))
+         (Meal_item.Create.of_raw
+            { (valid_meal ()) with protein_g; carbs_g; fat_g }))
       (valid protein_g && optional carbs_g && optional fat_g))
 
 let%hegel_test scalar_constructors_accept_exactly_their_domains tc =
@@ -171,7 +173,7 @@ let%hegel_test meal_create_and_patch_share_numeric_rules tc =
   let fat_g = Hegel.draw tc (Hegel.optional (Hegel.floats ())) in
   let confidence = Hegel.draw tc (Hegel.optional (Hegel.floats ())) in
   let create =
-    Meal.Create.of_raw
+    Meal_item.Create.of_raw
       {
         (valid_meal ()) with
         calories_kcal;
@@ -182,9 +184,9 @@ let%hegel_test meal_create_and_patch_share_numeric_rules tc =
       }
   in
   let patch =
-    Meal.Patch.of_raw
+    Meal_item.Patch.of_raw
       {
-        Meal.empty_patch with
+        Meal_item.empty_patch with
         calories_kcal = Some calories_kcal;
         protein_g = Some protein_g;
         carbs_g;
@@ -205,15 +207,19 @@ let test_all_numeric_inputs_reject_nonfinite () =
           | _ -> false)
       in
       rejected "meal protein patch"
-        (Meal.Patch.of_raw { Meal.empty_patch with protein_g = Some value });
+        (Meal_item.Patch.of_raw
+           { Meal_item.empty_patch with protein_g = Some value });
       rejected "meal carbs create"
-        (Meal.Create.of_raw { (valid_meal ()) with carbs_g = Some value });
+        (Meal_item.Create.of_raw { (valid_meal ()) with carbs_g = Some value });
       rejected "meal fat patch"
-        (Meal.Patch.of_raw { Meal.empty_patch with fat_g = Some value });
+        (Meal_item.Patch.of_raw
+           { Meal_item.empty_patch with fat_g = Some value });
       rejected "meal confidence create"
-        (Meal.Create.of_raw { (valid_meal ()) with confidence = Some value });
+        (Meal_item.Create.of_raw
+           { (valid_meal ()) with confidence = Some value });
       rejected "meal confidence patch"
-        (Meal.Patch.of_raw { Meal.empty_patch with confidence = Some value });
+        (Meal_item.Patch.of_raw
+           { Meal_item.empty_patch with confidence = Some value });
       rejected "manual weight patch"
         (Weigh_in.Patch.of_raw
            { Weigh_in.empty_patch with weight_kg = Some value });

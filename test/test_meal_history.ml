@@ -60,15 +60,28 @@ let shake =
 let with_service f =
   Test_support.with_store (fun store user -> f (Service.make ~store) user)
 
+let items_of meal =
+  match field "items" meal with
+  | `List items -> items
+  | _ -> Alcotest.fail "items is not a list"
+
+let only_item meal =
+  match items_of meal with
+  | [ item ] -> item
+  | _ -> Alcotest.fail "expected one item"
+
+let soup =
+  `Assoc
+    [
+      ("description", `String "Soup");
+      ("calories_kcal", `Int 250);
+      ("protein_g", `Int 12);
+    ]
+
 let test_idempotency_key () =
   with_service (fun service user ->
       let meal =
-        [
-          ("description", `String "Soup");
-          ("calories_kcal", `Int 250);
-          ("protein_g", `Int 12);
-          ("idempotency_key", `String "soup-1");
-        ]
+        [ ("items", `List [ soup ]); ("idempotency_key", `String "soup-1") ]
       in
       let first = payload service user "record_meal" meal in
       let retry = payload service user "record_meal" meal in
@@ -85,29 +98,133 @@ let test_idempotency_key () =
            (error_text service user "record_meal" meal)
            ~substring:"deleted"))
 
+let test_a_meal_has_items () =
+  with_service (fun service user ->
+      let meal =
+        payload service user "record_meal"
+          [
+            ("label", `String "lunch");
+            ( "items",
+              `List
+                [
+                  soup;
+                  `Assoc
+                    [
+                      ("description", `String "Bread");
+                      ("calories_kcal", `Int 150);
+                      ("protein_g", `Int 5);
+                      ("carbs_g", `Int 28);
+                    ];
+                ] );
+          ]
+      in
+      Alcotest.check json "totals are the items' sums" (`Int 400)
+        (field "calories_kcal" meal);
+      Alcotest.check json "protein summed" (`Float 17.) (field "protein_g" meal);
+      Alcotest.check json "a macro only one item recorded" (`Float 28.)
+        (field "carbs_g" meal);
+      Alcotest.check json "label" (`String "lunch") (field "label" meal);
+      let id = field "id" meal in
+      let added =
+        payload service user "add_meal_item"
+          [
+            ("meal_id", id);
+            ( "item",
+              `Assoc
+                [
+                  ("description", `String "Banana");
+                  ("calories_kcal", `Int 100);
+                  ("protein_g", `Int 1);
+                ] );
+          ]
+      in
+      Alcotest.(check (list string))
+        "added last"
+        [ "Soup"; "Bread"; "Banana" ]
+        (List.map (items_of added) ~f:(string_field "description"));
+      let banana = List.last_exn (items_of added) in
+      let corrected =
+        payload service user "update_meal_item"
+          [
+            ("id", field "id" banana);
+            ("calories_kcal", `Int 120);
+            ("reason", `String "a large banana");
+          ]
+      in
+      Alcotest.check json "totals follow the correction" (`Int 520)
+        (field "calories_kcal" corrected);
+      let removed =
+        payload service user "delete_meal_item" [ ("id", field "id" banana) ]
+      in
+      Alcotest.check json "totals without the banana" (`Int 400)
+        (field "calories_kcal" removed);
+      let moved =
+        payload service user "update_meal"
+          [ ("id", id); ("eaten_at", `String "2026-07-01T12:30:00Z") ]
+      in
+      Alcotest.check json "the whole meal moves"
+        (`String "2026-07-01T12:30:00Z") (field "eaten_at" moved);
+      Alcotest.check json "items unchanged by a meal update" (`Int 2)
+        (`Int (List.length (items_of moved)));
+      let daily =
+        payload service user "get_daily_series"
+          [
+            ("from_date", `String "2026-07-01");
+            ("to_date", `String "2026-07-01");
+          ]
+      in
+      (match field "days" daily with
+      | `List [ day ] ->
+          Alcotest.check json "one meal, not two" (`Int 1)
+            (field "meal_count" day)
+      | _ -> Alcotest.fail "expected one day");
+      let single =
+        payload service user "record_meal" [ ("items", `List [ soup ]) ]
+      in
+      Alcotest.(check bool)
+        "a meal keeps at least one item" true
+        (String.is_substring
+           (error_text service user "delete_meal_item"
+              [ ("id", field "id" (only_item single)) ])
+           ~substring:"at least one item");
+      Alcotest.(check bool)
+        "a meal without items is rejected" true
+        (String.is_substring
+           (error_text service user "record_meal" [ ("items", `List []) ])
+           ~substring:"nonempty"))
+
 let test_update_keeps_revisions () =
   with_service (fun service user ->
       let meal =
         payload service user "record_meal"
           [
-            ("description", `String "Pasta");
-            ("calories_kcal", `Int 500);
-            ("protein_g", `Int 20);
-            ("estimate_source", `String "photo estimate");
+            ( "items",
+              `List
+                [
+                  `Assoc
+                    [
+                      ("description", `String "Pasta");
+                      ("calories_kcal", `Int 500);
+                      ("protein_g", `Int 20);
+                      ("estimate_source", `String "photo estimate");
+                    ];
+                ] );
           ]
       in
-      let id = field "id" meal in
+      let item_id = field "id" (only_item meal) in
       ignore
-        (payload service user "update_meal"
+        (payload service user "update_meal_item"
            [
-             ("id", id);
+             ("id", item_id);
              ("calories_kcal", `Int 650);
              ("reason", `String "portion was 300 g, not 200 g");
            ]);
       ignore
-        (payload service user "update_meal"
-           [ ("id", id); ("notes", `String "dinner") ]);
-      let fetched = payload service user "get_meal" [ ("id", id) ] in
+        (payload service user "update_meal_item"
+           [ ("id", item_id); ("notes", `String "dinner") ]);
+      let fetched =
+        only_item (payload service user "get_meal" [ ("id", field "id" meal) ])
+      in
       Alcotest.check json "current value" (`Int 650)
         (field "calories_kcal" fetched);
       match field "revisions" fetched with
@@ -125,20 +242,24 @@ let test_update_keeps_revisions () =
             (field "calories_kcal" (field "previous" second))
       | _ -> Alcotest.fail "expected two revisions")
 
+let from_product product quantity =
+  `Assoc [ ("product_id", field "id" product); ("quantity", `Int quantity) ]
+
 let test_logging_from_a_product () =
   with_service (fun service user ->
       let product = payload service user "save_product" shake in
       Alcotest.check json "first version" (`Int 1) (field "version" product);
       let meal =
         payload service user "record_meal"
-          [ ("product_id", field "id" product); ("quantity", `Int 45) ]
+          [ ("items", `List [ from_product product 45; soup ]) ]
       in
+      let item = List.hd_exn (items_of meal) in
       Alcotest.check json "kcal scaled 45/40 and rounded" (`Int 180)
-        (field "calories_kcal" meal);
+        (field "calories_kcal" item);
       Alcotest.check json "protein scaled" (`Float 33.75)
-        (field "protein_g" meal);
+        (field "protein_g" item);
       Alcotest.check json "description defaults to the name"
-        (`String "Protein shake") (field "description" meal);
+        (`String "Protein shake") (field "description" item);
       Alcotest.check json "linked to version 1"
         (`Assoc
            [
@@ -146,15 +267,24 @@ let test_logging_from_a_product () =
              ("product_version", `Int 1);
              ("quantity", `Float 45.);
            ])
-        (field "product" meal);
+        (field "product" item);
+      Alcotest.check json "mixed with an estimated item" (`Int 430)
+        (field "calories_kcal" meal);
       Alcotest.(check bool)
         "nutrition with a product is rejected" true
         (String.is_substring
            (error_text service user "record_meal"
               [
-                ("product_id", field "id" product);
-                ("quantity", `Int 45);
-                ("calories_kcal", `Int 1);
+                ( "items",
+                  `List
+                    [
+                      `Assoc
+                        [
+                          ("product_id", field "id" product);
+                          ("quantity", `Int 45);
+                          ("calories_kcal", `Int 1);
+                        ];
+                    ] );
               ])
            ~substring:"omit calories_kcal");
       let unscalable =
@@ -171,14 +301,14 @@ let test_logging_from_a_product () =
         "a product without a structured basis explains itself" true
         (String.is_substring
            (error_text service user "record_meal"
-              [ ("product_id", field "id" unscalable); ("quantity", `Int 1) ])
+              [ ("items", `List [ from_product unscalable 1 ]) ])
            ~substring:"basis_quantity");
       let edited =
-        payload service user "update_meal"
-          [ ("id", field "id" meal); ("calories_kcal", `Int 200) ]
+        payload service user "update_meal_item"
+          [ ("id", field "id" item); ("calories_kcal", `Int 200) ]
       in
       Alcotest.check json "a manual nutrition edit detaches the product" `Null
-        (field "product" edited))
+        (field "product" (List.hd_exn (items_of edited))))
 
 let test_correcting_meals_from_a_product () =
   with_service (fun service user ->
@@ -186,7 +316,7 @@ let test_correcting_meals_from_a_product () =
       let id = field "id" product in
       let meal =
         payload service user "record_meal"
-          [ ("product_id", id); ("quantity", `Int 40) ]
+          [ ("items", `List [ from_product product 40 ]) ]
       in
       let replaced =
         payload service user "save_product"
@@ -197,9 +327,11 @@ let test_correcting_meals_from_a_product () =
       in
       Alcotest.check json "replacement bumps the version" (`Int 2)
         (field "version" replaced);
+      let get () =
+        payload service user "get_meal" [ ("id", field "id" meal) ]
+      in
       Alcotest.check json "saving never rewrites meals" (`Int 160)
-        (field "calories_kcal"
-           (payload service user "get_meal" [ ("id", field "id" meal) ]));
+        (field "calories_kcal" (get ()));
       let reason = ("reason", `String "label misread: 180 kcal per 40 g") in
       let preview =
         payload service user "correct_meals_from_product"
@@ -207,25 +339,25 @@ let test_correcting_meals_from_a_product () =
       in
       Alcotest.check json "dry run by default" (`Bool false)
         (field "applied" preview);
-      (match field "meals" preview with
+      (match field "items" preview with
       | `List [ planned ] ->
+          Alcotest.check json "meal named" (field "id" meal)
+            (field "meal_id" planned);
           Alcotest.check json "before" (`Int 160)
             (field "calories_kcal_before" planned);
           Alcotest.check json "after" (`Int 180)
             (field "calories_kcal_after" planned)
-      | _ -> Alcotest.fail "expected one planned meal");
+      | _ -> Alcotest.fail "expected one planned item");
       let applied =
         payload service user "correct_meals_from_product"
           [ ("product_id", id); reason; ("dry_run", `Bool false) ]
       in
       Alcotest.check json "applied" (`Bool true) (field "applied" applied);
-      let fetched =
-        payload service user "get_meal" [ ("id", field "id" meal) ]
-      in
-      Alcotest.check json "rescaled" (`Int 180) (field "calories_kcal" fetched);
+      let item = only_item (get ()) in
+      Alcotest.check json "rescaled" (`Int 180) (field "calories_kcal" item);
       Alcotest.check json "now on version 2" (`Int 2)
-        (field "product_version" (field "product" fetched));
-      (match field "revisions" fetched with
+        (field "product_version" (field "product" item));
+      (match field "revisions" item with
       | `List [ revision ] ->
           Alcotest.(check string)
             "reason recorded" "label misread: 180 kcal per 40 g"
@@ -235,7 +367,7 @@ let test_correcting_meals_from_a_product () =
                (field "product" (field "previous" revision)))
       | _ -> Alcotest.fail "expected one revision");
       Alcotest.check json "nothing left to correct" (`List [])
-        (field "meals"
+        (field "items"
            (payload service user "correct_meals_from_product"
               [ ("product_id", id); reason; ("dry_run", `Bool false) ])))
 
@@ -284,7 +416,7 @@ let test_recent_products_in_context () =
       let product = payload service user "save_product" shake in
       ignore
         (payload service user "record_meal"
-           [ ("product_id", field "id" product); ("quantity", `Int 40) ]);
+           [ ("items", `List [ from_product product 40 ]) ]);
       match field "recent_products" (payload service user "get_context" []) with
       | `List [ recent ] ->
           Alcotest.check json "the shake" (field "id" product)
@@ -297,6 +429,7 @@ let () =
       ( "history",
         [
           Alcotest.test_case "idempotency key" `Quick test_idempotency_key;
+          Alcotest.test_case "a meal has items" `Quick test_a_meal_has_items;
           Alcotest.test_case "update keeps revisions" `Quick
             test_update_keeps_revisions;
           Alcotest.test_case "logging from a product" `Quick

@@ -28,42 +28,95 @@ let nutrition_properties =
     property "fat_g" "Fat in grams, if known." number;
   ]
 
-let meal_properties =
-  [ property "description" "Free-text description of what was eaten." string ]
-  @ nutrition_properties
-  @ [
-      property "confidence"
-        "Estimate confidence from 0.0 to 1.0, if the macros were estimated \
-         rather than measured."
-        number;
-      property "estimate_source"
-        "Where the estimate came from (e.g. a nutrition label or an AI \
-         estimate), if applicable."
-        string;
-      property "notes" "Freeform notes." string;
-      property "eaten_at"
-        "When the meal was eaten, as an RFC 3339 UTC timestamp (e.g. \
-         2026-09-22T12:30:00Z). Defaults to now if omitted."
-        string;
+let provenance_properties =
+  [
+    property "confidence"
+      "Estimate confidence from 0.0 to 1.0, if the macros were estimated \
+       rather than measured."
+      number;
+    property "estimate_source"
+      "Where the estimate came from (e.g. a nutrition label or an AI \
+       estimate), if applicable."
+      string;
+    property "notes" "Freeform notes about this item." string;
+  ]
+
+let item_description_property =
+  property "description" "Free-text description of what was eaten." string
+
+(* Two disjoint shapes: product_id selects the second. *)
+let item_schema =
+  `Assoc
+    [
+      ( "oneOf",
+        `List
+          [
+            schema
+              ((item_description_property :: nutrition_properties)
+              @ provenance_properties)
+              [ "description"; "calories_kcal"; "protein_g" ];
+            schema
+              ([
+                 property "product_id"
+                   "A saved product: kcal and macros are scaled from its \
+                    current version to quantity, and the item is linked to \
+                    that version."
+                   string;
+                 property "quantity"
+                   "The amount eaten in the product's basis_unit, e.g. 45 for \
+                    45 g of a product saved per 40 g."
+                   number;
+                 property "description" "Defaults to the product name." string;
+               ]
+              @ provenance_properties)
+              [ "product_id"; "quantity" ];
+          ] );
     ]
 
+let item_property =
+  property "item"
+    "One thing eaten: either description, calories_kcal and protein_g (plus \
+     optional macros), or product_id and quantity."
+    item_schema
+
+let eaten_at_property =
+  property "eaten_at"
+    "When the meal was eaten, as an RFC 3339 UTC timestamp (e.g. \
+     2026-09-22T12:30:00Z). Defaults to now if omitted."
+    string
+
+let label_property =
+  property "label" "Optional name for the meal, e.g. lunch." string
+
 let record_meal_properties =
-  meal_properties
+  [
+    property "items"
+      "What was eaten, one entry per food: each either description, \
+       calories_kcal and protein_g (plus optional macros), or product_id and \
+       quantity. A plate estimated as a whole is one item."
+      (`Assoc
+         [
+           ("type", `String "array");
+           ("items", item_schema);
+           ("minItems", `Int 1);
+         ]);
+    eaten_at_property;
+    label_property;
+    property "idempotency_key"
+      "Any unique string for this logging. Retrying with the same key returns \
+       the meal already recorded instead of adding a duplicate."
+      string;
+  ]
+
+let item_update_properties =
+  [
+    property "id" "The item's id, from the meal's items." string;
+    item_description_property;
+  ]
+  @ nutrition_properties @ provenance_properties
   @ [
-      property "product_id"
-        "Log a saved product instead of giving nutrition: kcal and macros are \
-         scaled from its current version to quantity, and the meal is linked \
-         to that version. Omit calories_kcal, protein_g, carbs_g and fat_g \
-         when given; description defaults to the product name."
-        string;
-      property "quantity"
-        "With product_id: the amount eaten in the product's basis_unit, e.g. \
-         45 for 45 g of a product saved per 40 g."
-        number;
-      property "idempotency_key"
-        "Any unique string for this logging. Retrying with the same key \
-         returns the meal already recorded instead of adding a duplicate."
-        string;
+      property "reason"
+        "Why the estimate changed, e.g. portion was 300 g, not 200 g." string;
     ]
 
 let weight_properties =
@@ -120,8 +173,9 @@ let meal_query_properties =
   query_properties
   @ [
       property "search"
-        ("Match description, estimate_source or notes before date bounds and \
-          limit. " ^ matching_description)
+        ("Match meals with an item whose description, estimate_source or notes \
+          match, before date bounds and limit; a meal ranks by its best item. "
+       ^ matching_description)
         search_input;
     ]
 
@@ -289,21 +343,21 @@ let tools =
       (schema product_search_properties [ "query" ]);
     tool "correct_meals_from_product"
       ~description:
-        "After save_product fixed a product, rescale the meals logged from its \
-         earlier versions to the current one, by their logged quantity. Each \
-         changed meal keeps a revision with the old values and reason. Use \
-         only when the earlier values were wrong; a changed recipe should \
-         leave old meals alone."
+        "After save_product fixed a product, rescale the meal items logged \
+         from its earlier versions to the current one, by their logged \
+         quantity. Each changed item keeps a revision with the old values and \
+         reason. Use only when the earlier values were wrong; a changed recipe \
+         should leave old meals alone."
       (schema correction_properties [ "product_id"; "reason" ]);
     tool "record_meal"
       ~description:
-        "Record a meal: either description, calories_kcal and protein_g (plus \
-         optional macros), or product_id and quantity."
-      (schema record_meal_properties []);
+        "Record a meal: one occasion of eating with one or more items. The \
+         meal's calories and macros are the sums of its items."
+      (schema record_meal_properties [ "items" ]);
     tool "get_meal"
       ~description:
-        "Fetch a meal by id, with its revisions: each earlier version of its \
-         values, when it changed and why."
+        "Fetch a meal by id, with each item's revisions: earlier versions of \
+         its estimate, when it changed and why."
       (schema id_properties [ "id" ]);
     tool "query_meals"
       ~description:
@@ -315,18 +369,28 @@ let tools =
       (schema meal_query_properties []);
     tool "update_meal"
       ~description:
-        "Update fields on an existing meal; omitted fields are left unchanged. \
-         The previous values are kept as a revision. Changing calories or a \
-         macro detaches the meal from its product."
-      (schema
-         (id_properties @ meal_properties
-         @ [
-             property "reason"
-               "Why the meal changed, e.g. portion was 300 g, not 200 g." string;
-           ])
-         [ "id" ]);
-    tool "delete_meal" ~description:"Delete a meal."
+        "Change when a meal was eaten or its label; omitted fields are left \
+         unchanged. To change what was eaten, use the item tools."
+      (schema (id_properties @ [ eaten_at_property; label_property ]) [ "id" ]);
+    tool "delete_meal" ~description:"Delete a meal and its items."
       (schema id_properties [ "id" ]);
+    tool "add_meal_item" ~description:"Add something eaten to an existing meal."
+      (schema
+         [ property "meal_id" "The meal's id." string; item_property ]
+         [ "meal_id"; "item" ]);
+    tool "update_meal_item"
+      ~description:
+        "Correct an item's estimate; omitted fields are left unchanged. The \
+         previous values are kept as a revision with the reason. Changing \
+         calories or a macro detaches the item from its product."
+      (schema item_update_properties [ "id" ]);
+    tool "delete_meal_item"
+      ~description:
+        "Remove an item from its meal. A meal keeps at least one item; delete \
+         the meal instead."
+      (schema
+         [ property "id" "The item's id, from the meal's items." string ]
+         [ "id" ]);
     tool "get_daily_series"
       ~description:
         "One row (date, meal_count, calories_kcal, protein_g, carbs_g, fat_g, \

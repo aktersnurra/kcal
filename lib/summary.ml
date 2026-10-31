@@ -16,47 +16,11 @@ let finite operation value =
   if Float.is_finite value then Ok value
   else Error (Error.Unrepresentable_result operation)
 
-let add_calories left right =
-  if left > Int.max_value - right then
-    Error (Error.Numeric_overflow Calories_kcal)
-  else Ok (left + right)
-
-let add_optional left right =
-  match (left, right) with
-  | None, other | other, None -> Ok other
-  | Some a, Some b ->
-      Result.map (finite Error.Daily_meals (a +. b)) ~f:Option.some
-
-let add_meal (meal : Meal.t) :
-    Meal.totals option -> (Meal.totals, Error.t) Result.t = function
-  | None ->
-      Ok
-        Meal.
-          {
-            meal_count = 1;
-            calories_kcal = meal.calories_kcal;
-            protein_g = meal.protein_g;
-            carbs_g = meal.carbs_g;
-            fat_g = meal.fat_g;
-          }
-  | Some totals ->
-      let* calories_kcal =
-        add_calories totals.calories_kcal meal.calories_kcal
-      in
-      let* protein_g =
-        finite Error.Daily_meals (totals.protein_g +. meal.protein_g)
-      in
-      let* carbs_g = add_optional totals.carbs_g meal.carbs_g in
-      let* fat_g = add_optional totals.fat_g meal.fat_g in
-      Ok
-        Meal.
-          {
-            meal_count = totals.meal_count + 1;
-            calories_kcal;
-            protein_g;
-            carbs_g;
-            fat_g;
-          }
+let add_meal (meal : Meal.t) totals =
+  let* meal_totals = Meal.totals meal in
+  match totals with
+  | None -> Ok meal_totals
+  | Some totals -> Meal.add_totals totals meal_totals
 
 let add_weigh_in (weigh_in : Weigh_in.t) = function
   | None -> Ok { weigh_in_count = 1; mean_weight_kg = weigh_in.weight_kg }

@@ -28,13 +28,12 @@ let meal db user description =
   Option.value_exn
     (Result.ok
        (Test_support.create_meal_raw db ~user
-          Meal.
-            {
-              (Test_support.meal_input ()) with
-              description;
-              estimate_source = None;
-              notes = None;
-            }))
+          {
+            (Test_support.meal_input ()) with
+            description;
+            estimate_source = None;
+            notes = None;
+          }))
 
 let request db user tool key value extras =
   Mcp.handle ~service:(Service.make ~store:db)
@@ -304,8 +303,8 @@ let test_index_lifecycle () =
       ignore
         (Option.value_exn
            (Result.ok
-              (Test_support.update_meal_raw db ~user m.id
-                 Meal.{ empty_patch with description = Some "newmeal" })));
+              (Test_support.update_only_item_raw db ~user m
+                 Meal_item.{ empty_patch with description = Some "newmeal" })));
       check json_rows "meal update removes old terms" [] (find_meals "oldmeal");
       check Alcotest.int "meal update adds new terms" 1
         (List.length (find_meals "newmeal"));
@@ -317,7 +316,9 @@ let test_index_lifecycle () =
         (Result.ok
            (Migration.For_testing.execute
               (Store_sqlite.For_testing.raw_database db)
-              ("DELETE FROM meals WHERE id = '" ^ Meal_id.to_string n.id ^ "'")));
+              ("DELETE FROM meal_items WHERE meal_id = '"
+             ^ Meal_id.to_string n.id ^ "'; DELETE FROM meals WHERE id = '"
+             ^ Meal_id.to_string n.id ^ "'")));
       check json_rows "physical meal delete" [] (find_meals "physicalmeal");
       Option.value_exn
         (Result.ok
@@ -329,7 +330,8 @@ let test_index_lifecycle () =
         (Result.ok
            (Migration.For_testing.execute
               (Store_sqlite.For_testing.raw_database db)
-              "INSERT INTO meals_fts(meals_fts) VALUES ('integrity-check')")))
+              "INSERT INTO meal_items_fts(meal_items_fts) VALUES \
+               ('integrity-check')")))
 
 let test_meal_ranked_filters () =
   Test_support.with_two_users (fun db user other ->
@@ -340,13 +342,12 @@ let test_meal_ranked_filters () =
         Option.value_exn
           (Result.ok
              (Test_support.create_meal_raw db ~user:owner
-                Meal.
-                  {
-                    (Test_support.meal_input ~eaten_at ()) with
-                    description;
-                    estimate_source = None;
-                    notes = None;
-                  }))
+                {
+                  (Test_support.meal_input ~eaten_at ()) with
+                  description;
+                  estimate_source = None;
+                  notes = None;
+                }))
       in
       ignore
         (create user "2026-07-01T00:00:00Z"
@@ -367,7 +368,7 @@ let test_meal_ranked_filters () =
       in
       check json_rows
         "ranking after owner date deleted filters and deduplication"
-        [ Mcp_json.meal_json strong ]
+        [ Option.value_exn (Result.ok (Mcp_json.meal_json strong)) ]
         result)
 
 let test_meal_stable_ties () =
@@ -380,11 +381,10 @@ let test_meal_stable_ties () =
         Option.value_exn
           (Result.ok
              (Test_support.create_meal_raw db ~user
-                Meal.
-                  {
-                    (Test_support.meal_input ~eaten_at ()) with
-                    description = "chicken rice";
-                  }))
+                {
+                  (Test_support.meal_input ~eaten_at ()) with
+                  description = "chicken rice";
+                }))
       in
       let a = create () and b = create () in
       let expected =
@@ -392,7 +392,8 @@ let test_meal_stable_ties () =
             Meal_id.compare a.id b.id)
       in
       check json_rows "meal relevance ties use time then id"
-        (List.map ~f:Mcp_json.meal_json expected)
+        (List.map expected ~f:(fun meal ->
+             Option.value_exn (Result.ok (Mcp_json.meal_json meal))))
         (rows "meals"
            (request db user "query_meals" "search" (`String "rice chicken") [])))
 
@@ -476,8 +477,12 @@ let%hegel_test search_index_follows_record_lifecycle tc =
             ignore
               (Option.value_exn
                  (Result.ok
-                    (Test_support.update_meal_raw db ~user (meal_id id)
-                       Meal.{ empty_patch with description = Some description })));
+                    (Result.bind
+                       (Store_sqlite.get_meal db ~user (meal_id id))
+                       ~f:(fun meal ->
+                         Test_support.update_only_item_raw db ~user meal
+                           Meal_item.
+                             { empty_patch with description = Some description }))));
             Hashtbl.set meals ~key:id ~data:(words description)
         | `Delete_meal ->
             let id = pick meals in

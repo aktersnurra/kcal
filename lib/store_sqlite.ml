@@ -185,66 +185,6 @@ let user_of_row statement =
           }
   | _ -> None
 
-let meal_columns =
-  "id, user_id, eaten_at, description, calories_kcal, protein_g, carbs_g, \
-   fat_g, confidence, estimate_source, notes, created_at, updated_at, \
-   deleted_at, product_id, product_version, product_quantity"
-
-(* Columns [first] to [first + 2]; all three are set together or not at all.
-   [None] is a decoding failure, [Some None] a meal without a product. *)
-let product_link_of_row statement ~first =
-  let quantity =
-    match Sqlite3.column statement (first + 2) with
-    | Sqlite3.Data.FLOAT value -> Some value
-    | Sqlite3.Data.INT value -> Some (Int64.to_float value)
-    | _ -> None
-  in
-  match
-    ( optional_text statement first,
-      Sqlite3.column statement (first + 1),
-      Sqlite3.column statement (first + 2) )
-  with
-  | None, Sqlite3.Data.NULL, Sqlite3.Data.NULL -> Some None
-  | Some product_id, Sqlite3.Data.INT version, _ -> (
-      match (Product_id.of_string product_id, quantity) with
-      | Some product_id, Some quantity ->
-          Some
-            (Some
-               Meal.
-                 {
-                   product_id;
-                   product_version = Int64.to_int_exn version;
-                   quantity;
-                 })
-      | _ -> None)
-  | _ -> None
-
-let meal_of_row statement =
-  match
-    ( Meal_id.of_string (text statement 0),
-      User_id.of_string (text statement 1),
-      parse_time (text statement 2),
-      parse_time (text statement 11),
-      parse_time (text statement 12) )
-  with
-  | Some id, Some user_id, Some eaten_at, Some created_at, Some updated_at
-    when calorie_column statement 4 && numeric_column statement 5
-         && List.for_all [ 6; 7; 8 ] ~f:(optional_numeric_column statement) ->
-      Option.bind (product_link_of_row statement ~first:14) ~f:(fun product ->
-          Result.ok
-            (Meal.of_storage ~id ~user_id ~eaten_at
-               ~description:(text statement 3) ~calories_kcal:(int statement 4)
-               ~protein_g:(float statement 5)
-               ~carbs_g:(optional_float statement 6)
-               ~fat_g:(optional_float statement 7)
-               ~confidence:(optional_float statement 8)
-               ~estimate_source:(optional_text statement 9)
-               ~notes:(optional_text statement 10)
-               ~product ~created_at ~updated_at
-               ~deleted_at:
-                 (Option.bind (optional_text statement 13) ~f:parse_time)))
-  | _ -> None
-
 let resolve_user db ~issuer ~subject =
   let created_at = timestamp (now ()) in
   with_statement db
@@ -284,239 +224,6 @@ let decode_all_rows statement decode =
     | _ -> Error (storage_error ())
   in
   rows []
-
-let product_link_values = function
-  | None -> [ Sqlite3.Data.NULL; Sqlite3.Data.NULL; Sqlite3.Data.NULL ]
-  | Some (link : Meal.product_link) ->
-      [
-        Sqlite3.Data.TEXT (Product_id.to_string link.product_id);
-        Sqlite3.Data.INT (Int64.of_int link.product_version);
-        Sqlite3.Data.FLOAT link.quantity;
-      ]
-
-(* A deleted meal keeps its key, so a retry cannot resurrect it. *)
-let meal_by_idempotency_key db ~user key =
-  with_statement db
-    ("SELECT " ^ meal_columns
-   ^ " FROM meals WHERE user_id = ? AND idempotency_key = ?")
-    (fun statement ->
-      match
-        bind statement
-          [
-            Sqlite3.Data.TEXT (User_id.to_string user.User.id);
-            Sqlite3.Data.TEXT key;
-          ]
-      with
-      | Error _ as error -> error
-      | Ok () -> (
-          match row_or_not_found statement meal_of_row with
-          | Ok (meal : Meal.t) when Option.is_some meal.deleted_at ->
-              Error
-                (Error.Rejected
-                   "idempotency_key belongs to a meal that was deleted; use a \
-                    new key to record it again")
-          | result -> result))
-
-let insert_meal db ~user ~idempotency_key ~product input =
-  let input = Meal.Create.to_raw input in
-  let current = now () in
-  let eaten_at = Option.value input.eaten_at ~default:current |> timestamp in
-  let current = timestamp current in
-  with_statement db
-    ("INSERT INTO meals (" ^ meal_columns
-   ^ ", idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, \
-      ?, ?, ?, ?) RETURNING " ^ meal_columns)
-    (fun statement ->
-      let values =
-        [
-          Sqlite3.Data.TEXT (Meal_id.to_string (Meal_id.fresh ()));
-          Sqlite3.Data.TEXT (User_id.to_string user.User.id);
-          Sqlite3.Data.TEXT eaten_at;
-          Sqlite3.Data.TEXT input.description;
-          Sqlite3.Data.INT (Int64.of_int input.calories_kcal);
-          Sqlite3.Data.FLOAT input.protein_g;
-          nullable_float input.carbs_g;
-          nullable_float input.fat_g;
-          nullable_float input.confidence;
-          nullable input.estimate_source;
-          nullable input.notes;
-          Sqlite3.Data.TEXT current;
-          Sqlite3.Data.TEXT current;
-        ]
-        @ product_link_values product
-        @ [ nullable idempotency_key ]
-      in
-      match bind statement values with
-      | Error _ as error -> error
-      | Ok () ->
-          if
-            match Sqlite3.step statement with
-            | Sqlite3.Rc.ROW -> true
-            | _ -> false
-          then
-            match meal_of_row statement with
-            | Some meal -> Ok meal
-            | None -> Error (Error.Storage_decoding "row")
-          else Error (storage_error ()))
-
-let create_meal ?idempotency_key ?product db ~user input =
-  match idempotency_key with
-  | None -> insert_meal db ~user ~idempotency_key ~product input
-  | Some key ->
-      with_checked_numeric_update db
-        ~check:(fun () -> Ok ())
-        ~update:(fun () ->
-          match meal_by_idempotency_key db ~user key with
-          | Error Error.Not_found ->
-              insert_meal db ~user ~idempotency_key ~product input
-          | result -> result)
-
-let get_meal db ~user id =
-  with_statement db
-    ("SELECT " ^ meal_columns
-   ^ " FROM meals WHERE id = ? AND user_id = ? AND deleted_at IS NULL")
-    (fun statement ->
-      match
-        bind statement
-          [
-            Sqlite3.Data.TEXT (Meal_id.to_string id);
-            Sqlite3.Data.TEXT (User_id.to_string user.User.id);
-          ]
-      with
-      | Error _ as error -> error
-      | Ok () -> row_or_not_found statement meal_of_row)
-
-let revision_columns =
-  "meal_id, revision, revised_at, reason, eaten_at, description, \
-   calories_kcal, protein_g, carbs_g, fat_g, confidence, estimate_source, \
-   notes, product_id, product_version, product_quantity"
-
-(* Snapshot [meal] as it stands, before the caller changes it, inside the
-   caller's transaction. *)
-let record_revision db (meal : Meal.t) ~revised_at ~reason =
-  with_statement db
-    ("INSERT INTO meal_revisions (" ^ revision_columns
-   ^ ") SELECT ?, COALESCE(MAX(revision), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
-      ?, ?, ?, ?, ? FROM meal_revisions WHERE meal_id = ?")
-    (fun statement ->
-      let id = Sqlite3.Data.TEXT (Meal_id.to_string meal.id) in
-      match
-        bind statement
-          ([
-             id;
-             Sqlite3.Data.TEXT (timestamp revised_at);
-             nullable reason;
-             Sqlite3.Data.TEXT (timestamp meal.eaten_at);
-             Sqlite3.Data.TEXT meal.description;
-             Sqlite3.Data.INT (Int64.of_int meal.calories_kcal);
-             Sqlite3.Data.FLOAT meal.protein_g;
-             nullable_float meal.carbs_g;
-             nullable_float meal.fat_g;
-             nullable_float meal.confidence;
-             nullable meal.estimate_source;
-             nullable meal.notes;
-           ]
-          @ product_link_values meal.product
-          @ [ id ])
-      with
-      | Error _ as error -> error
-      | Ok () -> (
-          match Sqlite3.step statement with
-          | Sqlite3.Rc.DONE -> Ok ()
-          | _ -> Error (storage_error ())))
-
-let revision_of_row statement =
-  match (parse_time (text statement 2), parse_time (text statement 4)) with
-  | Some revised_at, Some eaten_at
-    when calorie_column statement 6 && numeric_column statement 7
-         && List.for_all [ 8; 9; 10 ] ~f:(optional_numeric_column statement) ->
-      Option.map (product_link_of_row statement ~first:13) ~f:(fun product ->
-          Meal.
-            {
-              revision = int statement 1;
-              revised_at;
-              reason = optional_text statement 3;
-              previous =
-                {
-                  eaten_at;
-                  description = text statement 5;
-                  calories_kcal = int statement 6;
-                  protein_g = float statement 7;
-                  carbs_g = optional_float statement 8;
-                  fat_g = optional_float statement 9;
-                  confidence = optional_float statement 10;
-                  estimate_source = optional_text statement 11;
-                  notes = optional_text statement 12;
-                  product;
-                };
-            })
-  | _ -> None
-
-(* Ownership is checked through the meal, which must not be deleted. *)
-let meal_revisions db ~user id =
-  let* (_ : Meal.t) = get_meal db ~user id in
-  with_statement db
-    ("SELECT " ^ revision_columns
-   ^ " FROM meal_revisions WHERE meal_id = ? ORDER BY revision ASC")
-    (fun statement ->
-      match bind statement [ Sqlite3.Data.TEXT (Meal_id.to_string id) ] with
-      | Error _ as error -> error
-      | Ok () -> decode_all_rows statement revision_of_row)
-
-let update_meal ?reason db ~user id patch =
-  let detach_product = Meal.changes_nutrition patch in
-  let patch = Meal.Patch.to_raw patch in
-  with_checked_numeric_update db
-    ~check:(fun () -> Ok ())
-    ~update:(fun () ->
-      let current = now () in
-      let* meal = get_meal db ~user id in
-      let* () = record_revision db meal ~revised_at:current ~reason in
-      let updated_at = timestamp current in
-      with_statement db
-        ("UPDATE meals SET eaten_at = COALESCE(?, eaten_at), description = \
-          COALESCE(?, description), calories_kcal = COALESCE(?, \
-          calories_kcal), protein_g = COALESCE(?, protein_g), carbs_g = \
-          COALESCE(?, carbs_g), fat_g = COALESCE(?, fat_g), confidence = \
-          COALESCE(?, confidence), estimate_source = COALESCE(?, \
-          estimate_source), notes = COALESCE(?, notes), product_id = CASE WHEN \
-          ? THEN NULL ELSE product_id END, product_version = CASE WHEN ? THEN \
-          NULL ELSE product_version END, product_quantity = CASE WHEN ? THEN \
-          NULL ELSE product_quantity END, updated_at = ? WHERE id = ? AND \
-          user_id = ? AND deleted_at IS NULL RETURNING " ^ meal_columns)
-        (fun statement ->
-          let detach = Sqlite3.Data.INT (if detach_product then 1L else 0L) in
-          let values =
-            [
-              nullable (Option.map ~f:timestamp patch.eaten_at);
-              nullable patch.description;
-              (match patch.calories_kcal with
-              | None -> Sqlite3.Data.NULL
-              | Some value -> Sqlite3.Data.INT (Int64.of_int value));
-              nullable_float patch.protein_g;
-              nullable_float patch.carbs_g;
-              nullable_float patch.fat_g;
-              nullable_float patch.confidence;
-              nullable patch.estimate_source;
-              nullable patch.notes;
-              detach;
-              detach;
-              detach;
-              Sqlite3.Data.TEXT updated_at;
-              Sqlite3.Data.TEXT (Meal_id.to_string id);
-              Sqlite3.Data.TEXT (User_id.to_string user.User.id);
-            ]
-          in
-          match bind statement values with
-          | Error _ as error -> error
-          | Ok () -> row_or_not_found statement meal_of_row))
-
-let is_valid_query ~from ~to_ ~limit =
-  limit >= 1 && limit <= 500
-  &&
-  match (from, to_) with
-  | Some lower, Some upper -> Ptime.compare lower upper <= 0
-  | _ -> true
 
 let product_columns =
   "id, user_id, name, basis, calories_kcal, protein_g, carbs_g, fat_g, source, \
@@ -634,15 +341,18 @@ let qualified_columns table columns =
   |> List.map ~f:(fun column -> table ^ "." ^ String.strip column)
   |> String.concat ~sep:", "
 
-(* Products behind the user's meals since [since], most recently eaten first. *)
+(* Products behind the user's meal items since [since], most recently eaten
+   first. *)
 let recent_products db ~user ~since ~limit =
   with_statement db
     ("SELECT "
     ^ qualified_columns "products" product_columns
-    ^ ", MAX(meals.eaten_at) AS last_eaten_at FROM products JOIN meals ON \
-       meals.product_id = products.id WHERE products.user_id = ? AND \
-       meals.user_id = ? AND meals.deleted_at IS NULL AND meals.eaten_at >= ? \
-       GROUP BY products.id ORDER BY last_eaten_at DESC, products.id LIMIT ?")
+    ^ ", MAX(meals.eaten_at) AS last_eaten_at FROM products JOIN meal_items ON \
+       meal_items.product_id = products.id JOIN meals ON meals.id = \
+       meal_items.meal_id WHERE products.user_id = ? AND meals.user_id = ? AND \
+       meals.deleted_at IS NULL AND meal_items.deleted_at IS NULL AND \
+       meals.eaten_at >= ? GROUP BY products.id ORDER BY last_eaten_at DESC, \
+       products.id LIMIT ?")
     (fun statement ->
       let owner = Sqlite3.Data.TEXT (User_id.to_string user.User.id) in
       match
@@ -684,117 +394,592 @@ let search_products db ~user ~query ~limit =
         | Error _ as error -> error
         | Ok () -> decode_all_rows statement product_of_row)
 
-let query_meals ?search db ~user ~from ~to_ ~limit =
-  if not (is_valid_query ~from ~to_ ~limit) then Error (invalid_input ())
-  else
-    let join, search_clause, search_values, ordering =
-      match search with
-      | None -> ("", "", [], "meals.eaten_at ASC, meals.id ASC")
-      | Some query ->
-          ( " JOIN meals_fts ON meals.rowid = meals_fts.rowid",
-            " AND meals_fts MATCH ?",
-            [ Sqlite3.Data.TEXT (Search_query.fts5_match_expression query) ],
-            "bm25(meals_fts), meals.eaten_at ASC, meals.id ASC" )
-    in
+type new_item = Meal_item.Create.t * Meal_item.product_link option
+
+let meal_columns =
+  "id, user_id, eaten_at, label, created_at, updated_at, deleted_at"
+
+(* A meal before its items are attached. *)
+type meal_row = {
+  id : Meal_id.t;
+  user_id : User_id.t;
+  eaten_at : Ptime.t;
+  label : string option;
+  created_at : Ptime.t;
+  updated_at : Ptime.t;
+  deleted_at : Ptime.t option;
+}
+
+let meal_row_of statement =
+  match
+    ( Meal_id.of_string (text statement 0),
+      User_id.of_string (text statement 1),
+      parse_time (text statement 2),
+      parse_time (text statement 4),
+      parse_time (text statement 5) )
+  with
+  | Some id, Some user_id, Some eaten_at, Some created_at, Some updated_at ->
+      Some
+        {
+          id;
+          user_id;
+          eaten_at;
+          label = optional_text statement 3;
+          created_at;
+          updated_at;
+          deleted_at = Option.bind (optional_text statement 6) ~f:parse_time;
+        }
+  | _ -> None
+
+let item_columns =
+  "id, meal_id, description, calories_kcal, protein_g, carbs_g, fat_g, \
+   confidence, estimate_source, notes, product_id, product_version, \
+   product_quantity, created_at, updated_at"
+
+(* Columns [first] to [first + 2]; all three are set together or not at all.
+   [None] is a decoding failure, [Some None] an item without a product. *)
+let product_link_of_row statement ~first =
+  let quantity =
+    match Sqlite3.column statement (first + 2) with
+    | Sqlite3.Data.FLOAT value -> Some value
+    | Sqlite3.Data.INT value -> Some (Int64.to_float value)
+    | _ -> None
+  in
+  match
+    ( optional_text statement first,
+      Sqlite3.column statement (first + 1),
+      Sqlite3.column statement (first + 2) )
+  with
+  | None, Sqlite3.Data.NULL, Sqlite3.Data.NULL -> Some None
+  | Some product_id, Sqlite3.Data.INT version, _ -> (
+      match (Product_id.of_string product_id, quantity) with
+      | Some product_id, Some quantity ->
+          Some
+            (Some
+               Meal_item.
+                 {
+                   product_id;
+                   product_version = Int64.to_int_exn version;
+                   quantity;
+                 })
+      | _ -> None)
+  | _ -> None
+
+(* Columns 0-14 of [item_columns], with the owning meal's id. *)
+let item_of_row statement =
+  match
+    ( Meal_item_id.of_string (text statement 0),
+      Meal_id.of_string (text statement 1),
+      parse_time (text statement 13),
+      parse_time (text statement 14) )
+  with
+  | Some id, Some meal_id, Some created_at, Some updated_at
+    when calorie_column statement 3 && numeric_column statement 4
+         && List.for_all [ 5; 6; 7 ] ~f:(optional_numeric_column statement) ->
+      Option.bind (product_link_of_row statement ~first:10) ~f:(fun product ->
+          Result.ok
+            (Meal_item.of_storage ~id ~description:(text statement 2)
+               ~calories_kcal:(int statement 3) ~protein_g:(float statement 4)
+               ~carbs_g:(optional_float statement 5)
+               ~fat_g:(optional_float statement 6)
+               ~confidence:(optional_float statement 7)
+               ~estimate_source:(optional_text statement 8)
+               ~notes:(optional_text statement 9)
+               ~product ~created_at ~updated_at)
+          |> Option.map ~f:(fun item -> (meal_id, item)))
+  | _ -> None
+
+let json_ids ids =
+  Sqlite3.Data.TEXT
+    (Yojson.Safe.to_string (`List (List.map ids ~f:(fun id -> `String id))))
+
+(* Live items of [meals], in order, attached in one query. *)
+let attach_items db rows =
+  match rows with
+  | [] -> Ok []
+  | _ ->
+      let* items =
+        with_statement db
+          ("SELECT " ^ item_columns
+         ^ " FROM meal_items WHERE deleted_at IS NULL AND meal_id IN (SELECT \
+            value FROM json_each(?)) ORDER BY meal_id, position, id")
+          (fun statement ->
+            match
+              bind statement
+                [
+                  json_ids
+                    (List.map rows ~f:(fun (row : meal_row) ->
+                         Meal_id.to_string row.id));
+                ]
+            with
+            | Error _ as error -> error
+            | Ok () -> decode_all_rows statement item_of_row)
+      in
+      let by_meal =
+        Map.of_alist_multi
+          (module String)
+          (List.map items ~f:(fun (meal_id, item) ->
+               (Meal_id.to_string meal_id, item)))
+      in
+      List.map rows ~f:(fun (row : meal_row) ->
+          Meal.of_storage ~id:row.id ~user_id:row.user_id ~eaten_at:row.eaten_at
+            ~label:row.label
+            ~items:
+              (Option.value ~default:[]
+                 (Map.find by_meal (Meal_id.to_string row.id)))
+            ~created_at:row.created_at ~updated_at:row.updated_at
+            ~deleted_at:row.deleted_at)
+      |> Result.all
+
+let select_meals db sql values =
+  let* rows =
+    with_statement db sql (fun statement ->
+        match bind statement values with
+        | Error _ as error -> error
+        | Ok () -> decode_all_rows statement meal_row_of)
+  in
+  attach_items db rows
+
+let single = function
+  | [ meal ] -> Ok meal
+  | [] -> Error Error.Not_found
+  | _ -> Error (storage_error ())
+
+let owner user = Sqlite3.Data.TEXT (User_id.to_string user.User.id)
+
+let get_meal db ~user id =
+  Result.bind ~f:single
+    (select_meals db
+       ("SELECT " ^ meal_columns
+      ^ " FROM meals WHERE id = ? AND user_id = ? AND deleted_at IS NULL")
+       [ Sqlite3.Data.TEXT (Meal_id.to_string id); owner user ])
+
+let product_link_values = function
+  | None -> [ Sqlite3.Data.NULL; Sqlite3.Data.NULL; Sqlite3.Data.NULL ]
+  | Some (link : Meal_item.product_link) ->
+      [
+        Sqlite3.Data.TEXT (Product_id.to_string link.product_id);
+        Sqlite3.Data.INT (Int64.of_int link.product_version);
+        Sqlite3.Data.FLOAT link.quantity;
+      ]
+
+let execute statement values =
+  match bind statement values with
+  | Error _ as error -> error
+  | Ok () -> (
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.DONE -> Ok ()
+      | _ -> Error (storage_error ()))
+
+(* Appended after the meal's existing items. *)
+let insert_item db ~meal_id ~current (item, product) =
+  let item = Meal_item.Create.to_raw item in
+  let meal_id = Sqlite3.Data.TEXT (Meal_id.to_string meal_id) in
+  with_statement db
+    "INSERT INTO meal_items (id, meal_id, position, description, \
+     calories_kcal, protein_g, carbs_g, fat_g, confidence, estimate_source, \
+     notes, product_id, product_version, product_quantity, created_at, \
+     updated_at) SELECT ?, ?, COALESCE(MAX(position), -1) + 1, ?, ?, ?, ?, ?, \
+     ?, ?, ?, ?, ?, ?, ?, ? FROM meal_items WHERE meal_id = ?" (fun statement ->
+      execute statement
+        ([
+           Sqlite3.Data.TEXT (Meal_item_id.to_string (Meal_item_id.fresh ()));
+           meal_id;
+           Sqlite3.Data.TEXT item.description;
+           Sqlite3.Data.INT (Int64.of_int item.calories_kcal);
+           Sqlite3.Data.FLOAT item.protein_g;
+           nullable_float item.carbs_g;
+           nullable_float item.fat_g;
+           nullable_float item.confidence;
+           nullable item.estimate_source;
+           nullable item.notes;
+         ]
+        @ product_link_values product
+        @ [ Sqlite3.Data.TEXT current; Sqlite3.Data.TEXT current; meal_id ]))
+
+let touch_meal db meal_id ~current =
+  with_statement db "UPDATE meals SET updated_at = ? WHERE id = ?"
+    (fun statement ->
+      execute statement
+        [
+          Sqlite3.Data.TEXT current;
+          Sqlite3.Data.TEXT (Meal_id.to_string meal_id);
+        ])
+
+let in_transaction db f =
+  with_checked_numeric_update db ~check:(fun () -> Ok ()) ~update:f
+
+(* A deleted meal keeps its key, so a retry cannot resurrect it. *)
+let meal_by_idempotency_key db ~user key =
+  let* meal =
+    Result.bind ~f:single
+      (select_meals db
+         ("SELECT " ^ meal_columns
+        ^ " FROM meals WHERE user_id = ? AND idempotency_key = ?")
+         [ owner user; Sqlite3.Data.TEXT key ])
+  in
+  if Option.is_some meal.deleted_at then
+    Error
+      (Error.Rejected
+         "idempotency_key belongs to a meal that was deleted; use a new key to \
+          record it again")
+  else Ok meal
+
+let insert_meal db ~user ~idempotency_key ~eaten_at ~label items =
+  let current_time = now () in
+  let current = timestamp current_time in
+  let id = Meal_id.fresh () in
+  let* () =
     with_statement db
-      ("SELECT "
-      ^ qualified_columns "meals" meal_columns
-      ^ " FROM meals" ^ join
-      ^ " WHERE meals.user_id = ? AND meals.deleted_at IS NULL" ^ search_clause
-      ^ " AND (? IS NULL OR meals.eaten_at >= ?) AND (? IS NULL OR \
-         meals.eaten_at <= ?) ORDER BY " ^ ordering ^ " LIMIT ?")
-      (fun statement ->
-        let from_value = nullable (Option.map ~f:timestamp from)
-        and to_value = nullable (Option.map ~f:timestamp to_) in
+      "INSERT INTO meals (id, user_id, eaten_at, label, created_at, \
+       updated_at, deleted_at, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, \
+       NULL, ?)" (fun statement ->
+        execute statement
+          [
+            Sqlite3.Data.TEXT (Meal_id.to_string id);
+            owner user;
+            Sqlite3.Data.TEXT
+              (timestamp (Option.value eaten_at ~default:current_time));
+            nullable label;
+            Sqlite3.Data.TEXT current;
+            Sqlite3.Data.TEXT current;
+            nullable idempotency_key;
+          ])
+  in
+  let* () =
+    List.fold_result items ~init:() ~f:(fun () item ->
+        insert_item db ~meal_id:id ~current item)
+  in
+  get_meal db ~user id
+
+let create_meal ?idempotency_key db ~user ~eaten_at ~label items =
+  let* () = Meal.validate_label label in
+  if List.is_empty items then
+    Error (Error.Rejected "a meal needs at least one item")
+  else
+    in_transaction db (fun () ->
+        match idempotency_key with
+        | None -> insert_meal db ~user ~idempotency_key ~eaten_at ~label items
+        | Some key -> (
+            match meal_by_idempotency_key db ~user key with
+            | Error Error.Not_found ->
+                insert_meal db ~user ~idempotency_key ~eaten_at ~label items
+            | result -> result))
+
+let update_meal db ~user id patch =
+  let patch = Meal.Patch.to_raw patch in
+  let* rows =
+    with_statement db
+      ("UPDATE meals SET eaten_at = COALESCE(?, eaten_at), label = COALESCE(?, \
+        label), updated_at = ? WHERE id = ? AND user_id = ? AND deleted_at IS \
+        NULL RETURNING " ^ meal_columns) (fun statement ->
         match
           bind statement
-            ([ Sqlite3.Data.TEXT (User_id.to_string user.User.id) ]
-            @ search_values
-            @ [
-                from_value;
-                from_value;
-                to_value;
-                to_value;
-                Sqlite3.Data.INT (Int64.of_int limit);
-              ])
+            [
+              nullable (Option.map ~f:timestamp patch.eaten_at);
+              nullable patch.label;
+              Sqlite3.Data.TEXT (timestamp (now ()));
+              Sqlite3.Data.TEXT (Meal_id.to_string id);
+              owner user;
+            ]
         with
         | Error _ as error -> error
-        | Ok () -> decode_all_rows statement meal_of_row)
+        | Ok () -> decode_all_rows statement meal_row_of)
+  in
+  Result.bind (attach_items db rows) ~f:single
 
-(* Every meal in [start, stop), unpaginated, for server-side aggregation. *)
-let meals_between db ~user ~start ~stop =
+let add_item db ~user meal_id item =
+  in_transaction db (fun () ->
+      let* (_ : Meal.t) = get_meal db ~user meal_id in
+      let current = timestamp (now ()) in
+      let* () = insert_item db ~meal_id ~current item in
+      let* () = touch_meal db meal_id ~current in
+      get_meal db ~user meal_id)
+
+(* A live item of one of the user's live meals. *)
+let owned_item db ~user item_id =
+  Result.bind ~f:single
+    (with_statement db
+       ("SELECT "
+       ^ String.concat ~sep:", "
+           (List.map (String.split item_columns ~on:',') ~f:(fun column ->
+                "meal_items." ^ String.strip column))
+       ^ " FROM meal_items JOIN meals ON meals.id = meal_items.meal_id WHERE \
+          meal_items.id = ? AND meals.user_id = ? AND meals.deleted_at IS NULL \
+          AND meal_items.deleted_at IS NULL")
+       (fun statement ->
+         match
+           bind statement
+             [ Sqlite3.Data.TEXT (Meal_item_id.to_string item_id); owner user ]
+         with
+         | Error _ as error -> error
+         | Ok () -> decode_all_rows statement item_of_row))
+
+let revision_columns =
+  "item_id, revision, revised_at, reason, description, calories_kcal, \
+   protein_g, carbs_g, fat_g, confidence, estimate_source, notes, product_id, \
+   product_version, product_quantity"
+
+(* Snapshot [item] as it stands, before the caller changes it, inside the
+   caller's transaction. *)
+let record_revision db (item : Meal_item.t) ~revised_at ~reason =
   with_statement db
-    ("SELECT " ^ meal_columns
-   ^ " FROM meals WHERE user_id = ? AND deleted_at IS NULL AND eaten_at >= ? \
-      AND eaten_at < ? ORDER BY eaten_at ASC")
+    ("INSERT INTO meal_item_revisions (" ^ revision_columns
+   ^ ") SELECT ?, COALESCE(MAX(revision), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+      ?, ?, ?, ? FROM meal_item_revisions WHERE item_id = ?")
+    (fun statement ->
+      let id = Sqlite3.Data.TEXT (Meal_item_id.to_string item.id) in
+      execute statement
+        ([
+           id;
+           Sqlite3.Data.TEXT revised_at;
+           nullable reason;
+           Sqlite3.Data.TEXT item.description;
+           Sqlite3.Data.INT (Int64.of_int item.calories_kcal);
+           Sqlite3.Data.FLOAT item.protein_g;
+           nullable_float item.carbs_g;
+           nullable_float item.fat_g;
+           nullable_float item.confidence;
+           nullable item.estimate_source;
+           nullable item.notes;
+         ]
+        @ product_link_values item.product
+        @ [ id ]))
+
+let revision_of_row statement =
+  match
+    (Meal_item_id.of_string (text statement 0), parse_time (text statement 2))
+  with
+  | Some item_id, Some revised_at
+    when calorie_column statement 5 && numeric_column statement 6
+         && List.for_all [ 7; 8; 9 ] ~f:(optional_numeric_column statement) ->
+      Option.map (product_link_of_row statement ~first:12) ~f:(fun product ->
+          ( item_id,
+            Meal_item.
+              {
+                revision = int statement 1;
+                revised_at;
+                reason = optional_text statement 3;
+                previous =
+                  {
+                    description = text statement 4;
+                    calories_kcal = int statement 5;
+                    protein_g = float statement 6;
+                    carbs_g = optional_float statement 7;
+                    fat_g = optional_float statement 8;
+                    confidence = optional_float statement 9;
+                    estimate_source = optional_text statement 10;
+                    notes = optional_text statement 11;
+                    product;
+                  };
+              } ))
+  | _ -> None
+
+let item_revisions db (meal : Meal.t) =
+  with_statement db
+    ("SELECT " ^ revision_columns
+   ^ " FROM meal_item_revisions WHERE item_id IN (SELECT value FROM \
+      json_each(?)) ORDER BY item_id, revision")
     (fun statement ->
       match
         bind statement
           [
-            Sqlite3.Data.TEXT (User_id.to_string user.User.id);
-            Sqlite3.Data.TEXT (timestamp start);
-            Sqlite3.Data.TEXT (timestamp stop);
+            json_ids
+              (List.map meal.items ~f:(fun (item : Meal_item.t) ->
+                   Meal_item_id.to_string item.id));
           ]
       with
       | Error _ as error -> error
-      | Ok () -> decode_all_rows statement meal_of_row)
+      | Ok () -> decode_all_rows statement revision_of_row)
 
-(* Live meals logged from an earlier version of [product]. *)
-let meals_from_earlier_versions db ~user (product : Product.t) =
+let get_meal_with_revisions db ~user id =
+  let* meal = get_meal db ~user id in
+  let* revisions = item_revisions db meal in
+  Ok (meal, revisions)
+
+let set_item_nutrition db (item : Meal_item.t) ~current
+    (portion : Product.portion) link =
   with_statement db
+    "UPDATE meal_items SET calories_kcal = ?, protein_g = ?, carbs_g = ?, \
+     fat_g = ?, product_id = ?, product_version = ?, product_quantity = ?, \
+     updated_at = ? WHERE id = ?" (fun statement ->
+      execute statement
+        ([
+           Sqlite3.Data.INT (Int64.of_int portion.calories_kcal);
+           Sqlite3.Data.FLOAT portion.protein_g;
+           nullable_float portion.carbs_g;
+           nullable_float portion.fat_g;
+         ]
+        @ product_link_values (Some link)
+        @ [
+            Sqlite3.Data.TEXT current;
+            Sqlite3.Data.TEXT (Meal_item_id.to_string item.id);
+          ]))
+
+let update_item ?reason db ~user item_id patch =
+  let detach_product = Meal_item.changes_nutrition patch in
+  let patch = Meal_item.Patch.to_raw patch in
+  in_transaction db (fun () ->
+      let* meal_id, item = owned_item db ~user item_id in
+      let current = timestamp (now ()) in
+      let* () = record_revision db item ~revised_at:current ~reason in
+      let detach = Sqlite3.Data.INT (if detach_product then 1L else 0L) in
+      let* () =
+        with_statement db
+          "UPDATE meal_items SET description = COALESCE(?, description), \
+           calories_kcal = COALESCE(?, calories_kcal), protein_g = COALESCE(?, \
+           protein_g), carbs_g = COALESCE(?, carbs_g), fat_g = COALESCE(?, \
+           fat_g), confidence = COALESCE(?, confidence), estimate_source = \
+           COALESCE(?, estimate_source), notes = COALESCE(?, notes), \
+           product_id = CASE WHEN ? THEN NULL ELSE product_id END, \
+           product_version = CASE WHEN ? THEN NULL ELSE product_version END, \
+           product_quantity = CASE WHEN ? THEN NULL ELSE product_quantity END, \
+           updated_at = ? WHERE id = ?" (fun statement ->
+            execute statement
+              [
+                nullable patch.description;
+                (match patch.calories_kcal with
+                | None -> Sqlite3.Data.NULL
+                | Some value -> Sqlite3.Data.INT (Int64.of_int value));
+                nullable_float patch.protein_g;
+                nullable_float patch.carbs_g;
+                nullable_float patch.fat_g;
+                nullable_float patch.confidence;
+                nullable patch.estimate_source;
+                nullable patch.notes;
+                detach;
+                detach;
+                detach;
+                Sqlite3.Data.TEXT current;
+                Sqlite3.Data.TEXT (Meal_item_id.to_string item_id);
+              ])
+      in
+      let* () = touch_meal db meal_id ~current in
+      get_meal db ~user meal_id)
+
+let delete_item db ~user item_id =
+  in_transaction db (fun () ->
+      let* meal_id, _ = owned_item db ~user item_id in
+      let* meal = get_meal db ~user meal_id in
+      if List.length meal.items <= 1 then
+        Error
+          (Error.Rejected
+             "a meal keeps at least one item; delete the meal instead")
+      else
+        let current = timestamp (now ()) in
+        let* () =
+          with_statement db
+            "UPDATE meal_items SET deleted_at = ?, updated_at = ? WHERE id = ?"
+            (fun statement ->
+              execute statement
+                [
+                  Sqlite3.Data.TEXT current;
+                  Sqlite3.Data.TEXT current;
+                  Sqlite3.Data.TEXT (Meal_item_id.to_string item_id);
+                ])
+        in
+        let* () = touch_meal db meal_id ~current in
+        get_meal db ~user meal_id)
+
+let is_valid_query ~from ~to_ ~limit =
+  limit >= 1 && limit <= 500
+  &&
+  match (from, to_) with
+  | Some lower, Some upper -> Ptime.compare lower upper <= 0
+  | _ -> true
+
+(* A meal matches when any live item does; it ranks by its best item. *)
+let query_meals ?search db ~user ~from ~to_ ~limit =
+  if not (is_valid_query ~from ~to_ ~limit) then Error (invalid_input ())
+  else
+    let with_clause, join, search_values, ordering =
+      match search with
+      | None -> ("", "", [], "meals.eaten_at ASC, meals.id ASC")
+      | Some query ->
+          ( "WITH matches AS MATERIALIZED (SELECT meal_items.meal_id AS \
+             meal_id, bm25(meal_items_fts) AS score FROM meal_items_fts JOIN \
+             meal_items ON meal_items.rowid = meal_items_fts.rowid WHERE \
+             meal_items_fts MATCH ? AND meal_items.deleted_at IS NULL), best \
+             AS (SELECT meal_id, MIN(score) AS score FROM matches GROUP BY \
+             meal_id) ",
+            " JOIN best ON best.meal_id = meals.id",
+            [ Sqlite3.Data.TEXT (Search_query.fts5_match_expression query) ],
+            "best.score, meals.eaten_at ASC, meals.id ASC" )
+    in
+    let from_value = nullable (Option.map ~f:timestamp from)
+    and to_value = nullable (Option.map ~f:timestamp to_) in
+    select_meals db
+      (with_clause ^ "SELECT "
+      ^ String.concat ~sep:", "
+          (List.map (String.split meal_columns ~on:',') ~f:(fun column ->
+               "meals." ^ String.strip column))
+      ^ " FROM meals" ^ join
+      ^ " WHERE meals.user_id = ? AND meals.deleted_at IS NULL AND (? IS NULL \
+         OR meals.eaten_at >= ?) AND (? IS NULL OR meals.eaten_at <= ?) ORDER \
+         BY " ^ ordering ^ " LIMIT ?")
+      (search_values
+      @ [
+          owner user;
+          from_value;
+          from_value;
+          to_value;
+          to_value;
+          Sqlite3.Data.INT (Int64.of_int limit);
+        ])
+
+(* Every meal in [start, stop), unpaginated, for server-side aggregation. *)
+let meals_between db ~user ~start ~stop =
+  select_meals db
     ("SELECT " ^ meal_columns
-   ^ " FROM meals WHERE user_id = ? AND product_id = ? AND product_version < ? \
-      AND deleted_at IS NULL ORDER BY eaten_at ASC, id ASC")
+   ^ " FROM meals WHERE user_id = ? AND deleted_at IS NULL AND eaten_at >= ? \
+      AND eaten_at < ? ORDER BY eaten_at ASC, id ASC")
+    [
+      owner user;
+      Sqlite3.Data.TEXT (timestamp start);
+      Sqlite3.Data.TEXT (timestamp stop);
+    ]
+
+(* Live items of live meals logged from an earlier version of [product], with
+   their meal and when it was eaten. *)
+let items_from_earlier_versions db ~user (product : Product.t) =
+  with_statement db
+    ("SELECT "
+    ^ String.concat ~sep:", "
+        (List.map (String.split item_columns ~on:',') ~f:(fun column ->
+             "meal_items." ^ String.strip column))
+    ^ ", meals.eaten_at FROM meal_items JOIN meals ON meals.id = \
+       meal_items.meal_id WHERE meals.user_id = ? AND meals.deleted_at IS NULL \
+       AND meal_items.deleted_at IS NULL AND meal_items.product_id = ? AND \
+       meal_items.product_version < ? ORDER BY meals.eaten_at ASC, \
+       meal_items.id ASC")
     (fun statement ->
       match
         bind statement
           [
-            Sqlite3.Data.TEXT (User_id.to_string user.User.id);
+            owner user;
             Sqlite3.Data.TEXT (Product_id.to_string product.id);
             Sqlite3.Data.INT (Int64.of_int product.version);
           ]
       with
       | Error _ as error -> error
-      | Ok () -> decode_all_rows statement meal_of_row)
+      | Ok () ->
+          decode_all_rows statement (fun statement ->
+              match (item_of_row statement, parse_time (text statement 15)) with
+              | Some (meal_id, item), Some eaten_at ->
+                  Some (meal_id, eaten_at, item)
+              | _ -> None))
 
-(* All or none: each meal gets a revision, then its new nutrition and link. *)
-let rescale_meals db ~user ~reason changes =
-  with_checked_numeric_update db
-    ~check:(fun () -> Ok ())
-    ~update:(fun () ->
-      let current = now () in
-      List.fold_result changes ~init:[]
-        ~f:(fun updated ((meal : Meal.t), (portion : Product.portion), link) ->
+(* All or none: each item gets a revision, then its new nutrition and link. *)
+let rescale_items db ~reason changes =
+  in_transaction db (fun () ->
+      let current = timestamp (now ()) in
+      List.fold_result changes ~init:()
+        ~f:(fun () (meal_id, (item : Meal_item.t), portion, link) ->
           let* () =
-            record_revision db meal ~revised_at:current ~reason:(Some reason)
+            record_revision db item ~revised_at:current ~reason:(Some reason)
           in
-          let* meal =
-            with_statement db
-              ("UPDATE meals SET calories_kcal = ?, protein_g = ?, carbs_g = \
-                ?, fat_g = ?, product_id = ?, product_version = ?, \
-                product_quantity = ?, updated_at = ? WHERE id = ? AND user_id \
-                = ? AND deleted_at IS NULL RETURNING " ^ meal_columns)
-              (fun statement ->
-                match
-                  bind statement
-                    ([
-                       Sqlite3.Data.INT (Int64.of_int portion.calories_kcal);
-                       Sqlite3.Data.FLOAT portion.protein_g;
-                       nullable_float portion.carbs_g;
-                       nullable_float portion.fat_g;
-                     ]
-                    @ product_link_values (Some link)
-                    @ [
-                        Sqlite3.Data.TEXT (timestamp current);
-                        Sqlite3.Data.TEXT (Meal_id.to_string meal.id);
-                        Sqlite3.Data.TEXT (User_id.to_string user.User.id);
-                      ])
-                with
-                | Error _ as error -> error
-                | Ok () -> row_or_not_found statement meal_of_row)
-          in
-          Ok (meal :: updated))
-      |> Result.map ~f:List.rev)
+          let* () = set_item_nutrition db item ~current portion link in
+          touch_meal db meal_id ~current))
 
 let delete_meal db ~user id =
   let current = timestamp (now ()) in

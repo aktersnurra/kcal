@@ -6,8 +6,6 @@ type query_request = {
   limit : int;
 }
 
-type meal_entry = Manual of Meal.Create.t | From_product of Meal.from_product
-
 type product_correction = {
   product_id : Product_id.t;
   reason : string;
@@ -23,17 +21,25 @@ type request = private
   | Save_product of Product_id.t option * Product.Create.t
   | Search_products of Search_query.t * int
   | Correct_meals_from_product of product_correction
-  | Record_meal of { idempotency_key : string option; entry : meal_entry }
+  | Record_meal of {
+      idempotency_key : string option;
+      eaten_at : Ptime.t option;
+      label : string option;
+      items : Meal_item.entry list;
+    }
   | Get_meal of Meal_id.t
   | Query_meals of Search_query.t option * query_request
   | Get_daily_series of range_request
   | Get_summary of range_request
-  | Update_meal of {
-      id : Meal_id.t;
-      patch : Meal.Patch.t;
+  | Update_meal of Meal_id.t * Meal.Patch.t
+  | Delete_meal of Meal_id.t
+  | Add_meal_item of Meal_id.t * Meal_item.entry
+  | Update_meal_item of {
+      id : Meal_item_id.t;
+      patch : Meal_item.Patch.t;
       reason : string option;
     }
-  | Delete_meal of Meal_id.t
+  | Delete_meal_item of Meal_item_id.t
   | Record_weight of Weigh_in.Create.t
   | Get_weight of Weigh_in_id.t
   | Query_weights of query_request

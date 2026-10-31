@@ -48,9 +48,16 @@ let test_record_meal_rejects_user_id () =
           (`Assoc
              [
                ("user_id", `String "other-user");
-               ("description", `String "Soup");
-               ("calories_kcal", `Int 250);
-               ("protein_g", `Float 12.);
+               ( "items",
+                 `List
+                   [
+                     `Assoc
+                       [
+                         ("description", `String "Soup");
+                         ("calories_kcal", `Int 250);
+                         ("protein_g", `Float 12.);
+                       ];
+                   ] );
              ])
       in
       Alcotest.(check bool)
@@ -279,24 +286,28 @@ let test_update_meal_partial_patch_leaves_other_fields_unchanged () =
   Test_support.with_store (fun store user ->
       let service = Service.make ~store in
       let meal =
-        Option.value_exn
-          (Result.ok
-             (Test_support.record_meal_raw service ~user
-                (Test_support.meal_input ())))
+        Test_support.only_item
+          (Option.value_exn
+             (Result.ok
+                (Test_support.record_meal_raw service ~user
+                   (Test_support.meal_input ()))))
       in
       let response =
         Mcp.handle ~service
           ~identity:(identity user [ "ledger:write" ])
-          (call "update_meal"
+          (call "update_meal_item"
              (`Assoc
                 [
-                  ("id", `String (Meal_id.to_string meal.id));
+                  ("id", `String (Meal_item_id.to_string meal.id));
                   ("confidence", `Float 0.5);
                 ]))
       in
       let updated =
         match result_member "structuredContent" response with
-        | Some (`Assoc fields) -> fields
+        | Some (`Assoc fields) -> (
+            match List.Assoc.find fields ~equal:String.equal "items" with
+            | Some (`List [ `Assoc item ]) -> item
+            | _ -> Alcotest.fail "expected one item")
         | _ -> Alcotest.fail "missing structuredContent"
       in
       Alcotest.(check (option string))
@@ -955,6 +966,9 @@ let test_tool_list_is_exact () =
           "query_meals";
           "update_meal";
           "delete_meal";
+          "add_meal_item";
+          "update_meal_item";
+          "delete_meal_item";
           "get_daily_series";
           "get_summary";
           "record_weight";
@@ -1294,7 +1308,11 @@ let test_query_meals_search_composes_with_dates_and_limit () =
         | `List rows ->
             List.map
               ~f:(function
-                | `Assoc row -> field "description" row | _ -> assert false)
+                | `Assoc row -> (
+                    match field "items" row with
+                    | `List [ `Assoc item ] -> field "description" item
+                    | _ -> assert false)
+                | _ -> assert false)
               rows
         | _ -> assert false
       in

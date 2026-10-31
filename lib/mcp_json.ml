@@ -3,7 +3,7 @@ open Base
 let json_option f = function None -> `Null | Some value -> f value
 
 let product_link_json =
-  json_option (fun (link : Meal.product_link) ->
+  json_option (fun (link : Meal_item.product_link) ->
       `Assoc
         [
           ("product_id", `String (Product_id.to_string link.product_id));
@@ -11,10 +11,9 @@ let product_link_json =
           ("quantity", `Float link.quantity);
         ])
 
-let meal_fields ~eaten_at ~description ~calories_kcal ~protein_g ~carbs_g ~fat_g
+let estimate_fields ~description ~calories_kcal ~protein_g ~carbs_g ~fat_g
     ~confidence ~estimate_source ~notes ~product =
   [
-    ("eaten_at", `String (Time.to_utc_string eaten_at));
     ("description", `String description);
     ("calories_kcal", `Int calories_kcal);
     ("protein_g", `Float protein_g);
@@ -26,20 +25,7 @@ let meal_fields ~eaten_at ~description ~calories_kcal ~protein_g ~carbs_g ~fat_g
     ("product", product_link_json product);
   ]
 
-let meal_json (meal : Meal.t) =
-  `Assoc
-    (("id", `String (Meal_id.to_string meal.id))
-     :: meal_fields ~eaten_at:meal.eaten_at ~description:meal.description
-          ~calories_kcal:meal.calories_kcal ~protein_g:meal.protein_g
-          ~carbs_g:meal.carbs_g ~fat_g:meal.fat_g ~confidence:meal.confidence
-          ~estimate_source:meal.estimate_source ~notes:meal.notes
-          ~product:meal.product
-    @ [
-        ("created_at", `String (Time.to_utc_string meal.created_at));
-        ("updated_at", `String (Time.to_utc_string meal.updated_at));
-      ])
-
-let revision_json (revision : Meal.revision) =
+let revision_json (revision : Meal_item.revision) =
   let previous = revision.previous in
   `Assoc
     [
@@ -48,8 +34,7 @@ let revision_json (revision : Meal.revision) =
       ("reason", json_option (fun v -> `String v) revision.reason);
       ( "previous",
         `Assoc
-          (meal_fields ~eaten_at:previous.eaten_at
-             ~description:previous.description
+          (estimate_fields ~description:previous.description
              ~calories_kcal:previous.calories_kcal ~protein_g:previous.protein_g
              ~carbs_g:previous.carbs_g ~fat_g:previous.fat_g
              ~confidence:previous.confidence
@@ -57,12 +42,50 @@ let revision_json (revision : Meal.revision) =
              ~product:previous.product) );
     ]
 
-let meal_with_revisions_json meal revisions =
-  match meal_json meal with
-  | `Assoc fields ->
+let item_json ?revisions (item : Meal_item.t) =
+  `Assoc
+    (("id", `String (Meal_item_id.to_string item.id))
+     :: estimate_fields ~description:item.description
+          ~calories_kcal:item.calories_kcal ~protein_g:item.protein_g
+          ~carbs_g:item.carbs_g ~fat_g:item.fat_g ~confidence:item.confidence
+          ~estimate_source:item.estimate_source ~notes:item.notes
+          ~product:item.product
+    @ [
+        ("created_at", `String (Time.to_utc_string item.created_at));
+        ("updated_at", `String (Time.to_utc_string item.updated_at));
+      ]
+    @
+    match revisions with
+    | None -> []
+    | Some revisions ->
+        [ ("revisions", `List (List.map revisions ~f:revision_json)) ])
+
+(* Totals are derived from the items, so a meal fails to render rather than
+   reporting a sum that overflowed. *)
+let meal_json_with ~item (meal : Meal.t) =
+  Result.map (Meal.totals meal) ~f:(fun (totals : Meal.totals) ->
       `Assoc
-        (fields @ [ ("revisions", `List (List.map revisions ~f:revision_json)) ])
-  | json -> json
+        [
+          ("id", `String (Meal_id.to_string meal.id));
+          ("eaten_at", `String (Time.to_utc_string meal.eaten_at));
+          ("label", json_option (fun v -> `String v) meal.label);
+          ("calories_kcal", `Int totals.calories_kcal);
+          ("protein_g", `Float totals.protein_g);
+          ("carbs_g", json_option (fun v -> `Float v) totals.carbs_g);
+          ("fat_g", json_option (fun v -> `Float v) totals.fat_g);
+          ("items", `List (List.map meal.items ~f:item));
+          ("created_at", `String (Time.to_utc_string meal.created_at));
+          ("updated_at", `String (Time.to_utc_string meal.updated_at));
+        ])
+
+let meal_json meal = meal_json_with ~item:(fun item -> item_json item) meal
+
+let meal_with_revisions_json meal revisions =
+  meal_json_with meal ~item:(fun (item : Meal_item.t) ->
+      item_json item
+        ~revisions:
+          (List.filter_map revisions ~f:(fun (item_id, revision) ->
+               Option.some_if (Meal_item_id.equal item_id item.id) revision)))
 
 let product_json (product : Product.t) =
   `Assoc
@@ -385,22 +408,28 @@ let correction_json (correction : Service.product_correction) =
       ("product_id", `String (Product_id.to_string product.id));
       ("product_version", `Int product.version);
       ("applied", `Bool correction.applied);
-      ( "meals",
+      ( "items",
         `List
-          (List.map correction.meals
-             ~f:(fun ((meal : Meal.t), (portion : Product.portion)) ->
+          (List.map correction.items
+             ~f:(fun
+                 ( meal_id,
+                   eaten_at,
+                   (item : Meal_item.t),
+                   (portion : Product.portion) )
+               ->
                `Assoc
                  [
-                   ("id", `String (Meal_id.to_string meal.id));
-                   ("eaten_at", `String (Time.to_utc_string meal.eaten_at));
+                   ("id", `String (Meal_item_id.to_string item.id));
+                   ("meal_id", `String (Meal_id.to_string meal_id));
+                   ("eaten_at", `String (Time.to_utc_string eaten_at));
                    ( "from_version",
                      json_option
-                       (fun (link : Meal.product_link) ->
+                       (fun (link : Meal_item.product_link) ->
                          `Int link.product_version)
-                       meal.product );
-                   ("calories_kcal_before", `Int meal.calories_kcal);
+                       item.product );
+                   ("calories_kcal_before", `Int item.calories_kcal);
                    ("calories_kcal_after", `Int portion.calories_kcal);
-                   ("protein_g_before", `Float meal.protein_g);
+                   ("protein_g_before", `Float item.protein_g);
                    ("protein_g_after", `Float portion.protein_g);
                  ])) );
     ]

@@ -41,8 +41,19 @@ let test_foreign_meal_operations_are_hidden () =
       Alcotest.(check bool)
         "foreign update" true
         (hidden
-           (Test_support.update_meal_raw store ~user:bob meal.id
-              Meal.empty_patch));
+           (Test_support.update_only_item_raw store ~user:bob meal
+              Meal_item.empty_patch));
+      Alcotest.(check bool)
+        "foreign meal update" true
+        (hidden
+           (Result.bind
+              (Meal.Patch.of_raw { eaten_at = None; label = Some "lunch" })
+              ~f:(Store_sqlite.update_meal store ~user:bob meal.id)));
+      Alcotest.(check bool)
+        "foreign item delete" true
+        (hidden
+           (Store_sqlite.delete_item store ~user:bob
+              (Test_support.only_item meal).id));
       Alcotest.(check bool)
         "foreign delete" true
         (hidden (Store_sqlite.delete_meal store ~user:bob meal.id));
@@ -58,7 +69,7 @@ let test_meal_crud_and_soft_delete () =
   Test_support.with_store (fun store user ->
       let meal = Test_support.create_meal store user in
       let patch =
-        Meal.
+        Meal_item.
           {
             empty_patch with
             description = Some "Stew";
@@ -66,8 +77,10 @@ let test_meal_crud_and_soft_delete () =
           }
       in
       let updated =
-        Option.value_exn
-          (Result.ok (Test_support.update_meal_raw store ~user meal.id patch))
+        Test_support.only_item
+          (Option.value_exn
+             (Result.ok
+                (Test_support.update_only_item_raw store ~user meal patch)))
       in
       Alcotest.(check string) "description" "Stew" updated.description;
       Alcotest.(check int) "calories" 300 updated.calories_kcal;
@@ -96,13 +109,15 @@ let test_deleted_meal_is_excluded_from_query () =
 
 let test_partial_update_leaves_omitted_fields_unchanged () =
   Test_support.with_store (fun store user ->
-      let meal = Test_support.create_meal store user in
-      let updated =
+      let created = Test_support.create_meal store user in
+      let updated_meal =
         Option.value_exn
           (Result.ok
-             (Test_support.update_meal_raw store ~user meal.id
-                Meal.{ empty_patch with confidence = Some 0.5 }))
+             (Test_support.update_only_item_raw store ~user created
+                Meal_item.{ empty_patch with confidence = Some 0.5 }))
       in
+      let meal = Test_support.only_item created
+      and updated = Test_support.only_item updated_meal in
       Alcotest.(check (float 0.0001))
         "confidence updated" 0.5
         (Option.value_exn updated.confidence);
@@ -122,12 +137,13 @@ let test_partial_update_leaves_omitted_fields_unchanged () =
         "notes untouched" meal.notes updated.notes;
       Alcotest.(check string)
         "eaten_at untouched"
-        (Time.to_utc_string meal.eaten_at)
-        (Time.to_utc_string updated.eaten_at))
+        (Time.to_utc_string created.eaten_at)
+        (Time.to_utc_string updated_meal.eaten_at))
 
 let test_locked_meal_get_and_update_are_storage_errors () =
   Test_support.with_exclusive_lock
-    (fun store user -> (Test_support.create_meal store user, Meal.empty_patch))
+    (fun store user ->
+      (Test_support.create_meal store user, Meal_item.empty_patch))
     (fun store user (meal, patch) ->
       let is_storage_error = function
         | Error (Error.Storage_error "SQLite operation failed") -> true
@@ -139,7 +155,7 @@ let test_locked_meal_get_and_update_are_storage_errors () =
       Alcotest.(check bool)
         "locked update is sanitized" true
         (is_storage_error
-           (Test_support.update_meal_raw store ~user meal.id patch)))
+           (Test_support.update_only_item_raw store ~user meal patch)))
 
 let test_meals_between_is_half_open_and_skips_deleted () =
   Test_support.with_store (fun store user ->
@@ -204,13 +220,12 @@ let test_search_matches_literal_text_and_scopes_results () =
         Option.value_exn
           (Result.ok
              (Test_support.create_meal_raw store ~user
-                Meal.
-                  {
-                    (Test_support.meal_input ()) with
-                    description;
-                    estimate_source;
-                    notes;
-                  }))
+                {
+                  (Test_support.meal_input ()) with
+                  description;
+                  estimate_source;
+                  notes;
+                }))
       in
       let description = create user "WHEY shake" None None in
       let source = create user "Shake" (Some "whey label") None in
@@ -258,11 +273,10 @@ let test_search_composes_with_dates_order_and_limit () =
         Option.value_exn
           (Result.ok
              (Test_support.create_meal_raw store ~user
-                Meal.
-                  {
-                    (Test_support.meal_input ~eaten_at:(at time) ()) with
-                    description;
-                  }))
+                {
+                  (Test_support.meal_input ~eaten_at:(at time) ()) with
+                  description;
+                }))
       in
       (* Insert out of chronological order to pin ordering, not insertion order. *)
       let last = create "2026-09-23T00:00:00Z" "whey last" in
@@ -317,7 +331,7 @@ let test_invalid_durable_numeric_row () =
         (match
            Sqlite3.exec
              (Store_sqlite.For_testing.raw_database store)
-             "UPDATE meals SET protein_g = 1e309"
+             "UPDATE meal_items SET protein_g = 1e309"
          with
         | Sqlite3.Rc.OK -> true
         | _ -> false);
@@ -329,8 +343,8 @@ let test_invalid_durable_numeric_row () =
       Alcotest.(check bool)
         "corrupt row cannot be silently repaired" true
         (match
-           Test_support.update_meal_raw store ~user meal.id
-             Meal.{ empty_patch with protein_g = Some 1.0 }
+           Test_support.update_only_item_raw store ~user meal
+             Meal_item.{ empty_patch with protein_g = Some 1.0 }
          with
         | Error (Error.Storage_decoding _) -> true
         | _ -> false);
@@ -340,7 +354,7 @@ let test_invalid_durable_numeric_row () =
            (Store_sqlite.For_testing.raw_database store)
            ~cb:(fun row _ ->
              protein := Float.of_string (Option.value_exn row.(0)))
-           "SELECT protein_g FROM meals");
+           "SELECT protein_g FROM meal_items");
       Alcotest.(check bool)
         "durable Float.infinity untouched" true (Float.is_inf !protein))
 
@@ -354,7 +368,7 @@ let test_durable_calories_are_not_coerced () =
             (match
                Sqlite3.exec
                  (Store_sqlite.For_testing.raw_database store)
-                 ("UPDATE meals SET calories_kcal = " ^ value)
+                 ("UPDATE meal_items SET calories_kcal = " ^ value)
              with
             | Sqlite3.Rc.OK -> true
             | _ -> false);
@@ -370,7 +384,8 @@ let test_durable_calories_are_not_coerced () =
    update_meal must change exactly those fields and leave the rest as they were. *)
 let%hegel_test meal_patch_touches_only_the_included_fields tc =
   Test_support.with_store (fun store user ->
-      let meal = Test_support.create_meal store user in
+      let created = Test_support.create_meal store user in
+      let meal = Test_support.only_item created in
       let include_description = draw tc (booleans ()) in
       let include_calories = draw tc (booleans ()) in
       let include_protein = draw tc (booleans ()) in
@@ -380,7 +395,7 @@ let%hegel_test meal_patch_touches_only_the_included_fields tc =
         draw tc (floats ~min_value:0.0 ~allow_infinity:false ())
       in
       let patch =
-        Meal.
+        Meal_item.
           {
             empty_patch with
             description =
@@ -391,8 +406,10 @@ let%hegel_test meal_patch_touches_only_the_included_fields tc =
           }
       in
       let updated =
-        Option.value_exn
-          (Result.ok (Test_support.update_meal_raw store ~user meal.id patch))
+        Test_support.only_item
+          (Option.value_exn
+             (Result.ok
+                (Test_support.update_only_item_raw store ~user created patch)))
       in
       assert (
         String.equal updated.description

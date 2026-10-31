@@ -69,17 +69,13 @@ let optional_bool name fields =
   | _ -> invalid ()
 
 let has name fields = List.Assoc.mem fields ~equal:String.equal name
-
-type meal_entry = Manual of Meal.Create.t | From_product of Meal.from_product
-
 let nutrition_fields = [ "calories_kcal"; "protein_g"; "carbs_g"; "fat_g" ]
-let provenance_fields = [ "confidence"; "estimate_source"; "notes"; "eaten_at" ]
+let provenance_fields = [ "confidence"; "estimate_source"; "notes" ]
 
-let meal_from_product fields =
+let item_from_product fields =
   let* fields =
     only_fields
-      ([ "product_id"; "quantity"; "description"; "idempotency_key" ]
-      @ provenance_fields)
+      ([ "product_id"; "quantity"; "description" ] @ provenance_fields)
       (`Assoc fields)
   in
   let* value = required_string "product_id" fields in
@@ -95,20 +91,16 @@ let meal_from_product fields =
   in
   let* estimate_source = optional_string "estimate_source" fields in
   let* notes = optional_string "notes" fields in
-  let* eaten_at = optional_time "eaten_at" fields in
   Ok
-    (From_product
-       {
-         product_id;
-         quantity;
-         description;
-         confidence;
-         estimate_source;
-         notes;
-         eaten_at;
-       })
+    (Meal_item.From_product
+       { product_id; quantity; description; confidence; estimate_source; notes })
 
-let meal_create fields : (Meal.Create.t, Error.t) Result.t =
+let estimated_item fields =
+  let* fields =
+    only_fields
+      (("description" :: nutrition_fields) @ provenance_fields)
+      (`Assoc fields)
+  in
   let* description = required_string "description" fields in
   let* calories_kcal = required_int "calories_kcal" fields in
   let* protein_g = required_float "protein_g" fields in
@@ -117,41 +109,37 @@ let meal_create fields : (Meal.Create.t, Error.t) Result.t =
   let* confidence = optional_float "confidence" fields in
   let* estimate_source = optional_string "estimate_source" fields in
   let* notes = optional_string "notes" fields in
-  let* eaten_at = optional_time "eaten_at" fields in
-  Meal.Create.of_raw
-    ({
-       description;
-       calories_kcal;
-       protein_g;
-       carbs_g;
-       fat_g;
-       confidence;
-       estimate_source;
-       notes;
-       eaten_at;
-     }
-      : Meal.create)
+  Result.map
+    (Meal_item.Create.of_raw
+       {
+         description;
+         calories_kcal;
+         protein_g;
+         carbs_g;
+         fat_g;
+         confidence;
+         estimate_source;
+         notes;
+       })
+    ~f:(fun input -> Meal_item.Estimated input)
 
-let meal_entry fields =
-  if has "product_id" fields then
-    if List.exists nutrition_fields ~f:(fun name -> has name fields) then
-      Error
-        (Error.Rejected
-           "with product_id, omit calories_kcal, protein_g, carbs_g and fat_g: \
-            they are scaled from the product")
-    else meal_from_product fields
-  else if has "quantity" fields then
-    Error (Error.Rejected "quantity is only meaningful with product_id")
-  else
-    let* fields =
-      only_fields
-        ([ "description"; "idempotency_key" ]
-        @ nutrition_fields @ provenance_fields)
-        (`Assoc fields)
-    in
-    Result.map (meal_create fields) ~f:(fun input -> Manual input)
+(* The two shapes are disjoint, so no tag is needed: product_id selects the
+   product shape, and nutrition fields are then an error, not ignored. *)
+let item_entry = function
+  | `Assoc fields ->
+      if has "product_id" fields then
+        if List.exists nutrition_fields ~f:(fun name -> has name fields) then
+          Error
+            (Error.Rejected
+               "with product_id, omit calories_kcal, protein_g, carbs_g and \
+                fat_g: they are scaled from the product")
+        else item_from_product fields
+      else if has "quantity" fields then
+        Error (Error.Rejected "quantity is only meaningful with product_id")
+      else estimated_item fields
+  | _ -> Error (Error.Rejected "each item must be an object")
 
-let meal_patch fields : (Meal.Patch.t, Error.t) Result.t =
+let item_patch fields : (Meal_item.Patch.t, Error.t) Result.t =
   let* description = optional_string "description" fields in
   let* calories_kcal = optional_int "calories_kcal" fields in
   let* protein_g = optional_float "protein_g" fields in
@@ -160,20 +148,17 @@ let meal_patch fields : (Meal.Patch.t, Error.t) Result.t =
   let* confidence = optional_float "confidence" fields in
   let* estimate_source = optional_string "estimate_source" fields in
   let* notes = optional_string "notes" fields in
-  let* eaten_at = optional_time "eaten_at" fields in
-  Meal.Patch.of_raw
-    ({
-       description;
-       calories_kcal;
-       protein_g;
-       carbs_g;
-       fat_g;
-       confidence;
-       estimate_source;
-       notes;
-       eaten_at;
-     }
-      : Meal.patch)
+  Meal_item.Patch.of_raw
+    {
+      description;
+      calories_kcal;
+      protein_g;
+      carbs_g;
+      fat_g;
+      confidence;
+      estimate_source;
+      notes;
+    }
 
 let parse_limit fields =
   let* value = optional_int "limit" fields in
@@ -342,17 +327,25 @@ type request =
   | Save_product of Product_id.t option * Product.Create.t
   | Search_products of Search_query.t * int
   | Correct_meals_from_product of product_correction
-  | Record_meal of { idempotency_key : string option; entry : meal_entry }
+  | Record_meal of {
+      idempotency_key : string option;
+      eaten_at : Ptime.t option;
+      label : string option;
+      items : Meal_item.entry list;
+    }
   | Get_meal of Meal_id.t
   | Query_meals of Search_query.t option * query_request
   | Get_daily_series of range_request
   | Get_summary of range_request
-  | Update_meal of {
-      id : Meal_id.t;
-      patch : Meal.Patch.t;
+  | Update_meal of Meal_id.t * Meal.Patch.t
+  | Delete_meal of Meal_id.t
+  | Add_meal_item of Meal_id.t * Meal_item.entry
+  | Update_meal_item of {
+      id : Meal_item_id.t;
+      patch : Meal_item.Patch.t;
       reason : string option;
     }
-  | Delete_meal of Meal_id.t
+  | Delete_meal_item of Meal_item_id.t
   | Record_weight of Weigh_in.Create.t
   | Get_weight of Weigh_in_id.t
   | Query_weights of query_request
@@ -421,9 +414,21 @@ let parse ~now ~default_zone ~compile_search ~name arguments =
         (Correct_meals_from_product
            { product_id; reason; dry_run = Option.value dry_run ~default:true })
   | "record_meal" ->
+      let* fields =
+        only_fields
+          [ "items"; "eaten_at"; "label"; "idempotency_key" ]
+          (`Assoc fields)
+      in
       let* idempotency_key = nonblank_string "idempotency_key" fields in
-      let* entry = meal_entry fields in
-      Ok (Record_meal { idempotency_key; entry })
+      let* label = nonblank_string "label" fields in
+      let* eaten_at = optional_time "eaten_at" fields in
+      let* items =
+        match List.Assoc.find fields ~equal:String.equal "items" with
+        | Some (`List (_ :: _ as items)) ->
+            Result.all (List.map items ~f:item_entry)
+        | _ -> Error (Error.Rejected "items must be a nonempty array")
+      in
+      Ok (Record_meal { idempotency_key; eaten_at; label; items })
   | "get_meal" ->
       let* fields = only_fields [ "id" ] (`Assoc fields) in
       let* value = required_string "id" fields in
@@ -444,30 +449,40 @@ let parse ~now ~default_zone ~compile_search ~name arguments =
       in
       Ok (Query_meals (search, { from; to_; limit }))
   | "update_meal" ->
+      let* fields = only_fields [ "id"; "eaten_at"; "label" ] (`Assoc fields) in
+      let* value = required_string "id" fields in
+      let* meal_id = id value Meal_id.of_string in
+      let* eaten_at = optional_time "eaten_at" fields in
+      let* label = nonblank_string "label" fields in
+      let* patch = Meal.Patch.of_raw { eaten_at; label } in
+      Ok (Update_meal (meal_id, patch))
+  | "add_meal_item" ->
+      let* fields = only_fields [ "meal_id"; "item" ] (`Assoc fields) in
+      let* value = required_string "meal_id" fields in
+      let* meal_id = id value Meal_id.of_string in
+      let* entry =
+        match List.Assoc.find fields ~equal:String.equal "item" with
+        | Some item -> item_entry item
+        | None -> Error (Error.Rejected "item is required")
+      in
+      Ok (Add_meal_item (meal_id, entry))
+  | "update_meal_item" ->
       let* fields =
         only_fields
-          ("id"
-          :: [
-               "description";
-               "calories_kcal";
-               "protein_g";
-               "carbs_g";
-               "fat_g";
-               "confidence";
-               "estimate_source";
-               "notes";
-               "eaten_at";
-               "reason";
-             ])
+          (("id" :: "reason" :: "description" :: nutrition_fields)
+          @ provenance_fields)
           (`Assoc fields)
       in
       let* value = required_string "id" fields in
-      let* meal_id = id value Meal_id.of_string in
+      let* item_id = id value Meal_item_id.of_string in
       let* reason = nonblank_string "reason" fields in
-      let* patch =
-        meal_patch (List.Assoc.remove fields ~equal:String.equal "reason")
-      in
-      Ok (Update_meal { id = meal_id; patch; reason })
+      let* patch = item_patch fields in
+      Ok (Update_meal_item { id = item_id; patch; reason })
+  | "delete_meal_item" ->
+      let* fields = only_fields [ "id" ] (`Assoc fields) in
+      let* value = required_string "id" fields in
+      let* item_id = id value Meal_item_id.of_string in
+      Ok (Delete_meal_item item_id)
   | "delete_meal" ->
       let* fields = only_fields [ "id" ] (`Assoc fields) in
       let* value = required_string "id" fields in

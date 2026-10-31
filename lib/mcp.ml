@@ -15,8 +15,8 @@ let required_scope = function
   | "get_daily_series" | "get_summary" | "get_weight" | "query_weights" ->
       Some "ledger:read"
   | "set_goals" | "save_product" | "correct_meals_from_product" | "record_meal"
-  | "update_meal" | "delete_meal" | "record_weight" | "update_weight"
-  | "delete_weight" ->
+  | "update_meal" | "delete_meal" | "add_meal_item" | "update_meal_item"
+  | "delete_meal_item" | "record_weight" | "update_weight" | "delete_weight" ->
       Some "ledger:write"
   | "begin_withings_connection" | "get_withings_status" | "disconnect_withings"
     ->
@@ -48,6 +48,9 @@ let call_disconnect_withings service withings ~user =
     ~f:(fun () ->
       Mcp_json.text_result (`Assoc [ ("disconnected", `Bool true) ]))
     (Service.disconnect_withings service ~user)
+
+let meal_result meal =
+  Result.map (Mcp_json.meal_json meal) ~f:Mcp_json.text_result
 
 let call ?withings service (identity : Auth.identity) name arguments =
   let now = Option.value_exn (Ptime.of_float_s (Unix.gettimeofday ())) in
@@ -90,31 +93,32 @@ let call ?withings service (identity : Auth.identity) name arguments =
           Mcp_json.text_result (Mcp_json.correction_json correction))
         (Service.correct_meals_from_product service ~user product_id ~reason
            ~dry_run)
-  | Record_meal { idempotency_key; entry } ->
-      Result.map
-        ~f:(fun meal -> Mcp_json.text_result (Mcp_json.meal_json meal))
-        (match entry with
-        | Manual input ->
-            Service.record_meal ?idempotency_key service ~user input
-        | From_product entry ->
-            Service.record_meal_from_product ?idempotency_key service ~user
-              entry)
+  | Record_meal { idempotency_key; eaten_at; label; items } ->
+      let* meal =
+        Service.record_meal ?idempotency_key service ~user ~eaten_at ~label
+          items
+      in
+      meal_result meal
   | Get_meal meal_id ->
-      Result.map
-        ~f:(fun (meal, revisions) ->
-          Mcp_json.text_result
-            (Mcp_json.meal_with_revisions_json meal revisions))
-        (Service.get_meal service ~user meal_id)
+      let* meal, revisions = Service.get_meal service ~user meal_id in
+      Result.map ~f:Mcp_json.text_result
+        (Mcp_json.meal_with_revisions_json meal revisions)
   | Query_meals (search, { from; to_; limit }) ->
-      Result.map
-        ~f:(fun meals ->
-          Mcp_json.text_result
-            (`Assoc [ ("meals", `List (List.map ~f:Mcp_json.meal_json meals)) ]))
-        (Service.query_meals ?search service ~user ~from ~to_ ~limit)
-  | Update_meal { id; patch; reason } ->
-      Result.map
-        ~f:(fun meal -> Mcp_json.text_result (Mcp_json.meal_json meal))
-        (Service.update_meal ?reason service ~user id patch)
+      let* meals =
+        Service.query_meals ?search service ~user ~from ~to_ ~limit
+      in
+      let* meals = Result.all (List.map meals ~f:Mcp_json.meal_json) in
+      Ok (Mcp_json.text_result (`Assoc [ ("meals", `List meals) ]))
+  | Update_meal (id, patch) ->
+      Result.bind (Service.update_meal service ~user id patch) ~f:meal_result
+  | Add_meal_item (meal_id, entry) ->
+      Result.bind (Service.add_item service ~user meal_id entry) ~f:meal_result
+  | Update_meal_item { id; patch; reason } ->
+      Result.bind
+        (Service.update_item ?reason service ~user id patch)
+        ~f:meal_result
+  | Delete_meal_item id ->
+      Result.bind (Service.delete_item service ~user id) ~f:meal_result
   | Delete_meal meal_id ->
       Result.map
         ~f:(fun () -> Mcp_json.text_result (`Assoc [ ("deleted", `Bool true) ]))

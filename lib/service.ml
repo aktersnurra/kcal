@@ -11,43 +11,55 @@ let resolve_user service ~issuer ~subject =
 
 let ( let* ) result f = Result.bind result ~f
 
-let record_meal ?idempotency_key service ~user input =
-  Store_sqlite.create_meal ?idempotency_key service.store ~user input
+(* An item from a product takes the product's current version, scaled. *)
+let resolve_item service ~user = function
+  | Meal_item.Estimated input -> Ok (input, None)
+  | From_product entry ->
+      let* product =
+        Store_sqlite.get_product service.store ~user entry.product_id
+      in
+      let* portion = Product.portion product ~quantity:entry.quantity in
+      let* input =
+        Meal_item.Create.of_raw
+          {
+            description = Option.value entry.description ~default:product.name;
+            calories_kcal = portion.calories_kcal;
+            protein_g = portion.protein_g;
+            carbs_g = portion.carbs_g;
+            fat_g = portion.fat_g;
+            confidence = entry.confidence;
+            estimate_source =
+              Some (Option.value entry.estimate_source ~default:product.source);
+            notes = entry.notes;
+          }
+      in
+      Ok
+        ( input,
+          Some
+            Meal_item.
+              {
+                product_id = product.id;
+                product_version = product.version;
+                quantity = entry.quantity;
+              } )
 
-let record_meal_from_product ?idempotency_key service ~user
-    (entry : Meal.from_product) =
-  let* product =
-    Store_sqlite.get_product service.store ~user entry.product_id
-  in
-  let* portion = Product.portion product ~quantity:entry.quantity in
-  let* input =
-    Meal.Create.of_raw
-      {
-        description = Option.value entry.description ~default:product.name;
-        calories_kcal = portion.calories_kcal;
-        protein_g = portion.protein_g;
-        carbs_g = portion.carbs_g;
-        fat_g = portion.fat_g;
-        confidence = entry.confidence;
-        estimate_source =
-          Some (Option.value entry.estimate_source ~default:product.source);
-        notes = entry.notes;
-        eaten_at = entry.eaten_at;
-      }
-  in
-  Store_sqlite.create_meal ?idempotency_key
-    ~product:
-      {
-        product_id = product.id;
-        product_version = product.version;
-        quantity = entry.quantity;
-      }
-    service.store ~user input
+let record_meal ?idempotency_key service ~user ~eaten_at ~label entries =
+  let* items = Result.all (List.map entries ~f:(resolve_item service ~user)) in
+  Store_sqlite.create_meal ?idempotency_key service.store ~user ~eaten_at ~label
+    items
 
 let get_meal service ~user id =
-  let* meal = Store_sqlite.get_meal service.store ~user id in
-  let* revisions = Store_sqlite.meal_revisions service.store ~user id in
-  Ok (meal, revisions)
+  Store_sqlite.get_meal_with_revisions service.store ~user id
+
+let add_item service ~user meal_id entry =
+  let* item = resolve_item service ~user entry in
+  Store_sqlite.add_item service.store ~user meal_id item
+
+let update_item ?reason service ~user id patch =
+  Store_sqlite.update_item ?reason service.store ~user id patch
+
+let delete_item service ~user id =
+  Store_sqlite.delete_item service.store ~user id
 
 (* The HTTP service runs in one Eio domain. Compilation is synchronous and
    non-yielding, so its connection-local TEMP work is serialized with store work.
@@ -58,8 +70,8 @@ let compile_search_query service alternatives =
 let query_meals ?search service ~user ~from ~to_ ~limit =
   Store_sqlite.query_meals ?search service.store ~user ~from ~to_ ~limit
 
-let update_meal ?reason service ~user id patch =
-  Store_sqlite.update_meal ?reason service.store ~user id patch
+let update_meal service ~user id patch =
+  Store_sqlite.update_meal service.store ~user id patch
 
 let delete_meal service ~user id =
   Store_sqlite.delete_meal service.store ~user id
@@ -125,34 +137,37 @@ let default_zone service ~user =
 
 type product_correction = {
   product : Product.t;
-  meals : (Meal.t * Product.portion) list;
-      (** Each meal as it stands, with the nutrition the product now gives. *)
+  items : (Meal_id.t * Ptime.t * Meal_item.t * Product.portion) list;
   applied : bool;
 }
 
 let correct_meals_from_product service ~user product_id ~reason ~dry_run =
   let* product = Store_sqlite.get_product service.store ~user product_id in
   let* stale =
-    Store_sqlite.meals_from_earlier_versions service.store ~user product
+    Store_sqlite.items_from_earlier_versions service.store ~user product
   in
   let* changes =
-    List.map stale ~f:(fun (meal : Meal.t) ->
+    List.map stale ~f:(fun (meal_id, eaten_at, (item : Meal_item.t)) ->
         let* link =
-          Result.of_option meal.product
-            ~error:(Error.Storage_decoding "meal product link")
+          Result.of_option item.product
+            ~error:(Error.Storage_decoding "meal item product link")
         in
         let* portion = Product.portion product ~quantity:link.quantity in
-        Ok (meal, portion, Meal.{ link with product_version = product.version }))
+        Ok
+          ( (meal_id, eaten_at, item, portion),
+            Meal_item.{ link with product_version = product.version } ))
     |> Result.all
   in
-  let meals = List.map changes ~f:(fun (meal, portion, _) -> (meal, portion)) in
+  let items = List.map changes ~f:fst in
   if dry_run || List.is_empty changes then
-    Ok { product; meals; applied = false }
+    Ok { product; items; applied = false }
   else
-    let* (_ : Meal.t list) =
-      Store_sqlite.rescale_meals service.store ~user ~reason changes
+    let* () =
+      Store_sqlite.rescale_items service.store ~reason
+        (List.map changes ~f:(fun ((meal_id, _, item, portion), link) ->
+             (meal_id, item, portion, link)))
     in
-    Ok { product; meals; applied = true }
+    Ok { product; items; applied = true }
 
 let records_in_range service ~user ~zone ~range =
   let* start, stop = Date_range.utc_bounds zone range in

@@ -20,8 +20,11 @@ val search_products :
   (Product.t list, Error.t) result
 
 val get_meal :
-  t -> user:User.t -> Meal_id.t -> (Meal.t * Meal.revision list, Error.t) result
-(** With its revisions, oldest first. *)
+  t ->
+  user:User.t ->
+  Meal_id.t ->
+  (Meal.t * (Meal_item_id.t * Meal_item.revision) list, Error.t) result
+(** With its items' revisions, oldest first. *)
 
 val query_meals :
   ?search:Search_query.t ->
@@ -33,13 +36,20 @@ val query_meals :
   (Meal.t list, Error.t) result
 
 val update_meal :
+  t -> user:User.t -> Meal_id.t -> Meal.Patch.t -> (Meal.t, Error.t) result
+
+val add_item :
+  t -> user:User.t -> Meal_id.t -> Meal_item.entry -> (Meal.t, Error.t) result
+
+val update_item :
   ?reason:string ->
   t ->
   user:User.t ->
-  Meal_id.t ->
-  Meal.Patch.t ->
+  Meal_item_id.t ->
+  Meal_item.Patch.t ->
   (Meal.t, Error.t) result
 
+val delete_item : t -> user:User.t -> Meal_item_id.t -> (Meal.t, Error.t) result
 val delete_meal : t -> user:User.t -> Meal_id.t -> (unit, Error.t) result
 
 val get_weigh_in :
@@ -109,8 +119,9 @@ val default_zone : t -> user:User.t -> (Time.zone, Error.t) result
 
 type product_correction = {
   product : Product.t;
-  meals : (Meal.t * Product.portion) list;
-      (** Each meal as it stands, with the nutrition the product now gives. *)
+  items : (Meal_id.t * Ptime.t * Meal_item.t * Product.portion) list;
+      (** Each item as it stands, with its meal, when it was eaten, and the
+          nutrition the product now gives. *)
   applied : bool;
 }
 
@@ -121,7 +132,7 @@ val correct_meals_from_product :
   reason:string ->
   dry_run:bool ->
   (product_correction, Error.t) result
-(** Rescales live meals logged from an earlier version of the product to its
+(** Rescales live items logged from an earlier version of the product to its
     current version, recording a revision with [reason] on each. *)
 
 val connect_withings :
@@ -140,17 +151,12 @@ val record_meal :
   ?idempotency_key:string ->
   t ->
   user:User.t ->
-  Meal.Create.t ->
+  eaten_at:Ptime.t option ->
+  label:string option ->
+  Meal_item.entry list ->
   (Meal.t, Error.t) result
-
-val record_meal_from_product :
-  ?idempotency_key:string ->
-  t ->
-  user:User.t ->
-  Meal.from_product ->
-  (Meal.t, Error.t) result
-(** Scales the product's current version to the quantity and links the meal to
-    it. *)
+(** Items from a product take its current version, scaled to the quantity and
+    linked to it. *)
 
 val record_manual_weigh_in :
   t -> user:User.t -> Weigh_in.Create.t -> (Weigh_in.t, Error.t) result

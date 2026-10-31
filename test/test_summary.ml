@@ -15,14 +15,24 @@ let zone value = Option.value_exn (Result.ok (Time.parse_zone value))
 let date value = Option.value_exn (Result.ok (Date.of_string value))
 let stockholm = zone "Europe/Stockholm"
 
-let meal ?(protein_g = 10.0) ?carbs_g ?fat_g at calories_kcal : Meal.t =
-  let at = time at in
+let item ?(protein_g = 10.0) ?carbs_g ?fat_g ~at calories_kcal =
+  Option.value_exn
+    (Result.ok
+       (Meal_item.of_storage ~id:(Meal_item_id.fresh ()) ~description:"m"
+          ~calories_kcal ~protein_g ~carbs_g ~fat_g ~confidence:None
+          ~estimate_source:None ~notes:None ~product:None ~created_at:at
+          ~updated_at:at))
+
+let meal_of_items at items : Meal.t =
   Option.value_exn
     (Result.ok
        (Meal.of_storage ~id:(Meal_id.fresh ()) ~user_id:(User_id.fresh ())
-          ~eaten_at:at ~description:"m" ~calories_kcal ~protein_g ~carbs_g
-          ~fat_g ~confidence:None ~estimate_source:None ~notes:None
-          ~product:None ~created_at:at ~updated_at:at ~deleted_at:None))
+          ~eaten_at:at ~label:None ~items ~created_at:at ~updated_at:at
+          ~deleted_at:None))
+
+let meal ?protein_g ?carbs_g ?fat_g at calories_kcal : Meal.t =
+  let at = time at in
+  meal_of_items at [ item ?protein_g ?carbs_g ?fat_g ~at calories_kcal ]
 
 let weigh_in at weight_kg : Weigh_in.t =
   let at = time at in
@@ -640,12 +650,7 @@ module Calendar_properties = struct
     | _ -> assert false
 
   let meal_at eaten_at =
-    ok
-      (Meal.of_storage ~id:(Meal_id.fresh ()) ~user_id:(User_id.fresh ())
-         ~eaten_at ~description:"m" ~calories_kcal:100 ~protein_g:1.0
-         ~carbs_g:None ~fat_g:None ~confidence:None ~estimate_source:None
-         ~notes:None ~product:None ~created_at:eaten_at ~updated_at:eaten_at
-         ~deleted_at:None)
+    meal_of_items eaten_at [ item ~protein_g:1.0 ~at:eaten_at 100 ]
 
   let%hegel_test daily_series_keeps_every_in_range_meal_exactly_once tc =
     let zone = Calendar.draw_zone tc in

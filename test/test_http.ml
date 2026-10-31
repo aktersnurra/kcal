@@ -263,7 +263,7 @@ let test_overflow_reaches_http_as_tool_error () =
           let response =
             call "record_meal"
               (Stdlib.Printf.sprintf
-                 {|{"description":"large","calories_kcal":%d,"protein_g":1,"eaten_at":"2026-07-14T10:00:00Z"}|}
+                 {|{"items":[{"description":"large","calories_kcal":%d,"protein_g":1}],"eaten_at":"2026-07-14T10:00:00Z"}|}
                  calories)
           in
           Alcotest.(check bool)
@@ -345,15 +345,15 @@ let () =
             test_overflow_reaches_http_as_tool_error;
           Alcotest.test_case "nonfinite meal" `Quick
             (nonfinite_request "record_meal"
-               {|{"description":"overflow","calories_kcal":1,"protein_g":1e309}|}
+               {|{"items":[{"description":"overflow","calories_kcal":1,"protein_g":1e309}]}|}
                "meals");
           Alcotest.test_case "nonfinite meal carbs" `Quick
             (nonfinite_request "record_meal"
-               {|{"description":"overflow","calories_kcal":1,"protein_g":1,"carbs_g":1e309}|}
+               {|{"items":[{"description":"overflow","calories_kcal":1,"protein_g":1,"carbs_g":1e309}]}|}
                "meals");
           Alcotest.test_case "nonfinite meal fat" `Quick
             (nonfinite_request "record_meal"
-               {|{"description":"overflow","calories_kcal":1,"protein_g":1,"fat_g":1e309}|}
+               {|{"items":[{"description":"overflow","calories_kcal":1,"protein_g":1,"fat_g":1e309}]}|}
                "meals");
           Alcotest.test_case "nonfinite weight" `Quick
             (nonfinite_request "record_weight" {|{"weight_kg":1e309}|}

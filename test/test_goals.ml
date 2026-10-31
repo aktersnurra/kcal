@@ -23,11 +23,17 @@ let goals ?eating_window ?target_weight_kg () : Goals.t =
 
 let meal at calories_kcal : Meal.t =
   let at = time at in
+  let item =
+    ok
+      (Meal_item.of_storage ~id:(Meal_item_id.fresh ()) ~description:"m"
+         ~calories_kcal ~protein_g:30. ~carbs_g:None ~fat_g:None
+         ~confidence:None ~estimate_source:None ~notes:None ~product:None
+         ~created_at:at ~updated_at:at)
+  in
   ok
     (Meal.of_storage ~id:(Meal_id.fresh ()) ~user_id:(User_id.fresh ())
-       ~eaten_at:at ~description:"m" ~calories_kcal ~protein_g:30. ~carbs_g:None
-       ~fat_g:None ~confidence:None ~estimate_source:None ~notes:None
-       ~product:None ~created_at:at ~updated_at:at ~deleted_at:None)
+       ~eaten_at:at ~label:None ~items:[ item ] ~created_at:at ~updated_at:at
+       ~deleted_at:None)
 
 let weigh_in at weight_kg : Weigh_in.t =
   let at = time at in
