@@ -19,7 +19,9 @@ val search_products :
   limit:int ->
   (Product.t list, Error.t) result
 
-val get_meal : t -> user:User.t -> Meal_id.t -> (Meal.t, Error.t) result
+val get_meal :
+  t -> user:User.t -> Meal_id.t -> (Meal.t * Meal.revision list, Error.t) result
+(** With its revisions, oldest first. *)
 
 val query_meals :
   ?search:Search_query.t ->
@@ -31,7 +33,12 @@ val query_meals :
   (Meal.t list, Error.t) result
 
 val update_meal :
-  t -> user:User.t -> Meal_id.t -> Meal.Patch.t -> (Meal.t, Error.t) result
+  ?reason:string ->
+  t ->
+  user:User.t ->
+  Meal_id.t ->
+  Meal.Patch.t ->
+  (Meal.t, Error.t) result
 
 val delete_meal : t -> user:User.t -> Meal_id.t -> (unit, Error.t) result
 
@@ -79,14 +86,43 @@ val daily_series :
   range:Date_range.t ->
   (Summary.day list, Error.t) result
 
+type summary = {
+  current : Summary.t;
+  previous : (Date_range.t * Summary.t) option;
+      (** The equally long range just before, when it is representable. *)
+}
+
 val summary :
-  ?calorie_target:Summary.Calorie_target.t ->
-  ?protein_target:Summary.Protein_target.t ->
   t ->
   user:User.t ->
   zone:Time.zone ->
   range:Date_range.t ->
-  (Summary.t, Error.t) result
+  (summary, Error.t) result
+(** Judged against the user's goals, when set. *)
+
+val context : t -> user:User.t -> now:Ptime.t -> (Context.t, Error.t) result
+val goals : t -> user:User.t -> (Goals.t option, Error.t) result
+val set_goals : t -> user:User.t -> Goals.t -> (Goals.t, Error.t) result
+
+val default_zone : t -> user:User.t -> (Time.zone, Error.t) result
+(** The goals' timezone, or UTC without goals. *)
+
+type product_correction = {
+  product : Product.t;
+  meals : (Meal.t * Product.portion) list;
+      (** Each meal as it stands, with the nutrition the product now gives. *)
+  applied : bool;
+}
+
+val correct_meals_from_product :
+  t ->
+  user:User.t ->
+  Product_id.t ->
+  reason:string ->
+  dry_run:bool ->
+  (product_correction, Error.t) result
+(** Rescales live meals logged from an earlier version of the product to its
+    current version, recording a revision with [reason] on each. *)
 
 val connect_withings :
   t ->
@@ -100,7 +136,21 @@ val disconnect_withings : t -> user:User.t -> (unit, Error.t) result
 val withings_status :
   t -> user:User.t -> (Withings_connection.status, Error.t) result
 
-val record_meal : t -> user:User.t -> Meal.Create.t -> (Meal.t, Error.t) result
+val record_meal :
+  ?idempotency_key:string ->
+  t ->
+  user:User.t ->
+  Meal.Create.t ->
+  (Meal.t, Error.t) result
+
+val record_meal_from_product :
+  ?idempotency_key:string ->
+  t ->
+  user:User.t ->
+  Meal.from_product ->
+  (Meal.t, Error.t) result
+(** Scales the product's current version to the quantity and links the meal to
+    it. *)
 
 val record_manual_weigh_in :
   t -> user:User.t -> Weigh_in.Create.t -> (Weigh_in.t, Error.t) result

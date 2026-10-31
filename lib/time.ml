@@ -125,3 +125,31 @@ let local_day_bounds zone date =
       match (local_midnight zone date, local_midnight zone next) with
       | Some start, Some stop -> Ok (start, stop)
       | _ -> invalid ())
+
+let local_minute_of_day zone time =
+  let _, ((hour, minute, _), _) =
+    Ptime.to_date_time ~tz_offset_s:(utc_offset_s_at zone time) time
+  in
+  (hour * 60) + minute
+
+(* Resolve the wall-clock time from the offset in effect near it; around a
+   switch, a nonexistent or repeated local time lands within the hour. *)
+let local_instant zone date ~minute_of_day =
+  let invalid () =
+    Error
+      (Error.Calendar_day_bounds
+         { date = Date.to_string date; timezone = zone.name })
+  in
+  match
+    Ptime.add_span (Date.midnight_utc date)
+      (Ptime.Span.of_int_s (minute_of_day * 60))
+  with
+  | None -> invalid ()
+  | Some wall_clock -> (
+      let shift by = Ptime.add_span wall_clock (Ptime.Span.of_int_s (-by)) in
+      match shift (utc_offset_s_at zone wall_clock) with
+      | None -> invalid ()
+      | Some guess -> (
+          match shift (utc_offset_s_at zone guess) with
+          | Some instant -> Ok instant
+          | None -> invalid ()))

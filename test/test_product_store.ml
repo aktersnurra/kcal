@@ -10,6 +10,7 @@ let input : Product.input =
   {
     name = "Whey 100";
     basis = "40 g";
+    serving = None;
     calories_kcal = 150;
     protein_g = 31.;
     carbs_g = Some 2.;

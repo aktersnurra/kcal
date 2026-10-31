@@ -62,22 +62,53 @@ let ( let* ) = bind
 let id value of_string =
   match of_string value with Some id -> Ok id | None -> invalid ()
 
-let meal_create fields : (Meal.Create.t, Error.t) Result.t =
+let optional_bool name fields =
+  match List.Assoc.find fields ~equal:String.equal name with
+  | None -> Ok None
+  | Some (`Bool value) -> Ok (Some value)
+  | _ -> invalid ()
+
+let has name fields = List.Assoc.mem fields ~equal:String.equal name
+
+type meal_entry = Manual of Meal.Create.t | From_product of Meal.from_product
+
+let nutrition_fields = [ "calories_kcal"; "protein_g"; "carbs_g"; "fat_g" ]
+let provenance_fields = [ "confidence"; "estimate_source"; "notes"; "eaten_at" ]
+
+let meal_from_product fields =
   let* fields =
     only_fields
-      [
-        "description";
-        "calories_kcal";
-        "protein_g";
-        "carbs_g";
-        "fat_g";
-        "confidence";
-        "estimate_source";
-        "notes";
-        "eaten_at";
-      ]
+      ([ "product_id"; "quantity"; "description"; "idempotency_key" ]
+      @ provenance_fields)
       (`Assoc fields)
   in
+  let* value = required_string "product_id" fields in
+  let* product_id = id value Product_id.of_string in
+  let* quantity = required_float "quantity" fields in
+  let* description = optional_string "description" fields in
+  let* confidence = optional_float "confidence" fields in
+  let* () =
+    match confidence with
+    | None -> Ok ()
+    | Some value ->
+        Result.map (Nutrition.Confidence.of_float value) ~f:(fun _ -> ())
+  in
+  let* estimate_source = optional_string "estimate_source" fields in
+  let* notes = optional_string "notes" fields in
+  let* eaten_at = optional_time "eaten_at" fields in
+  Ok
+    (From_product
+       {
+         product_id;
+         quantity;
+         description;
+         confidence;
+         estimate_source;
+         notes;
+         eaten_at;
+       })
+
+let meal_create fields : (Meal.Create.t, Error.t) Result.t =
   let* description = required_string "description" fields in
   let* calories_kcal = required_int "calories_kcal" fields in
   let* protein_g = required_float "protein_g" fields in
@@ -100,6 +131,25 @@ let meal_create fields : (Meal.Create.t, Error.t) Result.t =
        eaten_at;
      }
       : Meal.create)
+
+let meal_entry fields =
+  if has "product_id" fields then
+    if List.exists nutrition_fields ~f:(fun name -> has name fields) then
+      Error
+        (Error.Rejected
+           "with product_id, omit calories_kcal, protein_g, carbs_g and fat_g: \
+            they are scaled from the product")
+    else meal_from_product fields
+  else if has "quantity" fields then
+    Error (Error.Rejected "quantity is only meaningful with product_id")
+  else
+    let* fields =
+      only_fields
+        ([ "description"; "idempotency_key" ]
+        @ nutrition_fields @ provenance_fields)
+        (`Assoc fields)
+    in
+    Result.map (meal_create fields) ~f:(fun input -> Manual input)
 
 let meal_patch fields : (Meal.Patch.t, Error.t) Result.t =
   let* description = optional_string "description" fields in
@@ -139,9 +189,11 @@ let query fields =
   | Some lower, Some upper when Ptime.compare lower upper > 0 -> invalid ()
   | _ -> Ok (from, to_, limit)
 
-let parse_zone_argument fields =
+let parse_zone_argument ~default_zone fields =
   let* name = optional_string "timezone" fields in
-  match name with None -> Ok Time.utc | Some value -> Time.parse_zone value
+  match name with
+  | None -> default_zone ()
+  | Some value -> Time.parse_zone value
 
 let parse_date_argument name fields =
   let* value = optional_string name fields in
@@ -151,18 +203,8 @@ let parse_date_argument name fields =
 
 type range_request = { zone : Time.zone; range : Date_range.t }
 
-let parse_day_request ~now fields =
-  let* fields = only_fields [ "date"; "timezone" ] (`Assoc fields) in
-  let* zone = parse_zone_argument fields in
-  let* date = parse_date_argument "date" fields in
-  let* date =
-    match date with Some date -> Ok date | None -> Time.local_date zone now
-  in
-  let* range = Date_range.make ~first:date ~last:date in
-  Ok { zone; range }
-
-let parse_range ~now fields =
-  let* zone = parse_zone_argument fields in
+let parse_range ~now ~default_zone fields =
+  let* zone = parse_zone_argument ~default_zone fields in
   let* first =
     Result.bind (required_string "from_date" fields) ~f:Date.of_string
   in
@@ -173,46 +215,71 @@ let parse_range ~now fields =
   let* range = Date_range.make ~first ~last in
   Ok { zone; range }
 
-let parse_range_request ~now fields =
+let parse_range_request ~now ~default_zone fields =
   let* fields =
     only_fields [ "from_date"; "to_date"; "timezone" ] (`Assoc fields)
   in
-  parse_range ~now fields
+  parse_range ~now ~default_zone fields
 
-type summary_request = {
-  range_request : range_request;
-  calorie_target : Summary.Calorie_target.t option;
-  protein_target : Summary.Protein_target.t option;
-}
-
-let parse_target name of_value parse fields =
-  let* value = parse name fields in
-  match value with
-  | None -> Ok None
-  | Some value -> Result.map ~f:Option.some (of_value value)
-
-let parse_summary_request ~now fields =
+let parse_goals fields =
   let* fields =
     only_fields
       [
-        "from_date";
-        "to_date";
         "timezone";
-        "calorie_target_kcal";
+        "weekday_calorie_target_kcal";
+        "weekend_calorie_target_kcal";
         "protein_target_g";
+        "eating_window_start";
+        "eating_window_end";
+        "target_weight_kg";
       ]
       (`Assoc fields)
   in
-  let* range_request = parse_range ~now fields in
-  let* calorie_target =
-    parse_target "calorie_target_kcal" Summary.Calorie_target.of_kcal
-      optional_int fields
+  let* timezone =
+    Result.bind (required_string "timezone" fields) ~f:Time.parse_zone
   in
-  let* protein_target =
-    parse_target "protein_target_g" Summary.Protein_target.of_g optional_float
-      fields
+  let calories name =
+    Result.bind (required_int name fields) ~f:(fun kcal ->
+        Result.map_error (Goals.Calorie_target.of_kcal kcal) ~f:(fun _ ->
+            Error.Rejected (name ^ " must be positive")))
   in
-  Ok { range_request; calorie_target; protein_target }
+  let* weekday_calories = calories "weekday_calorie_target_kcal" in
+  let* weekend_calories = calories "weekend_calorie_target_kcal" in
+  let optional parse name of_value =
+    let* value = parse name fields in
+    match value with
+    | None -> Ok None
+    | Some value -> Result.map (of_value value) ~f:Option.some
+  in
+  let* protein =
+    optional optional_float "protein_target_g" Goals.Protein_target.of_g
+  in
+  let* target_weight_kg =
+    optional optional_float "target_weight_kg" Nutrition.Kilograms.of_float
+  in
+  let* start = optional_string "eating_window_start" fields in
+  let* end_ = optional_string "eating_window_end" fields in
+  let* eating_window =
+    match (start, end_) with
+    | None, None -> Ok None
+    | Some start, Some end_ ->
+        Result.map (Goals.Eating_window.of_strings ~start ~end_) ~f:Option.some
+    | _ ->
+        Error
+          (Error.Rejected
+             "give eating_window_start and eating_window_end together, or \
+              neither")
+  in
+  Ok
+    Goals.
+      {
+        timezone;
+        weekday_calories;
+        weekend_calories;
+        protein;
+        eating_window;
+        target_weight_kg;
+      }
 
 let product_input fields : (Product.Create.t, Error.t) Result.t =
   let* name = required_string "name" fields in
@@ -222,8 +289,20 @@ let product_input fields : (Product.Create.t, Error.t) Result.t =
   let* source = required_string "source" fields in
   let* carbs_g = optional_float "carbs_g" fields in
   let* fat_g = optional_float "fat_g" fields in
+  let* quantity = optional_float "basis_quantity" fields in
+  let* unit = optional_string "basis_unit" fields in
+  let* serving =
+    match (quantity, unit) with
+    | None, None -> Ok None
+    | Some quantity, Some unit -> Ok (Some (quantity, unit))
+    | _ ->
+        Error
+          (Error.Rejected
+             "give basis_quantity and basis_unit together, or neither")
+  in
   Product.Create.of_raw
-    Product.{ name; basis; calories_kcal; protein_g; source; carbs_g; fat_g }
+    Product.
+      { name; basis; serving; calories_kcal; protein_g; source; carbs_g; fat_g }
 
 let parse_search ~compile_search = function
   | `String text -> compile_search [ text ]
@@ -248,28 +327,46 @@ type query_request = {
   limit : int;
 }
 
+type product_correction = {
+  product_id : Product_id.t;
+  reason : string;
+  dry_run : bool;
+}
+
 type request =
   | Begin_withings_connection
   | Get_withings_status
   | Disconnect_withings
+  | Get_context
+  | Set_goals of Goals.t
   | Save_product of Product_id.t option * Product.Create.t
   | Search_products of Search_query.t * int
-  | Record_meal of Meal.Create.t
+  | Correct_meals_from_product of product_correction
+  | Record_meal of { idempotency_key : string option; entry : meal_entry }
   | Get_meal of Meal_id.t
   | Query_meals of Search_query.t option * query_request
-  | Get_daily_totals of range_request
   | Get_daily_series of range_request
-  | Get_summary of summary_request
-  | Update_meal of Meal_id.t * Meal.Patch.t
+  | Get_summary of range_request
+  | Update_meal of {
+      id : Meal_id.t;
+      patch : Meal.Patch.t;
+      reason : string option;
+    }
   | Delete_meal of Meal_id.t
   | Record_weight of Weigh_in.Create.t
   | Get_weight of Weigh_in_id.t
   | Query_weights of query_request
-  | Get_latest_weight
   | Update_weight of Weigh_in_id.t * Weigh_in.Patch.t
   | Delete_weight of Weigh_in_id.t
 
-let parse ~now ~compile_search ~name arguments =
+let nonblank_string name fields =
+  let* value = optional_string name fields in
+  match value with
+  | Some value when String.is_empty (String.strip value) ->
+      Error (Error.Rejected (name ^ " must not be blank"))
+  | value -> Ok value
+
+let parse ~now ~default_zone ~compile_search ~name arguments =
   let* fields =
     match arguments with `Assoc fields -> Ok fields | _ -> invalid ()
   in
@@ -286,6 +383,8 @@ let parse ~now ~compile_search ~name arguments =
                "source";
                "carbs_g";
                "fat_g";
+               "basis_quantity";
+               "basis_unit";
              ])
           (`Assoc fields)
       in
@@ -307,9 +406,24 @@ let parse ~now ~compile_search ~name arguments =
       in
       let* limit = parse_limit fields in
       Ok (Search_products (query, limit))
+  | "correct_meals_from_product" ->
+      let* fields =
+        only_fields [ "product_id"; "reason"; "dry_run" ] (`Assoc fields)
+      in
+      let* value = required_string "product_id" fields in
+      let* product_id = id value Product_id.of_string in
+      let* reason = nonblank_string "reason" fields in
+      let* reason =
+        Result.of_option reason ~error:(Error.Rejected "reason is required")
+      in
+      let* dry_run = optional_bool "dry_run" fields in
+      Ok
+        (Correct_meals_from_product
+           { product_id; reason; dry_run = Option.value dry_run ~default:true })
   | "record_meal" ->
-      let* input = meal_create fields in
-      Ok (Record_meal input)
+      let* idempotency_key = nonblank_string "idempotency_key" fields in
+      let* entry = meal_entry fields in
+      Ok (Record_meal { idempotency_key; entry })
   | "get_meal" ->
       let* fields = only_fields [ "id" ] (`Assoc fields) in
       let* value = required_string "id" fields in
@@ -343,13 +457,17 @@ let parse ~now ~compile_search ~name arguments =
                "estimate_source";
                "notes";
                "eaten_at";
+               "reason";
              ])
           (`Assoc fields)
       in
       let* value = required_string "id" fields in
       let* meal_id = id value Meal_id.of_string in
-      let* patch = meal_patch fields in
-      Ok (Update_meal (meal_id, patch))
+      let* reason = nonblank_string "reason" fields in
+      let* patch =
+        meal_patch (List.Assoc.remove fields ~equal:String.equal "reason")
+      in
+      Ok (Update_meal { id = meal_id; patch; reason })
   | "delete_meal" ->
       let* fields = only_fields [ "id" ] (`Assoc fields) in
       let* value = required_string "id" fields in
@@ -395,16 +513,16 @@ let parse ~now ~compile_search ~name arguments =
   | "disconnect_withings" ->
       let* _ = only_fields [] arguments in
       Ok Disconnect_withings
-  | "get_latest_weight" ->
+  | "get_context" ->
       let* _ = only_fields [] arguments in
-      Ok Get_latest_weight
-  | "get_daily_totals" ->
-      let* request = parse_day_request ~now fields in
-      Ok (Get_daily_totals request)
+      Ok Get_context
+  | "set_goals" ->
+      let* goals = parse_goals fields in
+      Ok (Set_goals goals)
   | "get_daily_series" ->
-      let* request = parse_range_request ~now fields in
+      let* request = parse_range_request ~now ~default_zone fields in
       Ok (Get_daily_series request)
   | "get_summary" ->
-      let* request = parse_summary_request ~now fields in
+      let* request = parse_range_request ~now ~default_zone fields in
       Ok (Get_summary request)
   | _ -> invalid ()

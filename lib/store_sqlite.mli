@@ -17,7 +17,16 @@ val search_products :
   limit:int ->
   (Product.t list, Error.t) result
 
-val create_meal : t -> user:User.t -> Meal.Create.t -> (Meal.t, Error.t) result
+val create_meal :
+  ?idempotency_key:string ->
+  ?product:Meal.product_link ->
+  t ->
+  user:User.t ->
+  Meal.Create.t ->
+  (Meal.t, Error.t) result
+(** With a key the user already used, returns that meal unchanged instead of
+    inserting; a deleted meal's key is rejected. *)
+
 val get_meal : t -> user:User.t -> Meal_id.t -> (Meal.t, Error.t) result
 
 val query_meals :
@@ -30,8 +39,41 @@ val query_meals :
   (Meal.t list, Error.t) result
 
 val update_meal :
-  t -> user:User.t -> Meal_id.t -> Meal.Patch.t -> (Meal.t, Error.t) result
+  ?reason:string ->
+  t ->
+  user:User.t ->
+  Meal_id.t ->
+  Meal.Patch.t ->
+  (Meal.t, Error.t) result
+(** Records the meal as it was in a revision, in the same transaction. A
+    nutrition change detaches any product link. *)
 
+val meal_revisions :
+  t -> user:User.t -> Meal_id.t -> (Meal.revision list, Error.t) result
+
+val get_product :
+  t -> user:User.t -> Product_id.t -> (Product.t, Error.t) result
+
+val recent_products :
+  t ->
+  user:User.t ->
+  since:Ptime.t ->
+  limit:int ->
+  ((Product.t * Ptime.t) list, Error.t) result
+(** With when each was last eaten. *)
+
+val meals_from_earlier_versions :
+  t -> user:User.t -> Product.t -> (Meal.t list, Error.t) result
+
+val rescale_meals :
+  t ->
+  user:User.t ->
+  reason:string ->
+  (Meal.t * Product.portion * Meal.product_link) list ->
+  (Meal.t list, Error.t) result
+
+val get_goals : t -> user:User.t -> (Goals.t, Error.t) result
+val set_goals : t -> user:User.t -> Goals.t -> (Goals.t, Error.t) result
 val delete_meal : t -> user:User.t -> Meal_id.t -> (unit, Error.t) result
 
 val meals_between :

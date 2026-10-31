@@ -22,3 +22,10 @@ val local_date : zone -> Ptime.t -> (Date.t, Error.t) result
 val local_day_bounds : zone -> Date.t -> (Ptime.t * Ptime.t, Error.t) result
 (** The local day's UTC [(start, stop)] bounds, with an exclusive [stop]. Fails
     if either bound or the following calendar date cannot be represented. *)
+
+val local_minute_of_day : zone -> Ptime.t -> int
+(** Minutes after local midnight, [0] through [1439]. *)
+
+val local_instant :
+  zone -> Date.t -> minute_of_day:int -> (Ptime.t, Error.t) result
+(** The instant a local wall-clock time occurs on [date]. *)

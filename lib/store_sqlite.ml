@@ -42,6 +42,7 @@ let log_src = Logs.Src.create "kcal.store" ~doc:"SQLite persistence"
 
 module Log = (val Logs.src_log log_src : Logs.LOG)
 
+let ( let* ) result f = Result.bind result ~f
 let storage_error () = Error.Storage_error "SQLite operation failed"
 let invalid_input () = Error.Invalid_input "invalid query or update"
 let now () = Option.value_exn (Ptime.of_float_s (Unix.gettimeofday ()))
@@ -187,7 +188,36 @@ let user_of_row statement =
 let meal_columns =
   "id, user_id, eaten_at, description, calories_kcal, protein_g, carbs_g, \
    fat_g, confidence, estimate_source, notes, created_at, updated_at, \
-   deleted_at"
+   deleted_at, product_id, product_version, product_quantity"
+
+(* Columns [first] to [first + 2]; all three are set together or not at all.
+   [None] is a decoding failure, [Some None] a meal without a product. *)
+let product_link_of_row statement ~first =
+  let quantity =
+    match Sqlite3.column statement (first + 2) with
+    | Sqlite3.Data.FLOAT value -> Some value
+    | Sqlite3.Data.INT value -> Some (Int64.to_float value)
+    | _ -> None
+  in
+  match
+    ( optional_text statement first,
+      Sqlite3.column statement (first + 1),
+      Sqlite3.column statement (first + 2) )
+  with
+  | None, Sqlite3.Data.NULL, Sqlite3.Data.NULL -> Some None
+  | Some product_id, Sqlite3.Data.INT version, _ -> (
+      match (Product_id.of_string product_id, quantity) with
+      | Some product_id, Some quantity ->
+          Some
+            (Some
+               Meal.
+                 {
+                   product_id;
+                   product_version = Int64.to_int_exn version;
+                   quantity;
+                 })
+      | _ -> None)
+  | _ -> None
 
 let meal_of_row statement =
   match
@@ -200,16 +230,19 @@ let meal_of_row statement =
   | Some id, Some user_id, Some eaten_at, Some created_at, Some updated_at
     when calorie_column statement 4 && numeric_column statement 5
          && List.for_all [ 6; 7; 8 ] ~f:(optional_numeric_column statement) ->
-      Result.ok
-        (Meal.of_storage ~id ~user_id ~eaten_at ~description:(text statement 3)
-           ~calories_kcal:(int statement 4) ~protein_g:(float statement 5)
-           ~carbs_g:(optional_float statement 6)
-           ~fat_g:(optional_float statement 7)
-           ~confidence:(optional_float statement 8)
-           ~estimate_source:(optional_text statement 9)
-           ~notes:(optional_text statement 10)
-           ~created_at ~updated_at
-           ~deleted_at:(Option.bind (optional_text statement 13) ~f:parse_time))
+      Option.bind (product_link_of_row statement ~first:14) ~f:(fun product ->
+          Result.ok
+            (Meal.of_storage ~id ~user_id ~eaten_at
+               ~description:(text statement 3) ~calories_kcal:(int statement 4)
+               ~protein_g:(float statement 5)
+               ~carbs_g:(optional_float statement 6)
+               ~fat_g:(optional_float statement 7)
+               ~confidence:(optional_float statement 8)
+               ~estimate_source:(optional_text statement 9)
+               ~notes:(optional_text statement 10)
+               ~product ~created_at ~updated_at
+               ~deleted_at:
+                 (Option.bind (optional_text statement 13) ~f:parse_time)))
   | _ -> None
 
 let resolve_user db ~issuer ~subject =
@@ -240,15 +273,59 @@ let resolve_user db ~issuer ~subject =
             | None -> Error (storage_error ())
           else Error (storage_error ()))
 
-let create_meal db ~user input =
+let decode_all_rows statement decode =
+  let rec rows values =
+    match Sqlite3.step statement with
+    | Sqlite3.Rc.ROW -> (
+        match decode statement with
+        | Some value -> rows (value :: values)
+        | None -> Error (Error.Storage_decoding "row"))
+    | Sqlite3.Rc.DONE -> Ok (List.rev values)
+    | _ -> Error (storage_error ())
+  in
+  rows []
+
+let product_link_values = function
+  | None -> [ Sqlite3.Data.NULL; Sqlite3.Data.NULL; Sqlite3.Data.NULL ]
+  | Some (link : Meal.product_link) ->
+      [
+        Sqlite3.Data.TEXT (Product_id.to_string link.product_id);
+        Sqlite3.Data.INT (Int64.of_int link.product_version);
+        Sqlite3.Data.FLOAT link.quantity;
+      ]
+
+(* A deleted meal keeps its key, so a retry cannot resurrect it. *)
+let meal_by_idempotency_key db ~user key =
+  with_statement db
+    ("SELECT " ^ meal_columns
+   ^ " FROM meals WHERE user_id = ? AND idempotency_key = ?")
+    (fun statement ->
+      match
+        bind statement
+          [
+            Sqlite3.Data.TEXT (User_id.to_string user.User.id);
+            Sqlite3.Data.TEXT key;
+          ]
+      with
+      | Error _ as error -> error
+      | Ok () -> (
+          match row_or_not_found statement meal_of_row with
+          | Ok (meal : Meal.t) when Option.is_some meal.deleted_at ->
+              Error
+                (Error.Rejected
+                   "idempotency_key belongs to a meal that was deleted; use a \
+                    new key to record it again")
+          | result -> result))
+
+let insert_meal db ~user ~idempotency_key ~product input =
   let input = Meal.Create.to_raw input in
   let current = now () in
   let eaten_at = Option.value input.eaten_at ~default:current |> timestamp in
   let current = timestamp current in
   with_statement db
     ("INSERT INTO meals (" ^ meal_columns
-   ^ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL) RETURNING "
-   ^ meal_columns)
+   ^ ", idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, \
+      ?, ?, ?, ?) RETURNING " ^ meal_columns)
     (fun statement ->
       let values =
         [
@@ -266,6 +343,8 @@ let create_meal db ~user input =
           Sqlite3.Data.TEXT current;
           Sqlite3.Data.TEXT current;
         ]
+        @ product_link_values product
+        @ [ nullable idempotency_key ]
       in
       match bind statement values with
       | Error _ as error -> error
@@ -279,6 +358,18 @@ let create_meal db ~user input =
             | Some meal -> Ok meal
             | None -> Error (Error.Storage_decoding "row")
           else Error (storage_error ()))
+
+let create_meal ?idempotency_key ?product db ~user input =
+  match idempotency_key with
+  | None -> insert_meal db ~user ~idempotency_key ~product input
+  | Some key ->
+      with_checked_numeric_update db
+        ~check:(fun () -> Ok ())
+        ~update:(fun () ->
+          match meal_by_idempotency_key db ~user key with
+          | Error Error.Not_found ->
+              insert_meal db ~user ~idempotency_key ~product input
+          | result -> result)
 
 let get_meal db ~user id =
   with_statement db
@@ -295,21 +386,106 @@ let get_meal db ~user id =
       | Error _ as error -> error
       | Ok () -> row_or_not_found statement meal_of_row)
 
-let update_meal db ~user id patch =
+let revision_columns =
+  "meal_id, revision, revised_at, reason, eaten_at, description, \
+   calories_kcal, protein_g, carbs_g, fat_g, confidence, estimate_source, \
+   notes, product_id, product_version, product_quantity"
+
+(* Snapshot [meal] as it stands, before the caller changes it, inside the
+   caller's transaction. *)
+let record_revision db (meal : Meal.t) ~revised_at ~reason =
+  with_statement db
+    ("INSERT INTO meal_revisions (" ^ revision_columns
+   ^ ") SELECT ?, COALESCE(MAX(revision), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+      ?, ?, ?, ?, ? FROM meal_revisions WHERE meal_id = ?")
+    (fun statement ->
+      let id = Sqlite3.Data.TEXT (Meal_id.to_string meal.id) in
+      match
+        bind statement
+          ([
+             id;
+             Sqlite3.Data.TEXT (timestamp revised_at);
+             nullable reason;
+             Sqlite3.Data.TEXT (timestamp meal.eaten_at);
+             Sqlite3.Data.TEXT meal.description;
+             Sqlite3.Data.INT (Int64.of_int meal.calories_kcal);
+             Sqlite3.Data.FLOAT meal.protein_g;
+             nullable_float meal.carbs_g;
+             nullable_float meal.fat_g;
+             nullable_float meal.confidence;
+             nullable meal.estimate_source;
+             nullable meal.notes;
+           ]
+          @ product_link_values meal.product
+          @ [ id ])
+      with
+      | Error _ as error -> error
+      | Ok () -> (
+          match Sqlite3.step statement with
+          | Sqlite3.Rc.DONE -> Ok ()
+          | _ -> Error (storage_error ())))
+
+let revision_of_row statement =
+  match (parse_time (text statement 2), parse_time (text statement 4)) with
+  | Some revised_at, Some eaten_at
+    when calorie_column statement 6 && numeric_column statement 7
+         && List.for_all [ 8; 9; 10 ] ~f:(optional_numeric_column statement) ->
+      Option.map (product_link_of_row statement ~first:13) ~f:(fun product ->
+          Meal.
+            {
+              revision = int statement 1;
+              revised_at;
+              reason = optional_text statement 3;
+              previous =
+                {
+                  eaten_at;
+                  description = text statement 5;
+                  calories_kcal = int statement 6;
+                  protein_g = float statement 7;
+                  carbs_g = optional_float statement 8;
+                  fat_g = optional_float statement 9;
+                  confidence = optional_float statement 10;
+                  estimate_source = optional_text statement 11;
+                  notes = optional_text statement 12;
+                  product;
+                };
+            })
+  | _ -> None
+
+(* Ownership is checked through the meal, which must not be deleted. *)
+let meal_revisions db ~user id =
+  let* (_ : Meal.t) = get_meal db ~user id in
+  with_statement db
+    ("SELECT " ^ revision_columns
+   ^ " FROM meal_revisions WHERE meal_id = ? ORDER BY revision ASC")
+    (fun statement ->
+      match bind statement [ Sqlite3.Data.TEXT (Meal_id.to_string id) ] with
+      | Error _ as error -> error
+      | Ok () -> decode_all_rows statement revision_of_row)
+
+let update_meal ?reason db ~user id patch =
+  let detach_product = Meal.changes_nutrition patch in
   let patch = Meal.Patch.to_raw patch in
   with_checked_numeric_update db
-    ~check:(fun () -> Result.map ~f:(fun _ -> ()) (get_meal db ~user id))
+    ~check:(fun () -> Ok ())
     ~update:(fun () ->
-      let updated_at = timestamp (now ()) in
+      let current = now () in
+      let* meal = get_meal db ~user id in
+      let* () = record_revision db meal ~revised_at:current ~reason in
+      let updated_at = timestamp current in
       with_statement db
         ("UPDATE meals SET eaten_at = COALESCE(?, eaten_at), description = \
           COALESCE(?, description), calories_kcal = COALESCE(?, \
           calories_kcal), protein_g = COALESCE(?, protein_g), carbs_g = \
           COALESCE(?, carbs_g), fat_g = COALESCE(?, fat_g), confidence = \
           COALESCE(?, confidence), estimate_source = COALESCE(?, \
-          estimate_source), notes = COALESCE(?, notes), updated_at = ? WHERE \
-          id = ? AND user_id = ? AND deleted_at IS NULL RETURNING "
-       ^ meal_columns) (fun statement ->
+          estimate_source), notes = COALESCE(?, notes), product_id = CASE WHEN \
+          ? THEN NULL ELSE product_id END, product_version = CASE WHEN ? THEN \
+          NULL ELSE product_version END, product_quantity = CASE WHEN ? THEN \
+          NULL ELSE product_quantity END, updated_at = ? WHERE id = ? AND \
+          user_id = ? AND deleted_at IS NULL RETURNING " ^ meal_columns)
+        (fun statement ->
+          let detach = Sqlite3.Data.INT (if detach_product then 1L else 0L) in
           let values =
             [
               nullable (Option.map ~f:timestamp patch.eaten_at);
@@ -323,6 +499,9 @@ let update_meal db ~user id patch =
               nullable_float patch.confidence;
               nullable patch.estimate_source;
               nullable patch.notes;
+              detach;
+              detach;
+              detach;
               Sqlite3.Data.TEXT updated_at;
               Sqlite3.Data.TEXT (Meal_id.to_string id);
               Sqlite3.Data.TEXT (User_id.to_string user.User.id);
@@ -339,21 +518,9 @@ let is_valid_query ~from ~to_ ~limit =
   | Some lower, Some upper -> Ptime.compare lower upper <= 0
   | _ -> true
 
-let decode_all_rows statement decode =
-  let rec rows values =
-    match Sqlite3.step statement with
-    | Sqlite3.Rc.ROW -> (
-        match decode statement with
-        | Some value -> rows (value :: values)
-        | None -> Error (Error.Storage_decoding "row"))
-    | Sqlite3.Rc.DONE -> Ok (List.rev values)
-    | _ -> Error (storage_error ())
-  in
-  rows []
-
 let product_columns =
   "id, user_id, name, basis, calories_kcal, protein_g, carbs_g, fat_g, source, \
-   created_at, updated_at"
+   created_at, updated_at, version, basis_quantity, basis_unit"
 
 let product_of_row statement =
   match
@@ -365,13 +532,22 @@ let product_of_row statement =
   | Some id, Some user_id, Some created_at, Some updated_at
     when calorie_column statement 4 && numeric_column statement 5
          && List.for_all [ 6; 7 ] ~f:(optional_numeric_column statement) ->
-      Result.ok
-        (Product.of_storage ~id ~user_id ~name:(text statement 2)
-           ~basis:(text statement 3) ~calories_kcal:(int statement 4)
-           ~protein_g:(float statement 5)
-           ~carbs_g:(optional_float statement 6)
-           ~fat_g:(optional_float statement 7)
-           ~source:(text statement 8) ~created_at ~updated_at)
+      let serving =
+        match (Sqlite3.column statement 12, optional_text statement 13) with
+        | Sqlite3.Data.NULL, None -> Some None
+        | Sqlite3.Data.FLOAT quantity, Some unit -> Some (Some (quantity, unit))
+        | Sqlite3.Data.INT quantity, Some unit ->
+            Some (Some (Int64.to_float quantity, unit))
+        | _ -> None
+      in
+      Option.bind serving ~f:(fun serving ->
+          Result.ok
+            (Product.of_storage ~id ~user_id ~version:(int statement 11)
+               ~name:(text statement 2) ~basis:(text statement 3) ~serving
+               ~calories_kcal:(int statement 4) ~protein_g:(float statement 5)
+               ~carbs_g:(optional_float statement 6)
+               ~fat_g:(optional_float statement 7)
+               ~source:(text statement 8) ~created_at ~updated_at))
   | _ -> None
 
 let save_product db ~user ~id input =
@@ -388,14 +564,17 @@ let save_product db ~user ~id input =
         nullable_float input.carbs_g;
         nullable_float input.fat_g;
         Sqlite3.Data.TEXT input.source;
+        nullable_float (Option.map input.serving ~f:fst);
+        nullable (Option.map input.serving ~f:snd);
       ]
     in
     let sql, values =
       match id with
       | None ->
-          ( "INSERT INTO products (" ^ product_columns
-            ^ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING "
-            ^ product_columns,
+          ( "INSERT INTO products (id, user_id, name, basis, calories_kcal, \
+             protein_g, carbs_g, fat_g, source, basis_quantity, basis_unit, \
+             created_at, updated_at, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, \
+             ?, ?, ?, ?, ?, 1) RETURNING " ^ product_columns,
             [
               Sqlite3.Data.TEXT (Product_id.to_string (Product_id.fresh ()));
               owner;
@@ -403,8 +582,9 @@ let save_product db ~user ~id input =
             @ fields @ [ current; current ] )
       | Some id ->
           ( "UPDATE products SET name = ?, basis = ?, calories_kcal = ?, \
-             protein_g = ?, carbs_g = ?, fat_g = ?, source = ?, updated_at = ? \
-             WHERE id = ? AND user_id = ? RETURNING " ^ product_columns,
+             protein_g = ?, carbs_g = ?, fat_g = ?, source = ?, basis_quantity \
+             = ?, basis_unit = ?, updated_at = ?, version = version + 1 WHERE \
+             id = ? AND user_id = ? RETURNING " ^ product_columns,
             fields
             @ [ current; Sqlite3.Data.TEXT (Product_id.to_string id); owner ] )
     in
@@ -435,10 +615,53 @@ let save_product db ~user ~id input =
                  | Ok () -> row_or_not_found statement product_of_row)))
         ~update:persist
 
+let get_product db ~user id =
+  with_statement db
+    ("SELECT " ^ product_columns ^ " FROM products WHERE id = ? AND user_id = ?")
+    (fun statement ->
+      match
+        bind statement
+          [
+            Sqlite3.Data.TEXT (Product_id.to_string id);
+            Sqlite3.Data.TEXT (User_id.to_string user.User.id);
+          ]
+      with
+      | Error _ as error -> error
+      | Ok () -> row_or_not_found statement product_of_row)
+
 let qualified_columns table columns =
   String.split columns ~on:','
   |> List.map ~f:(fun column -> table ^ "." ^ String.strip column)
   |> String.concat ~sep:", "
+
+(* Products behind the user's meals since [since], most recently eaten first. *)
+let recent_products db ~user ~since ~limit =
+  with_statement db
+    ("SELECT "
+    ^ qualified_columns "products" product_columns
+    ^ ", MAX(meals.eaten_at) AS last_eaten_at FROM products JOIN meals ON \
+       meals.product_id = products.id WHERE products.user_id = ? AND \
+       meals.user_id = ? AND meals.deleted_at IS NULL AND meals.eaten_at >= ? \
+       GROUP BY products.id ORDER BY last_eaten_at DESC, products.id LIMIT ?")
+    (fun statement ->
+      let owner = Sqlite3.Data.TEXT (User_id.to_string user.User.id) in
+      match
+        bind statement
+          [
+            owner;
+            owner;
+            Sqlite3.Data.TEXT (timestamp since);
+            Sqlite3.Data.INT (Int64.of_int limit);
+          ]
+      with
+      | Error _ as error -> error
+      | Ok () ->
+          decode_all_rows statement (fun statement ->
+              match
+                (product_of_row statement, parse_time (text statement 14))
+              with
+              | Some product, Some last_eaten_at -> Some (product, last_eaten_at)
+              | _ -> None))
 
 let search_products db ~user ~query ~limit =
   if limit < 1 || limit > 500 then Error (invalid_input ())
@@ -515,6 +738,63 @@ let meals_between db ~user ~start ~stop =
       with
       | Error _ as error -> error
       | Ok () -> decode_all_rows statement meal_of_row)
+
+(* Live meals logged from an earlier version of [product]. *)
+let meals_from_earlier_versions db ~user (product : Product.t) =
+  with_statement db
+    ("SELECT " ^ meal_columns
+   ^ " FROM meals WHERE user_id = ? AND product_id = ? AND product_version < ? \
+      AND deleted_at IS NULL ORDER BY eaten_at ASC, id ASC")
+    (fun statement ->
+      match
+        bind statement
+          [
+            Sqlite3.Data.TEXT (User_id.to_string user.User.id);
+            Sqlite3.Data.TEXT (Product_id.to_string product.id);
+            Sqlite3.Data.INT (Int64.of_int product.version);
+          ]
+      with
+      | Error _ as error -> error
+      | Ok () -> decode_all_rows statement meal_of_row)
+
+(* All or none: each meal gets a revision, then its new nutrition and link. *)
+let rescale_meals db ~user ~reason changes =
+  with_checked_numeric_update db
+    ~check:(fun () -> Ok ())
+    ~update:(fun () ->
+      let current = now () in
+      List.fold_result changes ~init:[]
+        ~f:(fun updated ((meal : Meal.t), (portion : Product.portion), link) ->
+          let* () =
+            record_revision db meal ~revised_at:current ~reason:(Some reason)
+          in
+          let* meal =
+            with_statement db
+              ("UPDATE meals SET calories_kcal = ?, protein_g = ?, carbs_g = \
+                ?, fat_g = ?, product_id = ?, product_version = ?, \
+                product_quantity = ?, updated_at = ? WHERE id = ? AND user_id \
+                = ? AND deleted_at IS NULL RETURNING " ^ meal_columns)
+              (fun statement ->
+                match
+                  bind statement
+                    ([
+                       Sqlite3.Data.INT (Int64.of_int portion.calories_kcal);
+                       Sqlite3.Data.FLOAT portion.protein_g;
+                       nullable_float portion.carbs_g;
+                       nullable_float portion.fat_g;
+                     ]
+                    @ product_link_values (Some link)
+                    @ [
+                        Sqlite3.Data.TEXT (timestamp current);
+                        Sqlite3.Data.TEXT (Meal_id.to_string meal.id);
+                        Sqlite3.Data.TEXT (User_id.to_string user.User.id);
+                      ])
+                with
+                | Error _ as error -> error
+                | Ok () -> row_or_not_found statement meal_of_row)
+          in
+          Ok (meal :: updated))
+      |> Result.map ~f:List.rev)
 
 let delete_meal db ~user id =
   let current = timestamp (now ()) in
@@ -1272,3 +1552,98 @@ let delete_weigh_in db ~user id =
           | _ -> Error (storage_error ())))
 
 let compile_search_query = Search_query.of_strings
+
+let goals_columns =
+  "timezone, weekday_calorie_target_kcal, weekend_calorie_target_kcal, \
+   protein_target_g, eating_window_start_minute, eating_window_end_minute, \
+   target_weight_kg"
+
+let goals_of_row statement =
+  let decode () =
+    let* timezone = Time.parse_zone (text statement 0) in
+    let* weekday_calories = Goals.Calorie_target.of_kcal (int statement 1) in
+    let* weekend_calories = Goals.Calorie_target.of_kcal (int statement 2) in
+    let optional f column =
+      if Sqlite3.column_is_null statement column then Ok None
+      else Result.map (f column) ~f:Option.some
+    in
+    let* protein =
+      optional
+        (fun column -> Goals.Protein_target.of_g (float statement column))
+        3
+    in
+    let* eating_window =
+      optional
+        (fun column ->
+          Goals.Eating_window.of_minutes ~start_minute:(int statement column)
+            ~end_minute:(int statement (column + 1)))
+        4
+    in
+    let* target_weight_kg =
+      optional
+        (fun column -> Nutrition.Kilograms.of_float (float statement column))
+        6
+    in
+    Ok
+      Goals.
+        {
+          timezone;
+          weekday_calories;
+          weekend_calories;
+          protein;
+          eating_window;
+          target_weight_kg;
+        }
+  in
+  if
+    calorie_column statement 1 && calorie_column statement 2
+    && List.for_all [ 3; 4; 5; 6 ] ~f:(optional_numeric_column statement)
+  then Result.ok (decode ())
+  else None
+
+let get_goals db ~user =
+  with_statement db
+    ("SELECT " ^ goals_columns ^ " FROM goals WHERE user_id = ?")
+    (fun statement ->
+      match
+        bind statement [ Sqlite3.Data.TEXT (User_id.to_string user.User.id) ]
+      with
+      | Error _ as error -> error
+      | Ok () -> row_or_not_found statement goals_of_row)
+
+let set_goals db ~user (goals : Goals.t) =
+  let window = goals.eating_window in
+  with_statement db
+    ("INSERT INTO goals (user_id, " ^ goals_columns
+   ^ ", updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO \
+      UPDATE SET timezone = excluded.timezone, weekday_calorie_target_kcal = \
+      excluded.weekday_calorie_target_kcal, weekend_calorie_target_kcal = \
+      excluded.weekend_calorie_target_kcal, protein_target_g = \
+      excluded.protein_target_g, eating_window_start_minute = \
+      excluded.eating_window_start_minute, eating_window_end_minute = \
+      excluded.eating_window_end_minute, target_weight_kg = \
+      excluded.target_weight_kg, updated_at = excluded.updated_at RETURNING "
+   ^ goals_columns)
+    (fun statement ->
+      let minute f =
+        match window with
+        | None -> Sqlite3.Data.NULL
+        | Some window -> Sqlite3.Data.INT (Int64.of_int (f window))
+      in
+      match
+        bind statement
+          [
+            Sqlite3.Data.TEXT (User_id.to_string user.User.id);
+            Sqlite3.Data.TEXT (Time.zone_name goals.timezone);
+            Sqlite3.Data.INT (Int64.of_int (goals.weekday_calories :> int));
+            Sqlite3.Data.INT (Int64.of_int (goals.weekend_calories :> int));
+            nullable_float (Option.map goals.protein ~f:(fun g -> (g :> float)));
+            minute (fun (w : Goals.Eating_window.t) -> w.start_minute);
+            minute (fun (w : Goals.Eating_window.t) -> w.end_minute);
+            nullable_float
+              (Option.map goals.target_weight_kg ~f:(fun kg -> (kg :> float)));
+            Sqlite3.Data.TEXT (timestamp (now ()));
+          ]
+      with
+      | Error _ as error -> error
+      | Ok () -> row_or_not_found statement goals_of_row)

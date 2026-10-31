@@ -6,11 +6,9 @@ let daily_series_ok zone range ~meals ~weigh_ins =
   Option.value_exn
     (Result.ok (Summary.daily_series zone range ~meals ~weigh_ins))
 
-let summarise_ok ?calorie_target ?protein_target zone range ~meals ~weigh_ins =
+let summarise_ok ?goals zone range ~meals ~weigh_ins =
   Option.value_exn
-    (Result.ok
-       (Summary.summarise ?calorie_target ?protein_target zone range ~meals
-          ~weigh_ins))
+    (Result.ok (Summary.summarise ?goals zone range ~meals ~weigh_ins))
 
 let time value = Option.value_exn (Result.ok (Time.parse_offset_datetime value))
 let zone value = Option.value_exn (Result.ok (Time.parse_zone value))
@@ -24,7 +22,7 @@ let meal ?(protein_g = 10.0) ?carbs_g ?fat_g at calories_kcal : Meal.t =
        (Meal.of_storage ~id:(Meal_id.fresh ()) ~user_id:(User_id.fresh ())
           ~eaten_at:at ~description:"m" ~calories_kcal ~protein_g ~carbs_g
           ~fat_g ~confidence:None ~estimate_source:None ~notes:None
-          ~created_at:at ~updated_at:at ~deleted_at:None))
+          ~product:None ~created_at:at ~updated_at:at ~deleted_at:None))
 
 let weigh_in at weight_kg : Weigh_in.t =
   let at = time at in
@@ -202,11 +200,21 @@ let test_series_carries_daily_weight () =
     [ Some (2, 80.5); None ]
     weights
 
-let calorie_target value =
-  Option.value_exn (Result.ok (Summary.Calorie_target.of_kcal value))
+let ok result = Option.value_exn (Result.ok result)
 
-let protein_target value =
-  Option.value_exn (Result.ok (Summary.Protein_target.of_g value))
+let goals ?protein ?window ?target_weight_kg ~weekday ~weekend () : Goals.t =
+  {
+    timezone = Time.utc;
+    weekday_calories = ok (Goals.Calorie_target.of_kcal weekday);
+    weekend_calories = ok (Goals.Calorie_target.of_kcal weekend);
+    protein = Option.map protein ~f:(fun g -> ok (Goals.Protein_target.of_g g));
+    eating_window =
+      Option.map window ~f:(fun (start, end_) ->
+          ok (Goals.Eating_window.of_strings ~start ~end_));
+    target_weight_kg =
+      Option.map target_weight_kg ~f:(fun kg ->
+          ok (Nutrition.Kilograms.of_float kg));
+  }
 
 let test_intake_ignores_unlogged_days_and_counts_targets () =
   let meals =
@@ -216,8 +224,9 @@ let test_intake_ignores_unlogged_days_and_counts_targets () =
     ]
   in
   let summary =
-    summarise_ok ~calorie_target:(calorie_target 2200)
-      ~protein_target:(protein_target 120.0) Time.utc
+    summarise_ok
+      ~goals:(goals ~protein:120.0 ~weekday:2200 ~weekend:2500 ())
+      Time.utc
       (range "2026-07-14" "2026-07-16")
       ~meals ~weigh_ins:[]
   in
@@ -226,20 +235,21 @@ let test_intake_ignores_unlogged_days_and_counts_targets () =
   Alcotest.(check int) "logged" 2 logged.logged_day_count;
   check_float "avg kcal" 2200.0 logged.avg_calories_kcal;
   check_float "avg protein" 125.0 logged.avg_protein_g;
-  Alcotest.(check (option int))
-    "under" (Some 1)
-    (Option.map
-       ~f:(fun (r : _ Summary.target_result) -> r.days_met)
-       summary.calorie_target);
+  let calories = Option.value_exn summary.calorie_target in
+  Alcotest.(check int) "under" 1 calories.days_at_or_under;
+  check_float "on target on average" 0.0 calories.avg_vs_target_kcal;
   Alcotest.(check (option int))
     "protein" (Some 1)
     (Option.map
-       ~f:(fun (r : _ Summary.target_result) -> r.days_met)
+       ~f:(fun (r : Summary.protein_adherence) -> r.days_at_or_over)
        summary.protein_target);
   Alcotest.(check bool)
+    "no window adherence without a window" true
+    (Option.is_none summary.eating_window);
+  Alcotest.(check bool)
     "nonpositive targets rejected" true
-    (Result.is_error (Summary.Calorie_target.of_kcal 0)
-    && Result.is_error (Summary.Protein_target.of_g (-1.0)));
+    (Result.is_error (Goals.Calorie_target.of_kcal 0)
+    && Result.is_error (Goals.Protein_target.of_g (-1.0)));
   let empty =
     summarise_ok Time.utc
       (range "2026-07-14" "2026-07-14")
@@ -322,7 +332,7 @@ let test_weight_trend_and_maintenance () =
 let test_rejects_nonfinite_target () =
   Alcotest.(check bool)
     "infinite target rejected" true
-    (Result.is_error (Summary.Protein_target.of_g Float.infinity))
+    (Result.is_error (Goals.Protein_target.of_g Float.infinity))
 
 let test_calorie_total_does_not_wrap () =
   let meals =
@@ -634,7 +644,8 @@ module Calendar_properties = struct
       (Meal.of_storage ~id:(Meal_id.fresh ()) ~user_id:(User_id.fresh ())
          ~eaten_at ~description:"m" ~calories_kcal:100 ~protein_g:1.0
          ~carbs_g:None ~fat_g:None ~confidence:None ~estimate_source:None
-         ~notes:None ~created_at:eaten_at ~updated_at:eaten_at ~deleted_at:None)
+         ~notes:None ~product:None ~created_at:eaten_at ~updated_at:eaten_at
+         ~deleted_at:None)
 
   let%hegel_test daily_series_keeps_every_in_range_meal_exactly_once tc =
     let zone = Calendar.draw_zone tc in

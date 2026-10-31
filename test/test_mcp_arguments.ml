@@ -1,7 +1,9 @@
 open Base
 
 let parse name fields =
-  Mcp_arguments.parse ~now:Ptime.epoch ~name
+  Mcp_arguments.parse ~now:Ptime.epoch
+    ~default_zone:(fun () -> Ok Time.utc)
+    ~name
     ~compile_search:(fun _ -> Alcotest.fail "unexpected search compilation")
     (`Assoc fields)
 

@@ -2,6 +2,12 @@ module Domain_error = Error
 open Base
 module Error = Domain_error
 
+type product_link = {
+  product_id : Product_id.t;
+  product_version : int;
+  quantity : float;
+}
+
 type t = {
   id : Meal_id.t;
   user_id : User_id.t;
@@ -14,6 +20,7 @@ type t = {
   confidence : float option;
   estimate_source : string option;
   notes : string option;
+  product : product_link option;
   created_at : Ptime.t;
   updated_at : Ptime.t;
   deleted_at : Ptime.t option;
@@ -120,8 +127,8 @@ module Patch = struct
 end
 
 let of_storage ~id ~user_id ~eaten_at ~description ~calories_kcal ~protein_g
-    ~carbs_g ~fat_g ~confidence ~estimate_source ~notes ~created_at ~updated_at
-    ~deleted_at =
+    ~carbs_g ~fat_g ~confidence ~estimate_source ~notes ~product ~created_at
+    ~updated_at ~deleted_at =
   let* () =
     validate_create
       {
@@ -149,7 +156,45 @@ let of_storage ~id ~user_id ~eaten_at ~description ~calories_kcal ~protein_g
       confidence;
       estimate_source;
       notes;
+      product;
       created_at;
       updated_at;
       deleted_at;
     }
+
+type snapshot = {
+  eaten_at : Ptime.t;
+  description : string;
+  calories_kcal : int;
+  protein_g : float;
+  carbs_g : float option;
+  fat_g : float option;
+  confidence : float option;
+  estimate_source : string option;
+  notes : string option;
+  product : product_link option;
+}
+
+type revision = {
+  revision : int;
+  revised_at : Ptime.t;
+  reason : string option;
+  previous : snapshot;
+}
+
+let changes_nutrition patch =
+  let ({ calories_kcal; protein_g; carbs_g; fat_g; _ } : patch) =
+    Patch.to_raw patch
+  in
+  Option.is_some calories_kcal
+  || Option.is_some protein_g || Option.is_some carbs_g || Option.is_some fat_g
+
+type from_product = {
+  product_id : Product_id.t;
+  quantity : float;
+  description : string option;
+  confidence : float option;
+  estimate_source : string option;
+  notes : string option;
+  eaten_at : Ptime.t option;
+}

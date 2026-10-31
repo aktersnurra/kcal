@@ -1,20 +1,6 @@
 (** Pure aggregation over already-fetched meals and weigh-ins, bucketed into the
     local calendar days of a zone. Records outside the range are ignored. *)
 
-module Calorie_target : sig
-  type t = private int
-
-  val of_kcal : int -> (t, Error.t) result
-  (** Positive calories. *)
-end
-
-module Protein_target : sig
-  type t = private float
-
-  val of_g : float -> (t, Error.t) result
-  (** Finite, positive grams. *)
-end
-
 type daily_weight = { weigh_in_count : int; mean_weight_kg : float }
 
 type day = {
@@ -39,8 +25,6 @@ type logged_intake = {
   avg_protein_g : float;
 }
 
-type 'target target_result = { target : 'target; days_met : int }
-
 type weight_trend =
   | Single_reading of { weight_kg : float; measured_at : Ptime.t }
   | Trend of {
@@ -61,23 +45,43 @@ type implied_maintenance =
   | Estimate of { kcal : float }
   | Unavailable of maintenance_unavailable
 
+type calorie_adherence = {
+  days_at_or_under : int;
+  avg_vs_target_kcal : float;
+      (** Mean of each logged day's intake minus that day's target; negative is
+          under. *)
+}
+
+type protein_adherence = { days_at_or_over : int }
+
+type window_adherence = { days_within : int }
+(** Logged days whose meals all fall inside the eating window. *)
+
+type target_weight = {
+  target_kg : float;
+  remaining_kg : float;  (** Latest weight minus target. *)
+  weeks_to_target : float option;
+      (** At the current slope; [None] unless the trend heads toward it. *)
+}
+
 type t = {
   day_count : int;
   logged_intake : logged_intake option;
       (** [None]: no day in the range has a meal. *)
-  calorie_target : Calorie_target.t target_result option;
-      (** Days at or under the target. *)
-  protein_target : Protein_target.t target_result option;
-      (** Days at or over the target. *)
+  calorie_target : calorie_adherence option;
+      (** Against each day's weekday or weekend target. *)
+  protein_target : protein_adherence option;
+  eating_window : window_adherence option;
   weight_trend : weight_trend option;  (** [None]: no weigh-ins in the range. *)
+  target_weight : target_weight option;
   implied_maintenance : implied_maintenance;
 }
 
 val summarise :
-  ?calorie_target:Calorie_target.t ->
-  ?protein_target:Protein_target.t ->
+  ?goals:Goals.t ->
   Time.zone ->
   Date_range.t ->
   meals:Meal.t list ->
   weigh_ins:Weigh_in.t list ->
   (t, Error.t) result
+(** Target fields are [None] without [goals] or without that goal. *)

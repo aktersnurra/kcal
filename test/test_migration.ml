@@ -20,6 +20,7 @@ let test_embedded_migrations_match_files () =
       (3, "003_products.sql");
       (4, "004_ranked_search.sql");
       (5, "005_connection_history.sql");
+      (6, "006_goals_and_meal_history.sql");
     ]
 
 let test_creates_ledger_tables () =
@@ -36,6 +37,8 @@ let test_creates_ledger_tables () =
           "withings_connections";
           "withings_oauth_states";
           "products";
+          "goals";
+          "meal_revisions";
         ])
 
 let test_repeat_is_a_no_op () =

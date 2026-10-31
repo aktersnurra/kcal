@@ -12,6 +12,7 @@ let product name =
     {
       name;
       basis = "portion";
+      serving = None;
       calories_kcal = 100;
       protein_g = 10.;
       carbs_g = None;

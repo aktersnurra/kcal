@@ -161,7 +161,7 @@ let%hegel_test scalar_constructors_accept_exactly_their_domains tc =
       (finite && Float.(value >= 0.0) && Float.(value <= 1.0)));
   assert (
     Bool.equal
-      (Result.is_ok (Summary.Protein_target.of_g value))
+      (Result.is_ok (Goals.Protein_target.of_g value))
       (finite && Float.(value > 0.0)))
 
 let%hegel_test meal_create_and_patch_share_numeric_rules tc =
@@ -229,6 +229,7 @@ let test_all_numeric_inputs_reject_nonfinite () =
            {
              name = "p";
              basis = "b";
+             serving = None;
              source = "s";
              calories_kcal = 0;
              protein_g = value;
