@@ -221,16 +221,23 @@ let test_v3_backfill () =
 
 let test_invalid_wire_forms () =
   Test_support.with_store (fun db user ->
+      (* An explained tool error the model can act on, not a protocol error. *)
       let invalid = function
-        | Ok (`Assoc fields) ->
-            List.Assoc.mem fields ~equal:String.equal "error"
+        | Ok (`Assoc fields) -> (
+            match List.Assoc.find fields ~equal:String.equal "result" with
+            | Some (`Assoc result) ->
+                Option.equal Yojson.Safe.equal
+                  (List.Assoc.find result ~equal:String.equal "isError")
+                  (Some (`Bool true))
+            | _ -> false)
         | _ -> false
       in
       List.iter
         ~f:(fun (tool, key) ->
           List.iter
             ~f:(fun value ->
-              check Alcotest.bool "Invalid_input wire mapping" true
+              check Alcotest.bool "invalid search is an explained tool error"
+                true
                 (invalid (request db user tool key value [])))
             [
               `Null;

@@ -105,7 +105,7 @@ Aggregate tools avoid client-side arithmetic over raw records:
 
 Both take an optional `timezone` that defines where calendar days begin and end: a fixed UTC offset such as `+02:00`, or an IANA name from a built-in table of European zones with EU summer time (e.g. `Europe/Stockholm`). It defaults to the goals' timezone, else UTC. There is no tz database dependency, so other IANA names are rejected.
 
-Argument mistakes the model can fix — a malformed date, an unsupported timezone (the message lists the supported ones), a reversed or over-long range, a non-positive target, a product logged by quantity without a structured basis — come back as a tool result with `isError: true` and an explanation, rather than a bare JSON-RPC "Invalid params".
+Every argument mistake comes back as a tool result with `isError: true` and an explanation that names the field and the fix, rather than a bare JSON-RPC "Invalid params": an unknown field (with the likely intended one, e.g. `kcal` → `calories_kcal`, and the allowed list), a missing or mistyped field, a malformed timestamp, id, date or limit, an unsupported timezone (listing the supported ones), a reversed or over-long range, an out-of-range value such as negative protein, or a product logged by quantity without a structured basis. Omitted `arguments` are treated as an empty object. Only a malformed JSON-RPC envelope is a protocol error.
 
 ## Withings
 

@@ -20,6 +20,26 @@ let response_has_error_code code = function
       | _ -> false)
   | _ -> false
 
+let result_member_of response name =
+  match response with
+  | Ok (`Assoc fields) -> (
+      match List.Assoc.find fields ~equal:String.equal "result" with
+      | Some (`Assoc result) -> List.Assoc.find result ~equal:String.equal name
+      | _ -> None)
+  | _ -> None
+
+(* Argument mistakes are tool results with isError and an explanation, so the
+   model sees what to fix; never a bare protocol error. *)
+let rejects_arguments response =
+  match
+    (result_member_of response "isError", result_member_of response "content")
+  with
+  | Some (`Bool true), Some (`List [ `Assoc content ]) -> (
+      match List.Assoc.find content ~equal:String.equal "text" with
+      | Some (`String text) -> not (String.is_empty text)
+      | _ -> false)
+  | _ -> false
+
 let result_member name = function
   | Ok (`Assoc fields) -> (
       match List.Assoc.find fields ~equal:String.equal "result" with
@@ -62,7 +82,7 @@ let test_record_meal_rejects_user_id () =
       in
       Alcotest.(check bool)
         "invalid parameters" true
-        (response_has_error_code (-32602)
+        (rejects_arguments
            (Mcp.handle ~service:(Service.make ~store)
               ~identity:(identity user [ "ledger:write" ])
               request)))
@@ -83,7 +103,7 @@ let test_mcp_rejects_bad_jsonrpc_and_provenance_fields () =
            (Mcp.handle ~service ~identity:(identity user []) bad_version));
       Alcotest.(check bool)
         "provenance" true
-        (response_has_error_code (-32602)
+        (rejects_arguments
            (Mcp.handle ~service
               ~identity:(identity user [ "ledger:write" ])
               source_argument)))
@@ -233,7 +253,7 @@ let test_zero_argument_tools () =
           Alcotest.(check bool)
             (name ^ " rejects unknown fields")
             true
-            (response_has_error_code (-32602)
+            (rejects_arguments
                (run [ ("arguments", `Assoc [ ("unexpected", `Bool true) ]) ]));
           List.iter
             ~f:(fun arguments ->
@@ -552,7 +572,7 @@ let test_get_daily_series_returns_intake_and_weight_per_day () =
                  (`Assoc [ ("from_date", `String "2026-07-01") ]))));
       Alcotest.(check bool)
         "from_date required" true
-        (response_has_error_code (-32602)
+        (rejects_arguments
            (Mcp.handle ~service ~identity:(read_identity user)
               (call "get_daily_series" (`Assoc [])))))
 
@@ -1175,9 +1195,9 @@ let test_product_argument_validation_and_scopes () =
       in
       let invalid name args =
         Alcotest.(check bool)
-          (name ^ " Invalid_input remains -32602")
+          (name ^ " rejects the arguments with an explanation")
           true
-          (response_has_error_code (-32602)
+          (rejects_arguments
              (handle
                 [ "ledger:read"; "ledger:write" ]
                 (call name (`Assoc args))))
@@ -1199,7 +1219,7 @@ let test_product_argument_validation_and_scopes () =
             [ call name (`Assoc args); omitted_call name ];
           Alcotest.(check bool)
             "omitted required arguments" true
-            (response_has_error_code (-32602)
+            (rejects_arguments
                (handle [ "ledger:read"; "ledger:write" ] (omitted_call name))))
         [ "save_product"; "search_products" ];
       List.iter
@@ -1329,12 +1349,11 @@ let test_query_meals_search_composes_with_dates_and_limit () =
         ~f:(fun value ->
           Alcotest.(check bool)
             "invalid meal search" true
-            (response_has_error_code (-32602)
-               (handle "query_meals" [ ("search", value) ])))
+            (rejects_arguments (handle "query_meals" [ ("search", value) ])))
         [ `String " "; `Int 1; `Null ];
       Alcotest.(check bool)
         "weight search rejected" true
-        (response_has_error_code (-32602)
+        (rejects_arguments
            (handle "query_weights" [ ("search", `String "whey") ])))
 
 let test_calendar_endpoint_mcp date timezone () =

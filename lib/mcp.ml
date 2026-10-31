@@ -188,8 +188,9 @@ let discover_result =
           ] );
     ]
 
-(* Argument errors the model can fix itself come back as tool results, which
-   MCP clients show to the model, rather than as protocol errors. *)
+(* Every argument error the model can fix itself comes back as a tool result
+   that names the field, which MCP clients show to the model. Only a malformed
+   JSON-RPC envelope is a protocol error. *)
 let argument_error_message = function
   | Error.Unsupported_timezone _ as error ->
       Error.to_string error
@@ -206,16 +207,10 @@ let call_response ~request_id = function
        | Error.Calendar_local_date _ | Error.Invalid_date _
        | Error.Unsupported_timezone _ | Error.Reversed_date_range _
        | Error.Date_range_too_long _ | Error.Nonpositive_argument _
-       | Error.Rejected _ | Error.Conflict _ ) as error) ->
+       | Error.Rejected _ | Error.Conflict _ | Error.Invalid_input _
+       | Error.Invalid_field _ ) as error) ->
       response ~id:request_id
         (Mcp_json.tool_error (argument_error_message error))
-  | Error
-      (Error.Invalid_field
-         { field = Numeric (Calorie_target_kcal | Protein_target_g); _ } as
-       error) ->
-      response ~id:request_id (Mcp_json.tool_error (Error.to_string error))
-  | Error (Error.Invalid_input _ | Error.Invalid_field _) ->
-      rpc_error ~id:request_id (-32602) "Invalid params"
   | Error ((Error.Numeric_overflow _ | Error.Unrepresentable_result _) as error)
     ->
       response ~id:request_id (Mcp_json.tool_error (Error.to_string error))
@@ -273,7 +268,10 @@ let handle ?withings ~service ~identity request =
                   | _ -> Error ()),
                   List.Assoc.find params ~equal:String.equal "arguments" )
               with
-              | Ok name, Some arguments -> (
+              | Ok name, arguments -> (
+                  (* Omitted arguments are an empty object, so the parser
+                     explains what is missing. *)
+                  let arguments = Option.value arguments ~default:(`Assoc []) in
                   match required_scope name with
                   | Some scope when not (Auth.has_scope identity scope) ->
                       Error `Forbidden
@@ -281,19 +279,6 @@ let handle ?withings ~service ~identity request =
                       Ok
                         (call_response ~request_id
                            (call ?withings service identity name arguments)))
-              | ( Ok
-                    (( "save_product" | "search_products" | "query_meals"
-                     | "query_weights" | "get_context"
-                     | "begin_withings_connection" | "get_withings_status"
-                     | "disconnect_withings" ) as name),
-                  None ) -> (
-                  match required_scope name with
-                  | Some scope when not (Auth.has_scope identity scope) ->
-                      Error `Forbidden
-                  | _ ->
-                      Ok
-                        (call_response ~request_id
-                           (call ?withings service identity name (`Assoc []))))
               | _ -> Ok (rpc_error ~id:request_id (-32602) "Invalid params"))
           | _ -> Ok (rpc_error ~id:request_id (-32602) "Invalid params"))
       | Some (`String _) when valid_request ->

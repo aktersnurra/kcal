@@ -2,71 +2,130 @@ module Domain_error = Error
 open Base
 module Error = Domain_error
 
-let invalid () = Error (Error.Invalid_input "invalid MCP parameters")
+(* Every argument error names the field and what it expected, so the model
+   can correct its call; Mcp returns these as tool results. *)
+let rejected message = Error (Error.Rejected message)
+
+let edit_distance a b =
+  let la = String.length a and lb = String.length b in
+  let previous = Array.init (lb + 1) ~f:Fn.id in
+  for i = 1 to la do
+    let diagonal = ref previous.(0) in
+    previous.(0) <- i;
+    for j = 1 to lb do
+      let above = previous.(j) in
+      let cost = if Char.equal a.[i - 1] b.[j - 1] then 0 else 1 in
+      previous.(j) <-
+        Int.min (Int.min (above + 1) (previous.(j - 1) + 1)) (!diagonal + cost);
+      diagonal := above
+    done
+  done;
+  previous.(lb)
+
+(* A likely intended field: a near spelling, or one naming the same thing
+   (kcal for calories_kcal). *)
+let suggestion allowed name =
+  List.filter allowed ~f:(fun candidate ->
+      edit_distance candidate name <= 2
+      || String.is_substring candidate ~substring:name
+      || String.is_substring name ~substring:candidate)
+  |> List.min_elt ~compare:(fun a b ->
+      Int.compare (edit_distance a name) (edit_distance b name))
 
 let only_fields allowed = function
-  | `Assoc fields
-    when List.for_all
-           ~f:(fun (name, _) -> List.mem allowed name ~equal:String.equal)
-           fields ->
-      Ok fields
-  | _ -> invalid ()
+  | `Assoc fields -> (
+      match
+        List.find fields ~f:(fun (name, _) ->
+            not (List.mem allowed name ~equal:String.equal))
+      with
+      | None -> Ok fields
+      | Some (name, _) ->
+          rejected
+            (Printf.sprintf "unknown field %S%s; allowed fields: %s" name
+               (match suggestion allowed name with
+               | Some candidate ->
+                   Printf.sprintf " (did you mean %S?)" candidate
+               | None -> "")
+               (String.concat ~sep:", " allowed)))
+  | _ -> rejected "arguments must be an object"
+
+let field name fields = List.Assoc.find fields ~equal:String.equal name
+
+let missing name kind =
+  rejected (Printf.sprintf "%s is required (%s)" name kind)
+
+let wrong_type name kind = rejected (Printf.sprintf "%s must be %s" name kind)
 
 let required_string name fields : (string, Error.t) Result.t =
-  match List.Assoc.find fields ~equal:String.equal name with
+  match field name fields with
   | Some (`String value) -> Ok value
-  | _ -> invalid ()
+  | None -> missing name "a string"
+  | Some _ -> wrong_type name "a string"
 
 let required_int name fields : (int, Error.t) Result.t =
-  match List.Assoc.find fields ~equal:String.equal name with
+  match field name fields with
   | Some (`Int value) -> Ok value
-  | _ -> invalid ()
+  | None -> missing name "an integer"
+  | Some _ -> wrong_type name "an integer"
 
 let required_float name fields : (float, Error.t) Result.t =
-  match List.Assoc.find fields ~equal:String.equal name with
+  match field name fields with
   | Some (`Float value) -> Ok value
   | Some (`Int value) -> Ok (Float.of_int value)
-  | _ -> invalid ()
+  | None -> missing name "a number"
+  | Some _ -> wrong_type name "a number"
 
 let optional_string name fields =
-  match List.Assoc.find fields ~equal:String.equal name with
+  match field name fields with
   | None -> Ok None
   | Some (`String value) -> Ok (Some value)
-  | _ -> invalid ()
+  | Some _ -> wrong_type name "a string"
 
 let optional_int name fields =
-  match List.Assoc.find fields ~equal:String.equal name with
+  match field name fields with
   | None -> Ok None
   | Some (`Int value) -> Ok (Some value)
-  | _ -> invalid ()
+  | Some _ -> wrong_type name "an integer"
 
 let optional_float name fields =
-  match List.Assoc.find fields ~equal:String.equal name with
+  match field name fields with
   | None -> Ok None
   | Some (`Float value) -> Ok (Some value)
   | Some (`Int value) -> Ok (Some (Float.of_int value))
-  | _ -> invalid ()
+  | Some _ -> wrong_type name "a number"
+
+let timestamp_kind =
+  "an RFC 3339 timestamp with an offset, e.g. 2026-09-22T12:30:00Z or \
+   2026-09-22T14:30:00+02:00"
 
 let optional_time name fields =
-  match List.Assoc.find fields ~equal:String.equal name with
+  match field name fields with
   | None -> Ok None
-  | Some (`String value) ->
-      Result.map ~f:Option.some (Time.parse_offset_datetime value)
-  | _ -> invalid ()
+  | Some (`String value) -> (
+      match Time.parse_offset_datetime value with
+      | Ok time -> Ok (Some time)
+      | Error _ -> wrong_type name timestamp_kind)
+  | Some _ -> wrong_type name timestamp_kind
 
 let bind result f =
   match result with Ok value -> f value | Error _ as error -> error
 
 let ( let* ) = bind
 
-let id value of_string =
-  match of_string value with Some id -> Ok id | None -> invalid ()
+let id name value of_string =
+  match of_string value with
+  | Some id -> Ok id
+  | None ->
+      rejected
+        (Printf.sprintf
+           "%s %S is not a valid id; use one returned by an earlier call" name
+           value)
 
 let optional_bool name fields =
-  match List.Assoc.find fields ~equal:String.equal name with
+  match field name fields with
   | None -> Ok None
   | Some (`Bool value) -> Ok (Some value)
-  | _ -> invalid ()
+  | Some _ -> wrong_type name "true or false"
 
 let has name fields = List.Assoc.mem fields ~equal:String.equal name
 let nutrition_fields = [ "calories_kcal"; "protein_g"; "carbs_g"; "fat_g" ]
@@ -79,7 +138,7 @@ let item_from_product fields =
       (`Assoc fields)
   in
   let* value = required_string "product_id" fields in
-  let* product_id = id value Product_id.of_string in
+  let* product_id = id "product_id" value Product_id.of_string in
   let* quantity = required_float "quantity" fields in
   let* description = optional_string "description" fields in
   let* confidence = optional_float "confidence" fields in
@@ -163,7 +222,8 @@ let item_patch fields : (Meal_item.Patch.t, Error.t) Result.t =
 let parse_limit fields =
   let* value = optional_int "limit" fields in
   let limit = Option.value value ~default:100 in
-  if limit >= 1 && limit <= 500 then Ok limit else invalid ()
+  if limit >= 1 && limit <= 500 then Ok limit
+  else rejected "limit must be between 1 and 500"
 
 let query fields =
   let* fields = only_fields [ "from"; "to"; "limit" ] (`Assoc fields) in
@@ -171,7 +231,8 @@ let query fields =
   let* to_ = optional_time "to" fields in
   let* limit = parse_limit fields in
   match (from, to_) with
-  | Some lower, Some upper when Ptime.compare lower upper > 0 -> invalid ()
+  | Some lower, Some upper when Ptime.compare lower upper > 0 ->
+      rejected "from must not be after to"
   | _ -> Ok (from, to_, limit)
 
 let parse_zone_argument ~default_zone fields =
@@ -361,7 +422,9 @@ let nonblank_string name fields =
 
 let parse ~now ~default_zone ~compile_search ~name arguments =
   let* fields =
-    match arguments with `Assoc fields -> Ok fields | _ -> invalid ()
+    match arguments with
+    | `Assoc fields -> Ok fields
+    | _ -> rejected "arguments must be an object"
   in
   match name with
   | "save_product" ->
@@ -386,7 +449,7 @@ let parse ~now ~default_zone ~compile_search ~name arguments =
         match value with
         | None -> Ok None
         | Some value ->
-            Result.map ~f:Option.some (id value Product_id.of_string)
+            Result.map ~f:Option.some (id "id" value Product_id.of_string)
       in
       let* input = product_input fields in
       Ok (Save_product (product_id, input))
@@ -404,7 +467,7 @@ let parse ~now ~default_zone ~compile_search ~name arguments =
         only_fields [ "product_id"; "reason"; "dry_run" ] (`Assoc fields)
       in
       let* value = required_string "product_id" fields in
-      let* product_id = id value Product_id.of_string in
+      let* product_id = id "product_id" value Product_id.of_string in
       let* reason = nonblank_string "reason" fields in
       let* reason =
         Result.of_option reason ~error:(Error.Rejected "reason is required")
@@ -432,7 +495,7 @@ let parse ~now ~default_zone ~compile_search ~name arguments =
   | "get_meal" ->
       let* fields = only_fields [ "id" ] (`Assoc fields) in
       let* value = required_string "id" fields in
-      let* meal_id = id value Meal_id.of_string in
+      let* meal_id = id "id" value Meal_id.of_string in
       Ok (Get_meal meal_id)
   | "query_meals" ->
       let* fields =
@@ -451,7 +514,7 @@ let parse ~now ~default_zone ~compile_search ~name arguments =
   | "update_meal" ->
       let* fields = only_fields [ "id"; "eaten_at"; "label" ] (`Assoc fields) in
       let* value = required_string "id" fields in
-      let* meal_id = id value Meal_id.of_string in
+      let* meal_id = id "id" value Meal_id.of_string in
       let* eaten_at = optional_time "eaten_at" fields in
       let* label = nonblank_string "label" fields in
       let* patch = Meal.Patch.of_raw { eaten_at; label } in
@@ -459,7 +522,7 @@ let parse ~now ~default_zone ~compile_search ~name arguments =
   | "add_meal_item" ->
       let* fields = only_fields [ "meal_id"; "item" ] (`Assoc fields) in
       let* value = required_string "meal_id" fields in
-      let* meal_id = id value Meal_id.of_string in
+      let* meal_id = id "meal_id" value Meal_id.of_string in
       let* entry =
         match List.Assoc.find fields ~equal:String.equal "item" with
         | Some item -> item_entry item
@@ -474,19 +537,19 @@ let parse ~now ~default_zone ~compile_search ~name arguments =
           (`Assoc fields)
       in
       let* value = required_string "id" fields in
-      let* item_id = id value Meal_item_id.of_string in
+      let* item_id = id "id" value Meal_item_id.of_string in
       let* reason = nonblank_string "reason" fields in
       let* patch = item_patch fields in
       Ok (Update_meal_item { id = item_id; patch; reason })
   | "delete_meal_item" ->
       let* fields = only_fields [ "id" ] (`Assoc fields) in
       let* value = required_string "id" fields in
-      let* item_id = id value Meal_item_id.of_string in
+      let* item_id = id "id" value Meal_item_id.of_string in
       Ok (Delete_meal_item item_id)
   | "delete_meal" ->
       let* fields = only_fields [ "id" ] (`Assoc fields) in
       let* value = required_string "id" fields in
-      let* meal_id = id value Meal_id.of_string in
+      let* meal_id = id "id" value Meal_id.of_string in
       Ok (Delete_meal meal_id)
   | "record_weight" ->
       let* fields =
@@ -499,7 +562,7 @@ let parse ~now ~default_zone ~compile_search ~name arguments =
   | "get_weight" ->
       let* fields = only_fields [ "id" ] (`Assoc fields) in
       let* value = required_string "id" fields in
-      let* weight_id = id value Weigh_in_id.of_string in
+      let* weight_id = id "id" value Weigh_in_id.of_string in
       Ok (Get_weight weight_id)
   | "query_weights" ->
       let* from, to_, limit = query fields in
@@ -509,7 +572,7 @@ let parse ~now ~default_zone ~compile_search ~name arguments =
         only_fields ("id" :: [ "weight_kg"; "measured_at" ]) (`Assoc fields)
       in
       let* value = required_string "id" fields in
-      let* weight_id = id value Weigh_in_id.of_string in
+      let* weight_id = id "id" value Weigh_in_id.of_string in
       let* measured_at = optional_time "measured_at" fields in
       let* weight_kg = optional_float "weight_kg" fields in
       let* patch = Weigh_in.Patch.of_raw Weigh_in.{ measured_at; weight_kg } in
@@ -517,7 +580,7 @@ let parse ~now ~default_zone ~compile_search ~name arguments =
   | "delete_weight" ->
       let* fields = only_fields [ "id" ] (`Assoc fields) in
       let* value = required_string "id" fields in
-      let* weight_id = id value Weigh_in_id.of_string in
+      let* weight_id = id "id" value Weigh_in_id.of_string in
       Ok (Delete_weight weight_id)
   | "begin_withings_connection" ->
       let* _ = only_fields [] arguments in
@@ -540,4 +603,4 @@ let parse ~now ~default_zone ~compile_search ~name arguments =
   | "get_summary" ->
       let* request = parse_range_request ~now ~default_zone fields in
       Ok (Get_summary request)
-  | _ -> invalid ()
+  | _ -> rejected ("unknown tool " ^ name)
