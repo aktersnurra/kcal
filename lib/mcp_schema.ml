@@ -271,6 +271,14 @@ let goals_properties =
        start crosses midnight."
       string;
     property "target_weight_kg" "Goal body weight in kilograms, if any." number;
+    property "notes"
+      (Printf.sprintf
+         "The user's own context for these goals, in their words: why, how \
+          strict, what matters most (e.g. losing about 0.5 kg a week before \
+          summer; weekends are flexible but protein matters every day). Read \
+          it back from get_context before advising. At most %d characters."
+         Goals.max_notes_length)
+      string;
   ]
 
 let correction_properties =

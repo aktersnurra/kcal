@@ -1814,7 +1814,7 @@ let compile_search_query = Search_query.of_strings
 let goals_columns =
   "timezone, weekday_calorie_target_kcal, weekend_calorie_target_kcal, \
    protein_target_g, eating_window_start_minute, eating_window_end_minute, \
-   target_weight_kg"
+   target_weight_kg, notes"
 
 let goals_of_row statement =
   let decode () =
@@ -1851,6 +1851,7 @@ let goals_of_row statement =
           protein;
           eating_window;
           target_weight_kg;
+          notes = optional_text statement 7;
         }
   in
   if
@@ -1873,15 +1874,15 @@ let set_goals db ~user (goals : Goals.t) =
   let window = goals.eating_window in
   with_statement db
     ("INSERT INTO goals (user_id, " ^ goals_columns
-   ^ ", updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO \
-      UPDATE SET timezone = excluded.timezone, weekday_calorie_target_kcal = \
-      excluded.weekday_calorie_target_kcal, weekend_calorie_target_kcal = \
+   ^ ", updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) \
+      DO UPDATE SET timezone = excluded.timezone, weekday_calorie_target_kcal \
+      = excluded.weekday_calorie_target_kcal, weekend_calorie_target_kcal = \
       excluded.weekend_calorie_target_kcal, protein_target_g = \
       excluded.protein_target_g, eating_window_start_minute = \
       excluded.eating_window_start_minute, eating_window_end_minute = \
       excluded.eating_window_end_minute, target_weight_kg = \
-      excluded.target_weight_kg, updated_at = excluded.updated_at RETURNING "
-   ^ goals_columns)
+      excluded.target_weight_kg, notes = excluded.notes, updated_at = \
+      excluded.updated_at RETURNING " ^ goals_columns)
     (fun statement ->
       let minute f =
         match window with
@@ -1900,6 +1901,7 @@ let set_goals db ~user (goals : Goals.t) =
             minute (fun (w : Goals.Eating_window.t) -> w.end_minute);
             nullable_float
               (Option.map goals.target_weight_kg ~f:(fun kg -> (kg :> float)));
+            nullable goals.notes;
             Sqlite3.Data.TEXT (timestamp (now ()));
           ]
       with

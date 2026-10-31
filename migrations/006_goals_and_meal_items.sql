@@ -7,6 +7,7 @@ CREATE TABLE goals (
   eating_window_start_minute INTEGER,
   eating_window_end_minute INTEGER,
   target_weight_kg REAL,
+  notes TEXT,
   updated_at TEXT NOT NULL,
   CHECK ((eating_window_start_minute IS NULL) = (eating_window_end_minute IS NULL))
 );

@@ -68,7 +68,7 @@ Start a conversation with `get_context()`: goals, today's intake against today's
 
 Goals:
 
-- `set_goals(timezone, weekday_calorie_target_kcal, weekend_calorie_target_kcal, protein_target_g?, eating_window_start?, eating_window_end?, target_weight_kg?)` — requires `ledger:write`; full replacement, so omitted optional goals are cleared. Weekend is Saturday and Sunday. The eating window is two local `HH:MM` times (12:00–20:00 for 16:8; an end before the start crosses midnight). The goals' `timezone` becomes the default for every calendar-day tool.
+- `set_goals(timezone, weekday_calorie_target_kcal, weekend_calorie_target_kcal, protein_target_g?, eating_window_start?, eating_window_end?, target_weight_kg?, notes?)` — requires `ledger:write`; full replacement, so omitted optional goals are cleared. Weekend is Saturday and Sunday. The eating window is two local `HH:MM` times (12:00–20:00 for 16:8; an end before the start crosses midnight). The goals' `timezone` becomes the default for every calendar-day tool. `notes` (up to 2000 characters) is the user's own context for the goals, such as why, how strict, and what matters most; the server stores it and `get_context` returns it, so the agent reads it before advising.
 
 Reusable nutrition references:
 

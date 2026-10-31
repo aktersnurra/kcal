@@ -224,6 +224,7 @@ let goals ?protein ?window ?target_weight_kg ~weekday ~weekend () : Goals.t =
     target_weight_kg =
       Option.map target_weight_kg ~f:(fun kg ->
           ok (Nutrition.Kilograms.of_float kg));
+    notes = None;
   }
 
 let test_intake_ignores_unlogged_days_and_counts_targets () =

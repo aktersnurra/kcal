@@ -19,6 +19,7 @@ let goals ?eating_window ?target_weight_kg () : Goals.t =
     target_weight_kg =
       Option.map target_weight_kg ~f:(fun kg ->
           ok (Nutrition.Kilograms.of_float kg));
+    notes = None;
   }
 
 let meal at calories_kcal : Meal.t =

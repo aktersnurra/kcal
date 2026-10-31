@@ -299,6 +299,7 @@ let parse_goals fields =
         "eating_window_start";
         "eating_window_end";
         "target_weight_kg";
+        "notes";
       ]
       (`Assoc fields)
   in
@@ -324,6 +325,16 @@ let parse_goals fields =
   let* target_weight_kg =
     optional optional_float "target_weight_kg" Nutrition.Kilograms.of_float
   in
+  let* notes = optional_string "notes" fields in
+  let* notes =
+    match notes with
+    | Some text when String.is_empty (String.strip text) -> Ok None
+    | Some text when String.length text > Goals.max_notes_length ->
+        rejected
+          (Printf.sprintf "notes must be at most %d characters"
+             Goals.max_notes_length)
+    | notes -> Ok notes
+  in
   let* start = optional_string "eating_window_start" fields in
   let* end_ = optional_string "eating_window_end" fields in
   let* eating_window =
@@ -346,6 +357,7 @@ let parse_goals fields =
         protein;
         eating_window;
         target_weight_kg;
+        notes;
       }
 
 let product_input fields : (Product.Create.t, Error.t) Result.t =

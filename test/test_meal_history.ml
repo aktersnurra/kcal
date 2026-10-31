@@ -533,10 +533,21 @@ let test_goals_round_trip_and_context () =
           ("eating_window_start", `String "12:00");
           ("eating_window_end", `String "20:00");
           ("target_weight_kg", `Int 70);
+          ("notes", `String "Losing about 0.5 kg a week; weekends are flexible.");
         ]
       in
       let saved = payload service user "set_goals" goals in
       Alcotest.check json "16:8" (`Float 16.) (field "fasting_hours" saved);
+      Alcotest.check json "notes kept for the agent"
+        (`String "Losing about 0.5 kg a week; weekends are flexible.")
+        (field "notes" saved);
+      Alcotest.(check bool)
+        "overlong notes are rejected" true
+        (String.is_substring
+           (error_text service user "set_goals"
+              (List.Assoc.add goals ~equal:String.equal "notes"
+                 (`String (String.make (Goals.max_notes_length + 1) 'x'))))
+           ~substring:"notes must be at most");
       Alcotest.check json "no protein target" `Null
         (field "protein_target_g" saved);
       let context = payload service user "get_context" [] in
@@ -561,7 +572,11 @@ let test_goals_round_trip_and_context () =
                not (String.is_prefix name ~prefix:"eating_window")))
       in
       Alcotest.check json "replacement clears omitted goals" `Null
-        (field "eating_window_start" cleared))
+        (field "eating_window_start" cleared);
+      Alcotest.check json "omitted notes are cleared too" `Null
+        (field "notes"
+           (payload service user "set_goals"
+              (List.Assoc.remove goals ~equal:String.equal "notes"))))
 
 let test_recent_products_in_context () =
   with_service (fun service user ->

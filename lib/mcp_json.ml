@@ -310,6 +310,7 @@ let goals_json (goals : Goals.t) =
         json_option
           (fun (kg : Nutrition.Kilograms.t) -> `Float (kg :> float))
           goals.target_weight_kg );
+      ("notes", json_option (fun text -> `String text) goals.notes);
     ]
 
 let hours_between earlier later =

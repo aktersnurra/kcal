@@ -42,6 +42,10 @@ type t = {
   protein : Protein_target.t option;
   eating_window : Eating_window.t option;
   target_weight_kg : Nutrition.Kilograms.t option;
+  notes : string option;
+      (** The user's own context for these goals, for the agent to read: why,
+          how strict, what matters most. *)
 }
 
+val max_notes_length : int
 val calorie_target_on : t -> Date.t -> Calorie_target.t

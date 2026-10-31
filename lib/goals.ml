@@ -106,7 +106,12 @@ type t = {
   protein : Protein_target.t option;
   eating_window : Eating_window.t option;
   target_weight_kg : Nutrition.Kilograms.t option;
+  notes : string option;
 }
+
+(* Long enough for a few sentences of context, short enough that get_context
+   stays small. *)
+let max_notes_length = 2000
 
 let calorie_target_on goals date =
   if Date.is_weekend date then goals.weekend_calories
