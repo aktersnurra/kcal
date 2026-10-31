@@ -167,3 +167,15 @@
  (deps ../bin/kcal.exe)
  (action
   (run %{test} %{exe:../bin/kcal.exe})))
+
+(test
+ (name test_goals)
+ (modules test_goals)
+ (libraries alcotest kcal base))
+
+(test
+ (name test_meal_history)
+ (modules test_meal_history test_support)
+ (libraries alcotest sqlite3 kcal base yojson)
+ (deps
+  (glob_files ../migrations/[0-9]*.sql)))

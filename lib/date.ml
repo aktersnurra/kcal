@@ -59,3 +59,6 @@ let add_days date days =
 (* Both are midnights, so the span is a whole number of days. *)
 let days_between ~first ~last = fst (Ptime.Span.to_d_ps (Ptime.diff last first))
 let midnight_utc date = date
+
+let is_weekend date =
+  match Ptime.weekday date with `Sat | `Sun -> true | _ -> false

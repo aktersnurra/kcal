@@ -9,10 +9,83 @@ let make ~store = { store }
 let resolve_user service ~issuer ~subject =
   Store_sqlite.resolve_user service.store ~issuer ~subject
 
-let record_meal service ~user input =
-  Store_sqlite.create_meal service.store ~user input
+let ( let* ) result f = Result.bind result ~f
 
-let get_meal service ~user id = Store_sqlite.get_meal service.store ~user id
+let product_for_item service ~user product_id =
+  match Store_sqlite.get_product service.store ~user product_id with
+  | Error Error.Not_found ->
+      Error
+        (Error.Rejected
+           ("product_id "
+           ^ Product_id.to_string product_id
+           ^ " was not found; find the product with search_products"))
+  | result -> result
+
+(* An item from a product takes the product's current version, scaled. *)
+let resolve_item service ~user = function
+  | Meal_item.Estimated input -> Ok (input, None)
+  | From_product entry ->
+      let* product = product_for_item service ~user entry.product_id in
+      let* portion = Product.portion product ~quantity:entry.quantity in
+      let* serving =
+        Result.of_option product.serving
+          ~error:(Error.Storage_decoding "product serving")
+      in
+      let* input =
+        Meal_item.Create.of_raw
+          {
+            description = Option.value entry.description ~default:product.name;
+            calories_kcal = portion.calories_kcal;
+            protein_g = portion.protein_g;
+            carbs_g = portion.carbs_g;
+            fat_g = portion.fat_g;
+            confidence = entry.confidence;
+            estimate_source =
+              Some (Option.value entry.estimate_source ~default:product.source);
+            notes = entry.notes;
+          }
+      in
+      Ok
+        ( input,
+          Some
+            Meal_item.
+              {
+                product_id = product.id;
+                product_version = product.version;
+                quantity = entry.quantity;
+                unit = serving.unit;
+              } )
+
+(* A retry is answered before its items are resolved, so it replays even if a
+   product it named has changed since. *)
+let record_meal ?idempotency service ~user ~eaten_at ~label entries =
+  let* existing =
+    match idempotency with
+    | None -> Ok None
+    | Some idempotency ->
+        Store_sqlite.idempotent_meal service.store ~user idempotency
+  in
+  match existing with
+  | Some meal -> Ok (meal, `Replayed)
+  | None ->
+      let* items =
+        Result.all (List.map entries ~f:(resolve_item service ~user))
+      in
+      Store_sqlite.create_meal ?idempotency service.store ~user ~eaten_at ~label
+        items
+
+let get_meal service ~user id =
+  Store_sqlite.get_meal_with_revisions service.store ~user id
+
+let add_item service ~user meal_id entry =
+  let* item = resolve_item service ~user entry in
+  Store_sqlite.add_item service.store ~user meal_id item
+
+let update_item ?reason ?quantity service ~user id patch =
+  Store_sqlite.update_item ?reason ?quantity service.store ~user id patch
+
+let delete_item service ~user id =
+  Store_sqlite.delete_item service.store ~user id
 
 (* The HTTP service runs in one Eio domain. Compilation is synchronous and
    non-yielding, so its connection-local TEMP work is serialized with store work.
@@ -74,7 +147,69 @@ let disconnect_withings service ~user =
 let withings_connection_for_identity service ~withings_user_id =
   Store_sqlite.withings_connection_for_identity service.store ~withings_user_id
 
-let ( let* ) result f = Result.bind result ~f
+let goals service ~user =
+  match Store_sqlite.get_goals service.store ~user with
+  | Ok goals -> Ok (Some goals)
+  | Error Error.Not_found -> Ok None
+  | Error _ as error -> error
+
+let set_goals service ~user goals =
+  Store_sqlite.set_goals service.store ~user goals
+
+let default_zone service ~user =
+  Result.map (goals service ~user) ~f:(function
+    | Some (goals : Goals.t) -> goals.timezone
+    | None -> Time.utc)
+
+type correction_skip =
+  | Unit_changed of { logged_unit : string; current_unit : string }
+  | No_structured_basis
+
+type product_correction = {
+  product : Product.t;
+  items : (Meal_id.t * Ptime.t * Meal_item.t * Product.portion) list;
+  skipped : (Meal_id.t * Meal_item.t * correction_skip) list;
+  applied : bool;
+}
+
+(* An item's quantity is only meaningful in the unit it was logged in, so an
+   item is rescaled only while the product's basis unit is unchanged. *)
+let plan_correction (product : Product.t)
+    (meal_id, eaten_at, (item : Meal_item.t)) =
+  match (item.product, product.serving) with
+  | None, _ -> Error (Error.Storage_decoding "meal item product link")
+  | Some _, None -> Ok (Either.Second (meal_id, item, No_structured_basis))
+  | Some link, Some serving when not (String.equal link.unit serving.unit) ->
+      Ok
+        (Either.Second
+           ( meal_id,
+             item,
+             Unit_changed
+               { logged_unit = link.unit; current_unit = serving.unit } ))
+  | Some link, Some _ ->
+      let* portion = Product.portion product ~quantity:link.quantity in
+      Ok
+        (Either.First
+           ( (meal_id, eaten_at, item, portion),
+             Meal_item.{ link with product_version = product.version } ))
+
+let correct_meals_from_product service ~user product_id ~reason ~dry_run =
+  let* product = Store_sqlite.get_product service.store ~user product_id in
+  let* stale =
+    Store_sqlite.items_from_earlier_versions service.store ~user product
+  in
+  let* plans = Result.all (List.map stale ~f:(plan_correction product)) in
+  let changes, skipped = List.partition_map plans ~f:Fn.id in
+  let items = List.map changes ~f:fst in
+  if dry_run || List.is_empty changes then
+    Ok { product; items; skipped; applied = false }
+  else
+    let* () =
+      Store_sqlite.rescale_items service.store ~reason
+        (List.map changes ~f:(fun ((meal_id, _, item, portion), link) ->
+             (meal_id, item, portion, link)))
+    in
+    Ok { product; items; skipped; applied = true }
 
 let records_in_range service ~user ~zone ~range =
   let* start, stop = Date_range.utc_bounds zone range in
@@ -86,9 +221,60 @@ let daily_series service ~user ~zone ~range =
   let* meals, weigh_ins = records_in_range service ~user ~zone ~range in
   Summary.daily_series zone range ~meals ~weigh_ins
 
-let summary ?calorie_target ?protein_target service ~user ~zone ~range =
-  let* meals, weigh_ins = records_in_range service ~user ~zone ~range in
-  Summary.summarise ?calorie_target ?protein_target zone range ~meals ~weigh_ins
+type summary = {
+  current : Summary.t;
+  previous : (Date_range.t * Summary.t) option;
+      (** The equally long range just before, when it is representable. *)
+}
+
+let previous_range range =
+  let days = Date_range.day_count range in
+  match Date.add_days (Date_range.first range) (-days) with
+  | Error _ -> None
+  | Ok first -> (
+      match Date.add_days (Date_range.first range) (-1) with
+      | Error _ -> None
+      | Ok last -> Result.ok (Date_range.make ~first ~last))
+
+let summary service ~user ~zone ~range =
+  let* goals = goals service ~user in
+  let summarise range =
+    let* meals, weigh_ins = records_in_range service ~user ~zone ~range in
+    Summary.summarise ?goals zone range ~meals ~weigh_ins
+  in
+  let* current = summarise range in
+  let* previous =
+    match previous_range range with
+    | None -> Ok None
+    | Some range ->
+        Result.map (summarise range) ~f:(fun summary -> Some (range, summary))
+  in
+  Ok { current; previous }
+
+let recent_product_limit = 5
+
+let context service ~user ~now =
+  let* goals = goals service ~user in
+  let zone =
+    Option.value_map goals ~default:Time.utc ~f:(fun (goals : Goals.t) ->
+        goals.timezone)
+  in
+  let* history = Context.history zone ~now in
+  let* start, stop = Date_range.utc_bounds zone history in
+  let* meals = meals_between service ~user ~start ~stop in
+  let* weigh_ins = weigh_ins_between service ~user ~start ~stop in
+  let* latest_weight =
+    match latest_weigh_in service ~user with
+    | Ok weight -> Ok (Some weight)
+    | Error Error.Not_found -> Ok None
+    | Error _ as error -> error
+  in
+  let* recent_products =
+    Store_sqlite.recent_products service.store ~user ~since:start
+      ~limit:recent_product_limit
+  in
+  Context.build ~now ~zone ~goals ~meals ~weigh_ins ~latest_weight
+    ~recent_products
 
 type withings_authorization_failure =
   | Invalid_state of Error.t

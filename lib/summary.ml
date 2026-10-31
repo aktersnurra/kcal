@@ -4,32 +4,6 @@ module Error = Domain_error
 
 let ( let* ) result f = Result.bind result ~f
 
-module Calorie_target = struct
-  type t = int
-
-  let of_kcal kcal =
-    if kcal > 0 then Ok kcal
-    else
-      Error
-        (Error.Invalid_field
-           { field = Numeric Calorie_target_kcal; reason = Nonpositive })
-end
-
-module Protein_target = struct
-  type t = float
-
-  let of_g g =
-    if not (Float.is_finite g) then
-      Error
-        (Error.Invalid_field
-           { field = Numeric Protein_target_g; reason = Nonfinite })
-    else if Float.(g <= 0.) then
-      Error
-        (Error.Invalid_field
-           { field = Numeric Protein_target_g; reason = Nonpositive })
-    else Ok g
-end
-
 type daily_weight = { weigh_in_count : int; mean_weight_kg : float }
 
 type day = {
@@ -42,47 +16,11 @@ let finite operation value =
   if Float.is_finite value then Ok value
   else Error (Error.Unrepresentable_result operation)
 
-let add_calories left right =
-  if left > Int.max_value - right then
-    Error (Error.Numeric_overflow Calories_kcal)
-  else Ok (left + right)
-
-let add_optional left right =
-  match (left, right) with
-  | None, other | other, None -> Ok other
-  | Some a, Some b ->
-      Result.map (finite Error.Daily_meals (a +. b)) ~f:Option.some
-
-let add_meal (meal : Meal.t) :
-    Meal.totals option -> (Meal.totals, Error.t) Result.t = function
-  | None ->
-      Ok
-        Meal.
-          {
-            meal_count = 1;
-            calories_kcal = meal.calories_kcal;
-            protein_g = meal.protein_g;
-            carbs_g = meal.carbs_g;
-            fat_g = meal.fat_g;
-          }
-  | Some totals ->
-      let* calories_kcal =
-        add_calories totals.calories_kcal meal.calories_kcal
-      in
-      let* protein_g =
-        finite Error.Daily_meals (totals.protein_g +. meal.protein_g)
-      in
-      let* carbs_g = add_optional totals.carbs_g meal.carbs_g in
-      let* fat_g = add_optional totals.fat_g meal.fat_g in
-      Ok
-        Meal.
-          {
-            meal_count = totals.meal_count + 1;
-            calories_kcal;
-            protein_g;
-            carbs_g;
-            fat_g;
-          }
+let add_meal (meal : Meal.t) totals =
+  let* meal_totals = Meal.totals meal in
+  match totals with
+  | None -> Ok meal_totals
+  | Some totals -> Meal.add_totals totals meal_totals
 
 let add_weigh_in (weigh_in : Weigh_in.t) = function
   | None -> Ok { weigh_in_count = 1; mean_weight_kg = weigh_in.weight_kg }
@@ -146,8 +84,6 @@ type logged_intake = {
   avg_protein_g : float;
 }
 
-type 'target target_result = { target : 'target; days_met : int }
-
 (* Online means avoid overflowing a sum whose average is representable. All
    observations are nonnegative, so the difference is also representable. *)
 let mean values ~f =
@@ -174,9 +110,6 @@ let logged_intake (logged : Meal.totals list) =
              avg_calories_kcal;
              avg_protein_g;
            })
-
-let target_result logged ~is_met target =
-  { target; days_met = List.count logged ~f:(is_met target) }
 
 type weight_trend =
   | Single_reading of { weight_kg : float; measured_at : Ptime.t }
@@ -278,35 +211,122 @@ let implied_maintenance logged_intake weight_trend =
       in
       Ok (Estimate { kcal })
 
+type calorie_adherence = { days_at_or_under : int; avg_vs_target_kcal : float }
+type protein_adherence = { days_at_or_over : int }
+type window_adherence = { days_within : int }
+
+type target_weight = {
+  target_kg : float;
+  remaining_kg : float;
+  weeks_to_target : float option;
+}
+
 type t = {
   day_count : int;
   logged_intake : logged_intake option;
-  calorie_target : Calorie_target.t target_result option;
-  protein_target : Protein_target.t target_result option;
+  calorie_target : calorie_adherence option;
+  protein_target : protein_adherence option;
+  eating_window : window_adherence option;
   weight_trend : weight_trend option;
+  target_weight : target_weight option;
   implied_maintenance : implied_maintenance;
 }
 
-let summarise ?calorie_target ?protein_target zone range ~meals ~weigh_ins =
+let calorie_adherence (goals : Goals.t) logged =
+  match logged with
+  | [] -> Ok None
+  | _ ->
+      let gap (date, (totals : Meal.totals)) =
+        Float.of_int
+          (totals.calories_kcal - (Goals.calorie_target_on goals date :> int))
+      in
+      let* avg_vs_target_kcal =
+        finite Error.Average_intake (mean logged ~f:gap)
+      in
+      Ok
+        (Some
+           {
+             days_at_or_under =
+               List.count logged ~f:(fun (date, (totals : Meal.totals)) ->
+                   totals.calories_kcal
+                   <= (Goals.calorie_target_on goals date :> int));
+             avg_vs_target_kcal;
+           })
+
+let latest_weight_kg = function
+  | Single_reading { weight_kg; _ } -> weight_kg
+  | Trend { last_kg; _ } -> last_kg
+
+(* Weeks at the current slope, only while the trend heads toward the target. *)
+let target_weight target_kg trend =
+  let target_kg = (target_kg : Nutrition.Kilograms.t :> float) in
+  let remaining_kg = latest_weight_kg trend -. target_kg in
+  let weeks_to_target =
+    match trend with
+    | _ when Float.(remaining_kg = 0.) -> Some 0.
+    | Trend { slope_kg_per_week; _ }
+      when Float.(remaining_kg *. slope_kg_per_week < 0.) ->
+        Some (remaining_kg /. Float.neg slope_kg_per_week)
+    | _ -> None
+  in
+  { target_kg; remaining_kg; weeks_to_target }
+
+let summarise ?goals zone range ~meals ~weigh_ins =
   let* series = daily_series zone range ~meals ~weigh_ins:[] in
-  let logged = List.filter_map series ~f:(fun day -> day.meals) in
-  let* logged_intake = logged_intake logged in
+  let logged =
+    List.filter_map series ~f:(fun day ->
+        Option.map day.meals ~f:(fun totals -> (day.date, totals)))
+  in
+  let* logged_intake = logged_intake (List.map logged ~f:snd) in
   let* weight_trend = weight_trend zone range weigh_ins in
   let* implied_maintenance = implied_maintenance logged_intake weight_trend in
+  let* calorie_target =
+    match goals with
+    | None -> Ok None
+    | Some goals -> calorie_adherence goals logged
+  in
+  let* eating_window =
+    match
+      Option.bind goals ~f:(fun (goals : Goals.t) -> goals.eating_window)
+    with
+    | None -> Ok None
+    | Some window ->
+        let* within =
+          bucket zone range
+            ~instant:(fun (meal : Meal.t) -> meal.eaten_at)
+            ~add:(fun (meal : Meal.t) so_far ->
+              Ok
+                (Option.value so_far ~default:true
+                && Goals.Eating_window.contains window zone meal.eaten_at))
+            meals
+        in
+        Ok (Some { days_within = Map.count within ~f:Fn.id })
+  in
+  let protein_target =
+    Option.bind goals ~f:(fun (goals : Goals.t) ->
+        Option.map goals.protein ~f:(fun target ->
+            {
+              days_at_or_over =
+                List.count logged ~f:(fun (_, (totals : Meal.totals)) ->
+                    Float.(totals.protein_g >= (target :> float)));
+            }))
+  in
+  let target_weight =
+    match
+      ( Option.bind goals ~f:(fun (goals : Goals.t) -> goals.target_weight_kg),
+        weight_trend )
+    with
+    | Some target, Some trend -> Some (target_weight target trend)
+    | _ -> None
+  in
   Ok
     {
       day_count = Date_range.day_count range;
       logged_intake;
-      calorie_target =
-        Option.map calorie_target
-          ~f:
-            (target_result logged ~is_met:(fun target (totals : Meal.totals) ->
-                 totals.calories_kcal <= target));
-      protein_target =
-        Option.map protein_target
-          ~f:
-            (target_result logged ~is_met:(fun target (totals : Meal.totals) ->
-                 Float.(totals.protein_g >= target)));
+      calorie_target;
+      protein_target;
+      eating_window;
       weight_trend;
+      target_weight;
       implied_maintenance;
     }

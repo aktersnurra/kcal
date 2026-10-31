@@ -20,6 +20,7 @@ let test_embedded_migrations_match_files () =
       (3, "003_products.sql");
       (4, "004_ranked_search.sql");
       (5, "005_connection_history.sql");
+      (6, "006_goals_and_meal_items.sql");
     ]
 
 let test_creates_ledger_tables () =
@@ -36,6 +37,9 @@ let test_creates_ledger_tables () =
           "withings_connections";
           "withings_oauth_states";
           "products";
+          "goals";
+          "meal_items";
+          "meal_item_revisions";
         ])
 
 let test_repeat_is_a_no_op () =
@@ -73,7 +77,11 @@ let test_upgrade_from_v2_preserves_meal () =
       Option.value_exn (Result.ok (Migration.apply_all db));
       Test_support.table_exists db "products";
       let statement =
-        Sqlite3.prepare db "SELECT description FROM meals WHERE id='m'"
+        Sqlite3.prepare db
+          "SELECT meal_items.id, meal_items.description, \
+           meal_items.calories_kcal, meals.eaten_at, (SELECT COUNT(*) FROM \
+           meal_items) FROM meal_items JOIN meals ON meals.id = \
+           meal_items.meal_id WHERE meals.id = 'm'"
       in
       Stdlib.Fun.protect
         ~finally:(fun () -> ignore (Sqlite3.finalize statement))
@@ -82,9 +90,10 @@ let test_upgrade_from_v2_preserves_meal () =
             match Sqlite3.step statement with
             | Sqlite3.Rc.ROW -> true
             | _ -> false);
-          Alcotest.(check string)
-            "meal preserved" "Soup"
-            (Sqlite3.column_text statement 0)))
+          Alcotest.(check (list string))
+            "the meal became a meal with its one item, keeping its id"
+            [ "m"; "Soup"; "250"; "2026-01-01T00:00:00Z"; "1" ]
+            (List.init 5 ~f:(Sqlite3.column_text statement))))
 
 let test_v4_dangling_history () =
   Test_support.with_database (fun db ->

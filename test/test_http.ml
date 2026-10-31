@@ -263,7 +263,7 @@ let test_overflow_reaches_http_as_tool_error () =
           let response =
             call "record_meal"
               (Stdlib.Printf.sprintf
-                 {|{"description":"large","calories_kcal":%d,"protein_g":1,"eaten_at":"2026-07-14T10:00:00Z"}|}
+                 {|{"items":[{"description":"large","calories_kcal":%d,"protein_g":1}],"eaten_at":"2026-07-14T10:00:00Z"}|}
                  calories)
           in
           Alcotest.(check bool)
@@ -283,9 +283,7 @@ let test_overflow_reaches_http_as_tool_error () =
       List.iter
         ~f:(fun name ->
           let arguments =
-            if String.equal name "get_daily_totals" then
-              {|{"date":"2026-07-14"}|}
-            else {|{"from_date":"2026-07-14","to_date":"2026-07-14"}|}
+            {|{"from_date":"2026-07-14","to_date":"2026-07-14"}|}
           in
           let response = call name arguments in
           Alcotest.(check bool)
@@ -293,14 +291,14 @@ let test_overflow_reaches_http_as_tool_error () =
             (Yojson.Safe.equal
                (member "isError" (member "result" response))
                (`Bool true)))
-        [ "get_daily_totals"; "get_daily_series"; "get_summary" ])
+        [ "get_daily_series"; "get_summary" ])
 
 let test_calendar_endpoint_http date timezone () =
   Test_support.with_store (fun store _ ->
       let body =
         Stdlib.Printf.sprintf
-          {|{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_daily_totals","arguments":{"date":"%s","timezone":"%s"}}}|}
-          date timezone
+          {|{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_daily_series","arguments":{"from_date":"%s","to_date":"%s","timezone":"%s"}}}|}
+          date date timezone
       in
       let response =
         request store ~scopes:[ "ledger:read" ]
@@ -347,15 +345,15 @@ let () =
             test_overflow_reaches_http_as_tool_error;
           Alcotest.test_case "nonfinite meal" `Quick
             (nonfinite_request "record_meal"
-               {|{"description":"overflow","calories_kcal":1,"protein_g":1e309}|}
+               {|{"items":[{"description":"overflow","calories_kcal":1,"protein_g":1e309}]}|}
                "meals");
           Alcotest.test_case "nonfinite meal carbs" `Quick
             (nonfinite_request "record_meal"
-               {|{"description":"overflow","calories_kcal":1,"protein_g":1,"carbs_g":1e309}|}
+               {|{"items":[{"description":"overflow","calories_kcal":1,"protein_g":1,"carbs_g":1e309}]}|}
                "meals");
           Alcotest.test_case "nonfinite meal fat" `Quick
             (nonfinite_request "record_meal"
-               {|{"description":"overflow","calories_kcal":1,"protein_g":1,"fat_g":1e309}|}
+               {|{"items":[{"description":"overflow","calories_kcal":1,"protein_g":1,"fat_g":1e309}]}|}
                "meals");
           Alcotest.test_case "nonfinite weight" `Quick
             (nonfinite_request "record_weight" {|{"weight_kg":1e309}|}

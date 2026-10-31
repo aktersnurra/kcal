@@ -20,6 +20,26 @@ let response_has_error_code code = function
       | _ -> false)
   | _ -> false
 
+let result_member_of response name =
+  match response with
+  | Ok (`Assoc fields) -> (
+      match List.Assoc.find fields ~equal:String.equal "result" with
+      | Some (`Assoc result) -> List.Assoc.find result ~equal:String.equal name
+      | _ -> None)
+  | _ -> None
+
+(* Argument mistakes are tool results with isError and an explanation, so the
+   model sees what to fix; never a bare protocol error. *)
+let rejects_arguments response =
+  match
+    (result_member_of response "isError", result_member_of response "content")
+  with
+  | Some (`Bool true), Some (`List [ `Assoc content ]) -> (
+      match List.Assoc.find content ~equal:String.equal "text" with
+      | Some (`String text) -> not (String.is_empty text)
+      | _ -> false)
+  | _ -> false
+
 let result_member name = function
   | Ok (`Assoc fields) -> (
       match List.Assoc.find fields ~equal:String.equal "result" with
@@ -48,14 +68,21 @@ let test_record_meal_rejects_user_id () =
           (`Assoc
              [
                ("user_id", `String "other-user");
-               ("description", `String "Soup");
-               ("calories_kcal", `Int 250);
-               ("protein_g", `Float 12.);
+               ( "items",
+                 `List
+                   [
+                     `Assoc
+                       [
+                         ("description", `String "Soup");
+                         ("calories_kcal", `Int 250);
+                         ("protein_g", `Float 12.);
+                       ];
+                   ] );
              ])
       in
       Alcotest.(check bool)
         "invalid parameters" true
-        (response_has_error_code (-32602)
+        (rejects_arguments
            (Mcp.handle ~service:(Service.make ~store)
               ~identity:(identity user [ "ledger:write" ])
               request)))
@@ -76,7 +103,7 @@ let test_mcp_rejects_bad_jsonrpc_and_provenance_fields () =
            (Mcp.handle ~service ~identity:(identity user []) bad_version));
       Alcotest.(check bool)
         "provenance" true
-        (response_has_error_code (-32602)
+        (rejects_arguments
            (Mcp.handle ~service
               ~identity:(identity user [ "ledger:write" ])
               source_argument)))
@@ -226,7 +253,7 @@ let test_zero_argument_tools () =
           Alcotest.(check bool)
             (name ^ " rejects unknown fields")
             true
-            (response_has_error_code (-32602)
+            (rejects_arguments
                (run [ ("arguments", `Assoc [ ("unexpected", `Bool true) ]) ]));
           List.iter
             ~f:(fun arguments ->
@@ -240,10 +267,15 @@ let test_zero_argument_tools () =
                 List.Assoc.find_exn fields ~equal:String.equal key
               in
               match name with
-              | "get_latest_weight" ->
-                  Alcotest.check
-                    (Alcotest.testable Yojson.Safe.pp Yojson.Safe.equal)
-                    "latest weight" (`Float 70.) (member "weight_kg")
+              | "get_context" -> (
+                  match member "latest_weight" with
+                  | `Assoc weight ->
+                      Alcotest.check
+                        (Alcotest.testable Yojson.Safe.pp Yojson.Safe.equal)
+                        "latest weight" (`Float 70.)
+                        (List.Assoc.find_exn weight ~equal:String.equal
+                           "weight_kg")
+                  | _ -> Alcotest.fail "missing latest weight")
               | "get_withings_status" ->
                   Alcotest.check
                     (Alcotest.testable Yojson.Safe.pp Yojson.Safe.equal)
@@ -264,7 +296,7 @@ let test_zero_argument_tools () =
                   | _ -> Alcotest.fail "missing authorization URL"))
             [ []; [ ("arguments", `Assoc []) ] ])
         [
-          "get_latest_weight";
+          "get_context";
           "begin_withings_connection";
           "get_withings_status";
           "disconnect_withings";
@@ -274,24 +306,28 @@ let test_update_meal_partial_patch_leaves_other_fields_unchanged () =
   Test_support.with_store (fun store user ->
       let service = Service.make ~store in
       let meal =
-        Option.value_exn
-          (Result.ok
-             (Test_support.record_meal_raw service ~user
-                (Test_support.meal_input ())))
+        Test_support.only_item
+          (Option.value_exn
+             (Result.ok
+                (Test_support.record_meal_raw service ~user
+                   (Test_support.meal_input ()))))
       in
       let response =
         Mcp.handle ~service
           ~identity:(identity user [ "ledger:write" ])
-          (call "update_meal"
+          (call "update_meal_item"
              (`Assoc
                 [
-                  ("id", `String (Meal_id.to_string meal.id));
+                  ("id", `String (Meal_item_id.to_string meal.id));
                   ("confidence", `Float 0.5);
                 ]))
       in
       let updated =
         match result_member "structuredContent" response with
-        | Some (`Assoc fields) -> fields
+        | Some (`Assoc fields) -> (
+            match List.Assoc.find fields ~equal:String.equal "items" with
+            | Some (`List [ `Assoc item ]) -> item
+            | _ -> Alcotest.fail "expected one item")
         | _ -> Alcotest.fail "missing structuredContent"
       in
       Alcotest.(check (option string))
@@ -315,26 +351,21 @@ let test_update_meal_partial_patch_leaves_other_fields_unchanged () =
         | Some (`Float v) -> Some v
         | _ -> None))
 
-let test_get_daily_totals_defaults_to_today_and_respects_scope () =
+let test_get_context_respects_scope () =
   Test_support.with_store (fun store user ->
       let service = Service.make ~store in
-      ignore
-        (Option.value_exn
-           (Result.ok
-              (Test_support.record_meal_raw service ~user
-                 (Test_support.meal_input ()))));
       Alcotest.(check bool)
         "read allowed with omitted arguments" true
         (response_has_successful_payload
            (Mcp.handle ~service
               ~identity:(identity user [ "ledger:read" ])
-              (call "get_daily_totals" (`Assoc []))));
+              (call "get_context" (`Assoc []))));
       Alcotest.(check bool)
         "write forbidden" true
         (is_forbidden
            (Mcp.handle ~service
               ~identity:(identity user [ "ledger:write" ])
-              (call "get_daily_totals" (`Assoc [])))))
+              (call "get_context" (`Assoc [])))))
 
 let json =
   Alcotest.testable (Yojson.Safe.pretty_print ?std:None) Yojson.Safe.equal
@@ -380,14 +411,15 @@ let check_tool_error message fragment response =
         true (contains text fragment)
   | None -> Alcotest.fail (message ^ ": expected an isError tool result")
 
-let test_get_daily_totals_explains_a_malformed_date () =
+let test_range_tools_explain_a_malformed_date () =
   Test_support.with_store (fun store user ->
       let service = Service.make ~store in
       check_tool_error "invalid date explained" "expected YYYY-MM-DD"
         (Mcp.handle ~service ~identity:(read_identity user)
-           (call "get_daily_totals" (`Assoc [ ("date", `String "not-a-date") ]))))
+           (call "get_daily_series"
+              (`Assoc [ ("from_date", `String "not-a-date") ]))))
 
-let test_get_daily_totals_uses_the_requested_timezone () =
+let test_daily_series_uses_the_requested_timezone () =
   Test_support.with_store (fun store user ->
       let service = Service.make ~store in
       let eaten_at =
@@ -400,31 +432,48 @@ let test_get_daily_totals_uses_the_requested_timezone () =
               (Test_support.record_meal_raw service ~user
                  (Test_support.meal_input ~eaten_at ()))));
       let totals arguments =
-        let fields =
-          structured_content
-            (Mcp.handle ~service ~identity:(read_identity user)
-               (call "get_daily_totals" (`Assoc arguments)))
-        in
-        ( field "date" fields,
-          field "meal_count" fields,
-          field "calories_kcal" fields )
+        match
+          field "days"
+            (structured_content
+               (Mcp.handle ~service ~identity:(read_identity user)
+                  (call "get_daily_series" (`Assoc arguments))))
+        with
+        | `List [ `Assoc fields ] ->
+            ( field "date" fields,
+              field "meal_count" fields,
+              field "calories_kcal" fields )
+        | _ -> Alcotest.fail "expected one day"
+      in
+      let day date =
+        [ ("from_date", `String date); ("to_date", `String date) ]
       in
       Alcotest.(check (triple json json json))
         "utc day"
         (`String "2026-07-14", `Int 1, `Int 250)
-        (totals [ ("date", `String "2026-07-14") ]);
+        (totals (day "2026-07-14"));
       Alcotest.(check (triple json json json))
         "unlogged day is unknown, not zero"
         (`String "2026-07-15", `Int 0, `Null)
-        (totals [ ("date", `String "2026-07-15") ]);
+        (totals (day "2026-07-15"));
       Alcotest.(check (triple json json json))
         "stockholm day"
         (`String "2026-07-15", `Int 1, `Int 250)
-        (totals
-           [
-             ("date", `String "2026-07-15");
-             ("timezone", `String "Europe/Stockholm");
-           ]))
+        (totals (("timezone", `String "Europe/Stockholm") :: day "2026-07-15"));
+      ignore
+        (successful_tool_payload
+           (Mcp.handle ~service
+              ~identity:(identity user [ "ledger:write" ])
+              (call "set_goals"
+                 (`Assoc
+                    [
+                      ("timezone", `String "Europe/Stockholm");
+                      ("weekday_calorie_target_kcal", `Int 1750);
+                      ("weekend_calorie_target_kcal", `Int 1950);
+                    ]))));
+      Alcotest.(check (triple json json json))
+        "goals timezone is the default"
+        (`String "2026-07-15", `Int 1, `Int 250)
+        (totals (day "2026-07-15")))
 
 let test_get_daily_series_returns_intake_and_weight_per_day () =
   Test_support.with_store (fun store user ->
@@ -523,7 +572,7 @@ let test_get_daily_series_returns_intake_and_weight_per_day () =
                  (`Assoc [ ("from_date", `String "2026-07-01") ]))));
       Alcotest.(check bool)
         "from_date required" true
-        (response_has_error_code (-32602)
+        (rejects_arguments
            (Mcp.handle ~service ~identity:(read_identity user)
               (call "get_daily_series" (`Assoc [])))))
 
@@ -554,13 +603,16 @@ let test_range_tools_explain_bad_arguments () =
              ("to_date", `String "2026-07-01");
            ]);
       check_tool_error "nonpositive target"
-        "calorie_target_kcal must be positive"
-        (handle "get_summary"
-           [
-             ("from_date", `String "2026-07-01");
-             ("to_date", `String "2026-07-02");
-             ("calorie_target_kcal", `Int 0);
-           ]))
+        "weekday_calorie_target_kcal must be positive"
+        (Mcp.handle ~service
+           ~identity:(identity user [ "ledger:write" ])
+           (call "set_goals"
+              (`Assoc
+                 [
+                   ("timezone", `String "UTC");
+                   ("weekday_calorie_target_kcal", `Int 0);
+                   ("weekend_calorie_target_kcal", `Int 1950);
+                 ]))))
 
 let test_get_summary_reports_averages_targets_and_trend () =
   Test_support.with_store (fun store user ->
@@ -598,12 +650,23 @@ let test_get_summary_reports_averages_targets_and_trend () =
           (Mcp.handle ~service ~identity:(read_identity user)
              (call "get_summary" (`Assoc arguments)))
       in
+      ignore
+        (successful_tool_payload
+           (Mcp.handle ~service
+              ~identity:(identity user [ "ledger:write" ])
+              (call "set_goals"
+                 (`Assoc
+                    [
+                      ("timezone", `String "UTC");
+                      ("weekday_calorie_target_kcal", `Int 300);
+                      ("weekend_calorie_target_kcal", `Int 400);
+                      ("target_weight_kg", `Int 70);
+                    ]))));
       let fields =
         summary
           [
             ("from_date", `String "2026-07-01");
             ("to_date", `String "2026-07-10");
-            ("calorie_target_kcal", `Int 300);
           ]
       in
       Alcotest.(check json) "days" (`Int 10) (field "day_count" fields);
@@ -614,9 +677,33 @@ let test_get_summary_reports_averages_targets_and_trend () =
         "average" (`Float 250.0)
         (field "avg_calories_kcal" fields);
       Alcotest.(check json)
-        "calorie target echoed with its count"
-        (`Assoc [ ("target_kcal", `Int 300); ("days_at_or_under", `Int 1) ])
+        "weekday target met, 50 kcal under"
+        (`Assoc
+           [
+             ("days_at_or_under", `Int 1); ("avg_vs_target_kcal", `Float (-50.));
+           ])
         (field "calorie_target" fields);
+      (match field "target_weight" fields with
+      | `Assoc target -> (
+          match
+            (field "remaining_kg" target, field "weeks_to_target" target)
+          with
+          | `Float remaining, `Float weeks ->
+              Alcotest.(check (float 1e-9)) "remaining" 9.2 remaining;
+              Alcotest.(check (float 1e-6))
+                "weeks at 0.7 kg/week" (9.2 /. 0.7) weeks
+          | _ -> Alcotest.fail "target weight fields")
+      | _ -> Alcotest.fail "no target weight");
+      (match field "previous_period" fields with
+      | `Assoc previous ->
+          Alcotest.(check (pair json json))
+            "previous period is the ten days before"
+            (`String "2026-06-21", `String "2026-06-30")
+            (field "from_date" previous, field "to_date" previous);
+          Alcotest.(check json)
+            "nothing logged then" (`Int 0)
+            (field "logged_day_count" previous)
+      | _ -> Alcotest.fail "no previous period");
       Alcotest.(check json)
         "no protein target" `Null
         (field "protein_target" fields);
@@ -649,19 +736,24 @@ let test_get_summary_reports_averages_targets_and_trend () =
            ])
         (field "implied_maintenance" unlogged))
 
-let test_get_latest_weight_returns_not_found_when_empty () =
+let test_get_context_is_empty_without_records () =
   Test_support.with_store (fun store user ->
       let service = Service.make ~store in
-      let response =
-        Mcp.handle ~service
-          ~identity:(identity user [ "ledger:read" ])
-          (call "get_latest_weight" (`Assoc []))
+      let fields =
+        structured_content
+          (Mcp.handle ~service
+             ~identity:(identity user [ "ledger:read" ])
+             (call "get_context" (`Assoc [])))
       in
-      Alcotest.(check bool)
-        "record not found result" true
-        (match result_member "isError" response with
-        | Some (`Bool true) -> true
-        | _ -> false))
+      Alcotest.(check (list json))
+        "no goals, weight or window"
+        [ `Null; `Null; `Null; `String "UTC" ]
+        [
+          field "goals" fields;
+          field "latest_weight" fields;
+          field "eating_window" fields;
+          field "timezone" fields;
+        ])
 
 let test_combined_scopes_allow_their_union () =
   Test_support.with_store (fun store user ->
@@ -884,14 +976,19 @@ let test_tool_list_is_exact () =
       Alcotest.(check (list string))
         "approved tools"
         [
+          "get_context";
+          "set_goals";
           "save_product";
           "search_products";
+          "correct_meals_from_product";
           "record_meal";
           "get_meal";
           "query_meals";
           "update_meal";
           "delete_meal";
-          "get_daily_totals";
+          "add_meal_item";
+          "update_meal_item";
+          "delete_meal_item";
           "get_daily_series";
           "get_summary";
           "record_weight";
@@ -899,7 +996,6 @@ let test_tool_list_is_exact () =
           "query_weights";
           "update_weight";
           "delete_weight";
-          "get_latest_weight";
           "begin_withings_connection";
           "get_withings_status";
           "disconnect_withings";
@@ -977,6 +1073,8 @@ let test_product_schemas () =
               "protein_g";
               "carbs_g";
               "fat_g";
+              "basis_quantity";
+              "basis_unit";
               "source";
             ] );
           ("search_products", [ "query" ], [ "query"; "limit" ]);
@@ -1097,9 +1195,9 @@ let test_product_argument_validation_and_scopes () =
       in
       let invalid name args =
         Alcotest.(check bool)
-          (name ^ " Invalid_input remains -32602")
+          (name ^ " rejects the arguments with an explanation")
           true
-          (response_has_error_code (-32602)
+          (rejects_arguments
              (handle
                 [ "ledger:read"; "ledger:write" ]
                 (call name (`Assoc args))))
@@ -1121,7 +1219,7 @@ let test_product_argument_validation_and_scopes () =
             [ call name (`Assoc args); omitted_call name ];
           Alcotest.(check bool)
             "omitted required arguments" true
-            (response_has_error_code (-32602)
+            (rejects_arguments
                (handle [ "ledger:read"; "ledger:write" ] (omitted_call name))))
         [ "save_product"; "search_products" ];
       List.iter
@@ -1230,7 +1328,11 @@ let test_query_meals_search_composes_with_dates_and_limit () =
         | `List rows ->
             List.map
               ~f:(function
-                | `Assoc row -> field "description" row | _ -> assert false)
+                | `Assoc row -> (
+                    match field "items" row with
+                    | `List [ `Assoc item ] -> field "description" item
+                    | _ -> assert false)
+                | _ -> assert false)
               rows
         | _ -> assert false
       in
@@ -1247,12 +1349,11 @@ let test_query_meals_search_composes_with_dates_and_limit () =
         ~f:(fun value ->
           Alcotest.(check bool)
             "invalid meal search" true
-            (response_has_error_code (-32602)
-               (handle "query_meals" [ ("search", value) ])))
+            (rejects_arguments (handle "query_meals" [ ("search", value) ])))
         [ `String " "; `Int 1; `Null ];
       Alcotest.(check bool)
         "weight search rejected" true
-        (response_has_error_code (-32602)
+        (rejects_arguments
            (handle "query_weights" [ ("search", `String "whey") ])))
 
 let test_calendar_endpoint_mcp date timezone () =
@@ -1268,12 +1369,9 @@ let test_calendar_endpoint_mcp date timezone () =
          with
         | Sqlite3.Rc.OK -> true
         | _ -> false);
-      List.iter [ "get_daily_totals"; "get_daily_series"; "get_summary" ]
-        ~f:(fun name ->
+      List.iter [ "get_daily_series"; "get_summary" ] ~f:(fun name ->
           let dates =
-            if String.equal name "get_daily_totals" then
-              [ ("date", `String date) ]
-            else [ ("from_date", `String date); ("to_date", `String date) ]
+            [ ("from_date", `String date); ("to_date", `String date) ]
           in
           let response =
             Mcp.handle ~service:(Service.make ~store)
@@ -1313,13 +1411,12 @@ let () =
           Alcotest.test_case
             "update_meal partial patch leaves other fields unchanged" `Quick
             test_update_meal_partial_patch_leaves_other_fields_unchanged;
-          Alcotest.test_case
-            "get_daily_totals defaults to today and respects scope" `Quick
-            test_get_daily_totals_defaults_to_today_and_respects_scope;
-          Alcotest.test_case "get_daily_totals explains a malformed date" `Quick
-            test_get_daily_totals_explains_a_malformed_date;
-          Alcotest.test_case "get_daily_totals uses the requested timezone"
-            `Quick test_get_daily_totals_uses_the_requested_timezone;
+          Alcotest.test_case "get_context respects scope" `Quick
+            test_get_context_respects_scope;
+          Alcotest.test_case "range tools explain a malformed date" `Quick
+            test_range_tools_explain_a_malformed_date;
+          Alcotest.test_case "daily series uses the requested timezone" `Quick
+            test_daily_series_uses_the_requested_timezone;
           Alcotest.test_case
             "get_daily_series returns intake and weight per day" `Quick
             test_get_daily_series_returns_intake_and_weight_per_day;
@@ -1327,8 +1424,8 @@ let () =
             test_range_tools_explain_bad_arguments;
           Alcotest.test_case "get_summary reports averages, targets and trend"
             `Quick test_get_summary_reports_averages_targets_and_trend;
-          Alcotest.test_case "get_latest_weight is not found when empty" `Quick
-            test_get_latest_weight_returns_not_found_when_empty;
+          Alcotest.test_case "get_context is empty without records" `Quick
+            test_get_context_is_empty_without_records;
           Alcotest.test_case
             "Withings scope is isolated and requires configuration" `Quick
             test_withings_scope_isolated_and_requires_configuration;

@@ -2,46 +2,54 @@ module Domain_error = Error
 open Base
 module Error = Domain_error
 
+let ( let* ) result f = Result.bind result ~f
+
 type t = {
   id : Meal_id.t;
   user_id : User_id.t;
   eaten_at : Ptime.t;
-  description : string;
-  calories_kcal : int;
-  protein_g : float;
-  carbs_g : float option;
-  fat_g : float option;
-  confidence : float option;
-  estimate_source : string option;
-  notes : string option;
+  label : string option;
+  items : Meal_item.t list;
   created_at : Ptime.t;
   updated_at : Ptime.t;
   deleted_at : Ptime.t option;
 }
 
-type patch = {
-  description : string option;
-  calories_kcal : int option;
-  protein_g : float option;
-  carbs_g : float option;
-  fat_g : float option;
-  confidence : float option;
-  estimate_source : string option;
-  notes : string option;
-  eaten_at : Ptime.t option;
-}
+type patch = { eaten_at : Ptime.t option; label : string option }
 
-type create = {
-  description : string;
-  calories_kcal : int;
-  protein_g : float;
-  carbs_g : float option;
-  fat_g : float option;
-  confidence : float option;
-  estimate_source : string option;
-  notes : string option;
-  eaten_at : Ptime.t option;
-}
+let validate_label = function
+  | Some label when String.is_empty (String.strip label) ->
+      Error (Error.Rejected "label must not be blank")
+  | _ -> Ok ()
+
+module Patch = struct
+  type raw = patch
+  type t = raw
+
+  let of_raw (input : raw) =
+    let* () = validate_label input.label in
+    Ok input
+
+  let to_raw input = input
+end
+
+let of_storage ~id ~user_id ~eaten_at ~label ~items ~created_at ~updated_at
+    ~deleted_at =
+  let* () = validate_label label in
+  if List.is_empty items then
+    Error (Error.Storage_decoding "meal without items")
+  else
+    Ok
+      {
+        id;
+        user_id;
+        eaten_at;
+        label;
+        items;
+        created_at;
+        updated_at;
+        deleted_at;
+      }
 
 type totals = {
   meal_count : int;
@@ -51,105 +59,46 @@ type totals = {
   fat_g : float option;
 }
 
-let ( let* ) result f = Result.bind result ~f
+let finite value =
+  if Float.is_finite value then Ok value
+  else Error (Error.Unrepresentable_result Daily_meals)
 
-let nonblank field value =
-  if String.is_empty (String.strip value) then
-    Error (Error.Invalid_field { field; reason = Blank })
-  else Ok ()
+let add_calories left right =
+  if left > Int.max_value - right then
+    Error (Error.Numeric_overflow Calories_kcal)
+  else Ok (left + right)
 
-let grams field value =
-  Result.map_error (Nutrition.Grams.of_float value) ~f:(function
-    | Error.Invalid_field { reason; _ } ->
-        Error.Invalid_field { field = Numeric field; reason }
-    | error -> error)
+let add_optional left right =
+  match (left, right) with
+  | None, other | other, None -> Ok other
+  | Some a, Some b -> Result.map (finite (a +. b)) ~f:Option.some
 
-let optional f = function
-  | None -> Ok ()
-  | Some value -> Result.map (f value) ~f:(fun _ -> ())
-
-let validate_create (input : create) =
-  let* () = nonblank Description input.description in
-  let* _ = Nutrition.Calories.of_int input.calories_kcal in
-  let* _ = grams Protein_g input.protein_g in
-  let* () = optional (grams Carbs_g) input.carbs_g in
-  let* () = optional (grams Fat_g) input.fat_g in
-  optional Nutrition.Confidence.of_float input.confidence
-
-let validate_patch (input : patch) =
-  let* () = optional (nonblank Description) input.description in
-  let* () = optional Nutrition.Calories.of_int input.calories_kcal in
-  let* () = optional (grams Protein_g) input.protein_g in
-  let* () = optional (grams Carbs_g) input.carbs_g in
-  let* () = optional (grams Fat_g) input.fat_g in
-  optional Nutrition.Confidence.of_float input.confidence
-
-let empty_patch : patch =
-  {
-    description = None;
-    calories_kcal = None;
-    protein_g = None;
-    carbs_g = None;
-    fat_g = None;
-    confidence = None;
-    estimate_source = None;
-    notes = None;
-    eaten_at = None;
-  }
-
-module Create = struct
-  type raw = create
-  type t = raw
-
-  let of_raw input =
-    let* () = validate_create input in
-    Ok input
-
-  let to_raw input = input
-end
-
-module Patch = struct
-  type raw = patch
-  type t = raw
-
-  let of_raw input =
-    let* () = validate_patch input in
-    Ok input
-
-  let to_raw input = input
-end
-
-let of_storage ~id ~user_id ~eaten_at ~description ~calories_kcal ~protein_g
-    ~carbs_g ~fat_g ~confidence ~estimate_source ~notes ~created_at ~updated_at
-    ~deleted_at =
-  let* () =
-    validate_create
-      {
-        description;
-        calories_kcal;
-        protein_g;
-        carbs_g;
-        fat_g;
-        confidence;
-        estimate_source;
-        notes;
-        eaten_at = Some eaten_at;
-      }
-  in
+let add_totals left right =
+  let* calories_kcal = add_calories left.calories_kcal right.calories_kcal in
+  let* protein_g = finite (left.protein_g +. right.protein_g) in
+  let* carbs_g = add_optional left.carbs_g right.carbs_g in
+  let* fat_g = add_optional left.fat_g right.fat_g in
   Ok
     {
-      id;
-      user_id;
-      eaten_at;
-      description;
+      meal_count = left.meal_count + right.meal_count;
       calories_kcal;
       protein_g;
       carbs_g;
       fat_g;
-      confidence;
-      estimate_source;
-      notes;
-      created_at;
-      updated_at;
-      deleted_at;
     }
+
+let item_totals meal_count (item : Meal_item.t) =
+  {
+    meal_count;
+    calories_kcal = item.calories_kcal;
+    protein_g = item.protein_g;
+    carbs_g = item.carbs_g;
+    fat_g = item.fat_g;
+  }
+
+let totals meal =
+  match meal.items with
+  | [] -> Error (Error.Storage_decoding "meal without items")
+  | first :: rest ->
+      List.fold_result rest ~init:(item_totals 1 first) ~f:(fun sum item ->
+          add_totals sum (item_totals 0 item))

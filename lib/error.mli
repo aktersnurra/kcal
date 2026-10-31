@@ -56,5 +56,8 @@ type t =
   | Reversed_date_range of { from_date : string; to_date : string }
   | Date_range_too_long of { day_count : int; max_day_count : int }
   | Nonpositive_argument of string
+  | Rejected of string
+      (** A well-formed request the ledger cannot honour; the message says what
+          to change. *)
 
 val to_string : t -> string

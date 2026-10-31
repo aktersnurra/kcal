@@ -19,3 +19,6 @@ val days_between : first:t -> last:t -> int
 (** [last] minus [first], in days; negative when [last] is earlier. *)
 
 val midnight_utc : t -> Ptime.t
+
+val is_weekend : t -> bool
+(** Saturday or Sunday. *)

@@ -1,3 +1,4 @@
+module Domain_error = Error
 open Base
 
 let close_database store =
@@ -82,26 +83,62 @@ let with_exclusive_lock setup f =
             | _ -> false);
           f store user value))
 
+(* The fields of a one-item meal, as the old flat record. *)
+type meal_input = {
+  description : string;
+  calories_kcal : int;
+  protein_g : float;
+  carbs_g : float option;
+  fat_g : float option;
+  confidence : float option;
+  estimate_source : string option;
+  notes : string option;
+  eaten_at : Ptime.t option;
+}
+
 let meal_input ?eaten_at () =
-  Meal.
-    {
-      description = "Soup";
-      calories_kcal = 250;
-      protein_g = 12.0;
-      carbs_g = Some 20.0;
-      fat_g = Some 5.0;
-      confidence = Some 0.8;
-      estimate_source = Some "label";
-      notes = Some "lunch";
-      eaten_at;
-    }
+  {
+    description = "Soup";
+    calories_kcal = 250;
+    protein_g = 12.0;
+    carbs_g = Some 20.0;
+    fat_g = Some 5.0;
+    confidence = Some 0.8;
+    estimate_source = Some "label";
+    notes = Some "lunch";
+    eaten_at;
+  }
 
-let create_meal_raw store ~user raw =
-  Result.bind (Meal.Create.of_raw raw) ~f:(Store_sqlite.create_meal store ~user)
+let item_of_input (input : meal_input) : Meal_item.create =
+  {
+    description = input.description;
+    calories_kcal = input.calories_kcal;
+    protein_g = input.protein_g;
+    carbs_g = input.carbs_g;
+    fat_g = input.fat_g;
+    confidence = input.confidence;
+    estimate_source = input.estimate_source;
+    notes = input.notes;
+  }
 
-let update_meal_raw store ~user id raw =
-  Result.bind (Meal.Patch.of_raw raw)
-    ~f:(Store_sqlite.update_meal store ~user id)
+let create_meal_raw store ~user (input : meal_input) =
+  Result.bind
+    (Meal_item.Create.of_raw (item_of_input input))
+    ~f:(fun item ->
+      Result.map ~f:fst
+        (Store_sqlite.create_meal store ~user ~eaten_at:input.eaten_at
+           ~label:None
+           [ (item, None) ]))
+
+let only_item (meal : Meal.t) =
+  match meal.items with
+  | [ item ] -> item
+  | _ -> Alcotest.fail "expected a one-item meal"
+
+let update_only_item_raw store ~user (meal : Meal.t) raw =
+  Result.bind
+    (Meal_item.Patch.of_raw raw)
+    ~f:(Store_sqlite.update_item store ~user (only_item meal).id)
 
 let save_product_raw store ~user ~id raw =
   Result.bind
@@ -129,8 +166,13 @@ let persist_withings_import_raw store ~user ~connection ~rows ~cursor =
       Store_sqlite.persist_withings_import store ~user ~connection ~rows
         ~expected_cursor:connection.Withings_connection.sync_cursor ~cursor)
 
-let record_meal_raw service ~user raw =
-  Result.bind (Meal.Create.of_raw raw) ~f:(Service.record_meal service ~user)
+let record_meal_raw service ~user (input : meal_input) =
+  Result.bind
+    (Meal_item.Create.of_raw (item_of_input input))
+    ~f:(fun item ->
+      Result.map ~f:fst
+        (Service.record_meal service ~user ~eaten_at:input.eaten_at ~label:None
+           [ Meal_item.Estimated item ]))
 
 let record_manual_weigh_in_raw service ~user raw =
   Result.bind
@@ -159,10 +201,8 @@ let equal_product (left : Product.t) (right : Product.t) =
   && Ptime.equal left.created_at right.created_at
   && Ptime.equal left.updated_at right.updated_at
 
-let equal_meal (left : Meal.t) (right : Meal.t) =
-  Meal_id.equal left.id right.id
-  && User_id.equal left.user_id right.user_id
-  && Ptime.equal left.eaten_at right.eaten_at
+let equal_item (left : Meal_item.t) (right : Meal_item.t) =
+  Meal_item_id.equal left.id right.id
   && String.equal left.description right.description
   && Int.equal left.calories_kcal right.calories_kcal
   && Float.equal left.protein_g right.protein_g
@@ -171,6 +211,15 @@ let equal_meal (left : Meal.t) (right : Meal.t) =
   && Option.equal Float.equal left.confidence right.confidence
   && Option.equal String.equal left.estimate_source right.estimate_source
   && Option.equal String.equal left.notes right.notes
+  && Ptime.equal left.created_at right.created_at
+  && Ptime.equal left.updated_at right.updated_at
+
+let equal_meal (left : Meal.t) (right : Meal.t) =
+  Meal_id.equal left.id right.id
+  && User_id.equal left.user_id right.user_id
+  && Ptime.equal left.eaten_at right.eaten_at
+  && Option.equal String.equal left.label right.label
+  && List.equal equal_item left.items right.items
   && Ptime.equal left.created_at right.created_at
   && Ptime.equal left.updated_at right.updated_at
   && Option.equal Ptime.equal left.deleted_at right.deleted_at
@@ -199,7 +248,11 @@ let product =
 
 let meal =
   Alcotest.testable
-    (fun fmt value -> Yojson.Safe.pretty_print fmt (Mcp_json.meal_json value))
+    (fun fmt value ->
+      match Mcp_json.meal_json value with
+      | Ok json -> Yojson.Safe.pretty_print fmt json
+      | Error error ->
+          Stdlib.Format.pp_print_string fmt (Domain_error.to_string error))
     equal_meal
 
 let exact_float = Alcotest.testable Stdlib.Format.pp_print_float Float.equal

@@ -2,29 +2,110 @@ open Base
 
 let json_option f = function None -> `Null | Some value -> f value
 
-let meal_json (meal : Meal.t) =
+let product_link_json =
+  json_option (fun (link : Meal_item.product_link) ->
+      `Assoc
+        [
+          ("product_id", `String (Product_id.to_string link.product_id));
+          ("product_version", `Int link.product_version);
+          ("quantity", `Float link.quantity);
+          ("unit", `String link.unit);
+        ])
+
+let estimate_fields ~description ~calories_kcal ~protein_g ~carbs_g ~fat_g
+    ~confidence ~estimate_source ~notes ~product =
+  [
+    ("description", `String description);
+    ("calories_kcal", `Int calories_kcal);
+    ("protein_g", `Float protein_g);
+    ("carbs_g", json_option (fun v -> `Float v) carbs_g);
+    ("fat_g", json_option (fun v -> `Float v) fat_g);
+    ("confidence", json_option (fun v -> `Float v) confidence);
+    ("estimate_source", json_option (fun v -> `String v) estimate_source);
+    ("notes", json_option (fun v -> `String v) notes);
+    ("product", product_link_json product);
+  ]
+
+let revision_json (revision : Meal_item.revision) =
+  let previous = revision.previous in
   `Assoc
     [
-      ("id", `String (Meal_id.to_string meal.id));
-      ("eaten_at", `String (Time.to_utc_string meal.eaten_at));
-      ("description", `String meal.description);
-      ("calories_kcal", `Int meal.calories_kcal);
-      ("protein_g", `Float meal.protein_g);
-      ("carbs_g", json_option (fun v -> `Float v) meal.carbs_g);
-      ("fat_g", json_option (fun v -> `Float v) meal.fat_g);
-      ("confidence", json_option (fun v -> `Float v) meal.confidence);
-      ("estimate_source", json_option (fun v -> `String v) meal.estimate_source);
-      ("notes", json_option (fun v -> `String v) meal.notes);
-      ("created_at", `String (Time.to_utc_string meal.created_at));
-      ("updated_at", `String (Time.to_utc_string meal.updated_at));
+      ("revision", `Int revision.revision);
+      ("revised_at", `String (Time.to_utc_string revision.revised_at));
+      ("reason", json_option (fun v -> `String v) revision.reason);
+      ( "previous",
+        `Assoc
+          (estimate_fields ~description:previous.description
+             ~calories_kcal:previous.calories_kcal ~protein_g:previous.protein_g
+             ~carbs_g:previous.carbs_g ~fat_g:previous.fat_g
+             ~confidence:previous.confidence
+             ~estimate_source:previous.estimate_source ~notes:previous.notes
+             ~product:previous.product) );
     ]
+
+let item_json ?revisions (item : Meal_item.t) =
+  `Assoc
+    (("id", `String (Meal_item_id.to_string item.id))
+     :: estimate_fields ~description:item.description
+          ~calories_kcal:item.calories_kcal ~protein_g:item.protein_g
+          ~carbs_g:item.carbs_g ~fat_g:item.fat_g ~confidence:item.confidence
+          ~estimate_source:item.estimate_source ~notes:item.notes
+          ~product:item.product
+    @ [
+        ("created_at", `String (Time.to_utc_string item.created_at));
+        ("updated_at", `String (Time.to_utc_string item.updated_at));
+      ]
+    @
+    match revisions with
+    | None -> []
+    | Some revisions ->
+        [ ("revisions", `List (List.map revisions ~f:revision_json)) ])
+
+(* Totals are derived from the items, so a meal fails to render rather than
+   reporting a sum that overflowed. *)
+let meal_json_with ~item (meal : Meal.t) =
+  Result.map (Meal.totals meal) ~f:(fun (totals : Meal.totals) ->
+      `Assoc
+        [
+          ("id", `String (Meal_id.to_string meal.id));
+          ("eaten_at", `String (Time.to_utc_string meal.eaten_at));
+          ("label", json_option (fun v -> `String v) meal.label);
+          ("calories_kcal", `Int totals.calories_kcal);
+          ("protein_g", `Float totals.protein_g);
+          ("carbs_g", json_option (fun v -> `Float v) totals.carbs_g);
+          ("fat_g", json_option (fun v -> `Float v) totals.fat_g);
+          ("items", `List (List.map meal.items ~f:item));
+          ("created_at", `String (Time.to_utc_string meal.created_at));
+          ("updated_at", `String (Time.to_utc_string meal.updated_at));
+        ])
+
+let meal_json meal = meal_json_with ~item:(fun item -> item_json item) meal
+
+let with_field json field =
+  match json with `Assoc fields -> `Assoc (fields @ [ field ]) | json -> json
+
+let meal_with_revisions_json meal revisions =
+  meal_json_with meal ~item:(fun (item : Meal_item.t) ->
+      item_json item
+        ~revisions:
+          (List.filter_map revisions ~f:(fun (item_id, revision) ->
+               Option.some_if (Meal_item_id.equal item_id item.id) revision)))
 
 let product_json (product : Product.t) =
   `Assoc
     [
       ("id", `String (Product_id.to_string product.id));
+      ("version", `Int product.version);
       ("name", `String product.name);
       ("basis", `String product.basis);
+      ( "basis_quantity",
+        json_option
+          (fun (serving : Product.serving) -> `Float serving.quantity)
+          product.serving );
+      ( "basis_unit",
+        json_option
+          (fun (serving : Product.serving) -> `String serving.unit)
+          product.serving );
       ("calories_kcal", `Int product.calories_kcal);
       ("protein_g", `Float product.protein_g);
       ("carbs_g", json_option (fun v -> `Float v) product.carbs_g);
@@ -120,48 +201,6 @@ let implied_maintenance_json = function
               ("required_days", `Float required_days);
             ])
 
-let summary_json zone range (summary : Summary.t) =
-  let logged = summary.logged_intake in
-  `Assoc
-    (range_json zone range
-    @ [
-        ("day_count", `Int summary.day_count);
-        ( "logged_day_count",
-          `Int
-            (Option.value_map ~default:0
-               ~f:(fun (l : Summary.logged_intake) -> l.logged_day_count)
-               logged) );
-        ( "avg_calories_kcal",
-          json_option
-            (fun (l : Summary.logged_intake) -> `Float l.avg_calories_kcal)
-            logged );
-        ( "avg_protein_g",
-          json_option
-            (fun (l : Summary.logged_intake) -> `Float l.avg_protein_g)
-            logged );
-        ( "calorie_target",
-          json_option
-            (fun (result : Summary.Calorie_target.t Summary.target_result) ->
-              `Assoc
-                [
-                  ("target_kcal", `Int (result.target :> int));
-                  ("days_at_or_under", `Int result.days_met);
-                ])
-            summary.calorie_target );
-        ( "protein_target",
-          json_option
-            (fun (result : Summary.Protein_target.t Summary.target_result) ->
-              `Assoc
-                [
-                  ("target_g", `Float (result.target :> float));
-                  ("days_at_or_over", `Int result.days_met);
-                ])
-            summary.protein_target );
-        ("weight_trend", weight_trend_json summary.weight_trend);
-        ( "implied_maintenance",
-          implied_maintenance_json summary.implied_maintenance );
-      ])
-
 let weight_json (weight : Weigh_in.t) =
   `Assoc
     [
@@ -171,6 +210,254 @@ let weight_json (weight : Weigh_in.t) =
       ("source", `String (Weigh_in.source_to_string weight.source));
       ("created_at", `String (Time.to_utc_string weight.created_at));
       ("updated_at", `String (Time.to_utc_string weight.updated_at));
+    ]
+
+let target_weight_json =
+  json_option (fun (target : Summary.target_weight) ->
+      `Assoc
+        [
+          ("target_kg", `Float target.target_kg);
+          ("remaining_kg", `Float target.remaining_kg);
+          ("weeks_to_target", json_option float_json target.weeks_to_target);
+        ])
+
+let summary_fields (summary : Summary.t) =
+  let logged = summary.logged_intake in
+  [
+    ("day_count", `Int summary.day_count);
+    ( "logged_day_count",
+      `Int
+        (Option.value_map ~default:0
+           ~f:(fun (l : Summary.logged_intake) -> l.logged_day_count)
+           logged) );
+    ( "avg_calories_kcal",
+      json_option
+        (fun (l : Summary.logged_intake) -> `Float l.avg_calories_kcal)
+        logged );
+    ( "avg_protein_g",
+      json_option
+        (fun (l : Summary.logged_intake) -> `Float l.avg_protein_g)
+        logged );
+    ( "calorie_target",
+      json_option
+        (fun (c : Summary.calorie_adherence) ->
+          `Assoc
+            [
+              ("days_at_or_under", `Int c.days_at_or_under);
+              ("avg_vs_target_kcal", `Float c.avg_vs_target_kcal);
+            ])
+        summary.calorie_target );
+    ( "protein_target",
+      json_option
+        (fun (p : Summary.protein_adherence) ->
+          `Assoc [ ("days_at_or_over", `Int p.days_at_or_over) ])
+        summary.protein_target );
+    ( "eating_window",
+      json_option
+        (fun (w : Summary.window_adherence) ->
+          `Assoc [ ("days_within", `Int w.days_within) ])
+        summary.eating_window );
+    ("weight_trend", weight_trend_json summary.weight_trend);
+    ("target_weight", target_weight_json summary.target_weight);
+    ("implied_maintenance", implied_maintenance_json summary.implied_maintenance);
+  ]
+
+let summary_json zone range (summary : Service.summary) =
+  `Assoc
+    (range_json zone range
+    @ summary_fields summary.current
+    @ [
+        ( "previous_period",
+          json_option
+            (fun (range, summary) ->
+              `Assoc
+                ( range_json zone range
+                |> List.filter ~f:(fun (name, _) ->
+                    not (String.equal name "timezone"))
+                |> fun fields -> fields @ summary_fields summary ))
+            summary.previous );
+      ])
+
+let goals_json (goals : Goals.t) =
+  let window = goals.eating_window in
+  `Assoc
+    [
+      ("timezone", `String (Time.zone_name goals.timezone));
+      ("weekday_calorie_target_kcal", `Int (goals.weekday_calories :> int));
+      ("weekend_calorie_target_kcal", `Int (goals.weekend_calories :> int));
+      ( "protein_target_g",
+        json_option
+          (fun (g : Goals.Protein_target.t) -> `Float (g :> float))
+          goals.protein );
+      ( "eating_window_start",
+        json_option
+          (fun (w : Goals.Eating_window.t) ->
+            `String (Goals.Eating_window.to_string w.start_minute))
+          window );
+      ( "eating_window_end",
+        json_option
+          (fun (w : Goals.Eating_window.t) ->
+            `String (Goals.Eating_window.to_string w.end_minute))
+          window );
+      ( "fasting_hours",
+        json_option
+          (fun w ->
+            `Float
+              (Float.of_int ((24 * 60) - Goals.Eating_window.duration_minutes w)
+              /. 60.))
+          window );
+      ( "target_weight_kg",
+        json_option
+          (fun (kg : Nutrition.Kilograms.t) -> `Float (kg :> float))
+          goals.target_weight_kg );
+      ("notes", json_option (fun text -> `String text) goals.notes);
+    ]
+
+let hours_between earlier later =
+  Ptime.Span.to_float_s (Ptime.diff later earlier) /. 3600.
+
+let context_json (context : Context.t) =
+  let today = context.today in
+  let week_range, week = context.last_week in
+  let month_range, month = context.last_four_weeks in
+  let range_dates range =
+    [
+      ("from_date", `String (Date.to_string (Date_range.first range)));
+      ("to_date", `String (Date.to_string (Date_range.last range)));
+    ]
+  in
+  let totals f = json_option f today.totals in
+  `Assoc
+    [
+      ("now", `String (Time.to_utc_string context.now));
+      ("timezone", `String (Time.zone_name context.zone));
+      ("goals", json_option goals_json context.goals);
+      ( "today",
+        `Assoc
+          [
+            ("date", `String (Date.to_string today.date));
+            ( "meal_count",
+              `Int
+                (Option.value_map today.totals ~default:0
+                   ~f:(fun (t : Meal.totals) -> t.meal_count)) );
+            ( "calories_kcal",
+              totals (fun (t : Meal.totals) -> `Int t.calories_kcal) );
+            ("protein_g", totals (fun (t : Meal.totals) -> `Float t.protein_g));
+            ( "calorie_target_kcal",
+              json_option
+                (fun (t : Goals.Calorie_target.t) -> `Int (t :> int))
+                today.calorie_target );
+            ( "remaining_kcal",
+              json_option (fun v -> `Int v) today.remaining_kcal );
+            ( "remaining_protein_g",
+              json_option float_json today.remaining_protein_g );
+          ] );
+      ( "eating_window",
+        json_option
+          (fun (fasting : Context.fasting) ->
+            let state =
+              match fasting.status with
+              | Goals.Eating_window.Open { closes_at } ->
+                  [
+                    ("open", `Bool true);
+                    ("closes_at", `String (Time.to_utc_string closes_at));
+                  ]
+              | Closed { opens_at } ->
+                  [
+                    ("open", `Bool false);
+                    ("opens_at", `String (Time.to_utc_string opens_at));
+                  ]
+            in
+            `Assoc
+              (state
+              @ [
+                  ( "last_meal_at",
+                    json_option
+                      (fun at -> `String (Time.to_utc_string at))
+                      fasting.last_meal_at );
+                  ( "hours_since_last_meal",
+                    json_option
+                      (fun at -> `Float (hours_between at context.now))
+                      fasting.last_meal_at );
+                ]))
+          context.fasting );
+      ("latest_weight", json_option weight_json context.latest_weight);
+      ("last_7_days", `Assoc (range_dates week_range @ summary_fields week));
+      ( "last_28_days",
+        `Assoc
+          (range_dates month_range
+          @ [
+              ("weight_trend", weight_trend_json month.weight_trend);
+              ("target_weight", target_weight_json month.target_weight);
+              ( "implied_maintenance",
+                implied_maintenance_json month.implied_maintenance );
+            ]) );
+      ( "recent_products",
+        `List
+          (List.map context.recent_products ~f:(fun (product, last_eaten_at) ->
+               match product_json product with
+               | `Assoc fields ->
+                   `Assoc
+                     (fields
+                     @ [
+                         ( "last_eaten_at",
+                           `String (Time.to_utc_string last_eaten_at) );
+                       ])
+               | json -> json)) );
+    ]
+
+let correction_json (correction : Service.product_correction) =
+  let product = correction.product in
+  `Assoc
+    [
+      ("product_id", `String (Product_id.to_string product.id));
+      ("product_version", `Int product.version);
+      ("applied", `Bool correction.applied);
+      ( "items",
+        `List
+          (List.map correction.items
+             ~f:(fun
+                 ( meal_id,
+                   eaten_at,
+                   (item : Meal_item.t),
+                   (portion : Product.portion) )
+               ->
+               `Assoc
+                 [
+                   ("id", `String (Meal_item_id.to_string item.id));
+                   ("meal_id", `String (Meal_id.to_string meal_id));
+                   ("eaten_at", `String (Time.to_utc_string eaten_at));
+                   ( "from_version",
+                     json_option
+                       (fun (link : Meal_item.product_link) ->
+                         `Int link.product_version)
+                       item.product );
+                   ("calories_kcal_before", `Int item.calories_kcal);
+                   ("calories_kcal_after", `Int portion.calories_kcal);
+                   ("protein_g_before", `Float item.protein_g);
+                   ("protein_g_after", `Float portion.protein_g);
+                 ])) );
+      ( "skipped",
+        `List
+          (List.map correction.skipped
+             ~f:(fun (meal_id, (item : Meal_item.t), skip) ->
+               `Assoc
+                 [
+                   ("id", `String (Meal_item_id.to_string item.id));
+                   ("meal_id", `String (Meal_id.to_string meal_id));
+                   ( "reason",
+                     `String
+                       (match skip with
+                       | Service.Unit_changed { logged_unit; current_unit } ->
+                           Printf.sprintf
+                             "logged in %s, but the product is now per %s; \
+                              correct this item with update_meal_item"
+                             logged_unit current_unit
+                       | No_structured_basis ->
+                           "the product no longer has basis_quantity and \
+                            basis_unit; correct this item with \
+                            update_meal_item") );
+                 ])) );
     ]
 
 let complete fields = `Assoc (("resultType", `String "complete") :: fields)
