@@ -9,6 +9,7 @@ let product_link_json =
           ("product_id", `String (Product_id.to_string link.product_id));
           ("product_version", `Int link.product_version);
           ("quantity", `Float link.quantity);
+          ("unit", `String link.unit);
         ])
 
 let estimate_fields ~description ~calories_kcal ~protein_g ~carbs_g ~fat_g
@@ -79,6 +80,9 @@ let meal_json_with ~item (meal : Meal.t) =
         ])
 
 let meal_json meal = meal_json_with ~item:(fun item -> item_json item) meal
+
+let with_field json field =
+  match json with `Assoc fields -> `Assoc (fields @ [ field ]) | json -> json
 
 let meal_with_revisions_json meal revisions =
   meal_json_with meal ~item:(fun (item : Meal_item.t) ->
@@ -431,6 +435,27 @@ let correction_json (correction : Service.product_correction) =
                    ("calories_kcal_after", `Int portion.calories_kcal);
                    ("protein_g_before", `Float item.protein_g);
                    ("protein_g_after", `Float portion.protein_g);
+                 ])) );
+      ( "skipped",
+        `List
+          (List.map correction.skipped
+             ~f:(fun (meal_id, (item : Meal_item.t), skip) ->
+               `Assoc
+                 [
+                   ("id", `String (Meal_item_id.to_string item.id));
+                   ("meal_id", `String (Meal_id.to_string meal_id));
+                   ( "reason",
+                     `String
+                       (match skip with
+                       | Service.Unit_changed { logged_unit; current_unit } ->
+                           Printf.sprintf
+                             "logged in %s, but the product is now per %s; \
+                              correct this item with update_meal_item"
+                             logged_unit current_unit
+                       | No_structured_basis ->
+                           "the product no longer has basis_quantity and \
+                            basis_unit; correct this item with \
+                            update_meal_item") );
                  ])) );
     ]
 

@@ -6,6 +6,7 @@ type product_link = {
   product_id : Product_id.t;
   product_version : int;
   quantity : float;
+  unit : string;
 }
 
 type t = {
@@ -179,3 +180,29 @@ type from_product = {
 }
 
 type entry = Estimated of Create.t | From_product of from_product
+
+let rescale (item : t) ~quantity =
+  match item.product with
+  | None ->
+      Error
+        (Error.Rejected
+           "quantity only applies to an item logged from a product; correct \
+            calories_kcal and the macros instead")
+  | Some _ when not (Float.is_finite quantity && Float.(quantity > 0.)) ->
+      Error (Error.Rejected "quantity must be a positive number")
+  | Some link ->
+      let factor = quantity /. link.quantity in
+      let calories = Float.of_int item.calories_kcal *. factor in
+      if Float.(calories >= of_int Int.max_value) then
+        Error (Error.Numeric_overflow Calories_kcal)
+      else
+        let scale grams = grams *. factor in
+        Ok
+          ( ({
+               calories_kcal = Float.iround_nearest_exn calories;
+               protein_g = scale item.protein_g;
+               carbs_g = Option.map item.carbs_g ~f:scale;
+               fat_g = Option.map item.fat_g ~f:scale;
+             }
+              : Product.portion),
+            { link with quantity } )

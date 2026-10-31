@@ -22,7 +22,7 @@ type request = private
   | Search_products of Search_query.t * int
   | Correct_meals_from_product of product_correction
   | Record_meal of {
-      idempotency_key : string option;
+      idempotency : Store_sqlite.idempotency option;
       eaten_at : Ptime.t option;
       label : string option;
       items : Meal_item.entry list;
@@ -38,6 +38,7 @@ type request = private
       id : Meal_item_id.t;
       patch : Meal_item.Patch.t;
       reason : string option;
+      quantity : float option;
     }
   | Delete_meal_item of Meal_item_id.t
   | Record_weight of Weigh_in.Create.t

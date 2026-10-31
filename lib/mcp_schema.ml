@@ -103,8 +103,10 @@ let record_meal_properties =
     eaten_at_property;
     label_property;
     property "idempotency_key"
-      "Any unique string for this logging. Retrying with the same key returns \
-       the meal already recorded instead of adding a duplicate."
+      "A new unique string for each meal you log. Retrying the same request \
+       with the same key returns the meal already recorded, with replayed \
+       true, instead of adding a duplicate; the same key with different \
+       content is rejected."
       string;
   ]
 
@@ -115,6 +117,11 @@ let item_update_properties =
   ]
   @ nutrition_properties @ provenance_properties
   @ [
+      property "quantity"
+        "For an item logged from a product: the new amount in its unit. The \
+         item is rescaled from its own values and stays linked; give it \
+         instead of nutrition values."
+        number;
       property "reason"
         "Why the estimate changed, e.g. portion was 300 g, not 200 g." string;
     ]
@@ -338,16 +345,18 @@ let tools =
     tool "search_products"
       ~description:
         ("Find your reusable nutrition references, ranked by relevance, then \
-          name and id. Scale values in the agent; references are independent \
-          of meals. " ^ matching_description)
+          name and id. To log one, pass its id and the quantity eaten as a \
+          record_meal item; the server scales it and links the item. "
+       ^ matching_description)
       (schema product_search_properties [ "query" ]);
     tool "correct_meals_from_product"
       ~description:
         "After save_product fixed a product, rescale the meal items logged \
          from its earlier versions to the current one, by their logged \
          quantity. Each changed item keeps a revision with the old values and \
-         reason. Use only when the earlier values were wrong; a changed recipe \
-         should leave old meals alone."
+         reason. Items logged in another unit than the current version's are \
+         listed under skipped and left alone. Use only when the earlier values \
+         were wrong; a changed recipe should leave old meals alone."
       (schema correction_properties [ "product_id"; "reason" ]);
     tool "record_meal"
       ~description:
@@ -369,8 +378,9 @@ let tools =
       (schema meal_query_properties []);
     tool "update_meal"
       ~description:
-        "Change when a meal was eaten or its label; omitted fields are left \
-         unchanged. To change what was eaten, use the item tools."
+        "Change when a meal was eaten or its label; give at least one, and \
+         omitted fields are left unchanged. To change what was eaten, use the \
+         item tools."
       (schema (id_properties @ [ eaten_at_property; label_property ]) [ "id" ]);
     tool "delete_meal" ~description:"Delete a meal and its items."
       (schema id_properties [ "id" ]);
@@ -380,14 +390,17 @@ let tools =
          [ "meal_id"; "item" ]);
     tool "update_meal_item"
       ~description:
-        "Correct an item's estimate; omitted fields are left unchanged. The \
-         previous values are kept as a revision with the reason. Changing \
-         calories or a macro detaches the item from its product."
+        "Correct an item's estimate; give at least one field, and omitted \
+         fields are left unchanged. The previous values are kept as a revision \
+         with the reason. For an item from a product, give quantity to change \
+         the amount; changing calories or a macro by hand detaches the item \
+         from its product."
       (schema item_update_properties [ "id" ]);
     tool "delete_meal_item"
       ~description:
         "Remove an item from its meal. A meal keeps at least one item; delete \
-         the meal instead."
+         the meal instead. A removed item and its revisions are no longer \
+         returned."
       (schema
          [ property "id" "The item's id, from the meal's items." string ]
          [ "id" ]);

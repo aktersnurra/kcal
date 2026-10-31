@@ -43,11 +43,14 @@ val add_item :
 
 val update_item :
   ?reason:string ->
+  ?quantity:float ->
   t ->
   user:User.t ->
   Meal_item_id.t ->
   Meal_item.Patch.t ->
   (Meal.t, Error.t) result
+(** With [quantity], a product-linked item is rescaled from its own values and
+    keeps its link. *)
 
 val delete_item : t -> user:User.t -> Meal_item_id.t -> (Meal.t, Error.t) result
 val delete_meal : t -> user:User.t -> Meal_id.t -> (unit, Error.t) result
@@ -117,11 +120,17 @@ val set_goals : t -> user:User.t -> Goals.t -> (Goals.t, Error.t) result
 val default_zone : t -> user:User.t -> (Time.zone, Error.t) result
 (** The goals' timezone, or UTC without goals. *)
 
+type correction_skip =
+  | Unit_changed of { logged_unit : string; current_unit : string }
+  | No_structured_basis
+
 type product_correction = {
   product : Product.t;
   items : (Meal_id.t * Ptime.t * Meal_item.t * Product.portion) list;
       (** Each item as it stands, with its meal, when it was eaten, and the
           nutrition the product now gives. *)
+  skipped : (Meal_id.t * Meal_item.t * correction_skip) list;
+      (** Items whose quantity the current version cannot interpret. *)
   applied : bool;
 }
 
@@ -148,15 +157,15 @@ val withings_status :
   t -> user:User.t -> (Withings_connection.status, Error.t) result
 
 val record_meal :
-  ?idempotency_key:string ->
+  ?idempotency:Store_sqlite.idempotency ->
   t ->
   user:User.t ->
   eaten_at:Ptime.t option ->
   label:string option ->
   Meal_item.entry list ->
-  (Meal.t, Error.t) result
+  (Meal.t * [ `Recorded | `Replayed ], Error.t) result
 (** Items from a product take its current version, scaled to the quantity and
-    linked to it. *)
+    linked to it. A retry with the same key and content replays. *)
 
 val record_manual_weigh_in :
   t -> user:User.t -> Weigh_in.Create.t -> (Weigh_in.t, Error.t) result

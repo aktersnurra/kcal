@@ -129,6 +129,27 @@ let optional_bool name fields =
 
 let has name fields = List.Assoc.mem fields ~equal:String.equal name
 let nutrition_fields = [ "calories_kcal"; "protein_g"; "carbs_g"; "fat_g" ]
+
+(* An update that changes nothing would still record a revision. *)
+let at_least_one fields ~among =
+  if List.exists among ~f:(fun name -> has name fields) then Ok ()
+  else
+    rejected
+      ("give at least one field to change: " ^ String.concat ~sep:", " among)
+
+(* Object keys sorted at every level, so field order does not change it. *)
+let rec canonical = function
+  | `Assoc fields ->
+      `Assoc
+        (List.sort fields ~compare:(fun (a, _) (b, _) -> String.compare a b)
+        |> List.map ~f:(fun (name, value) -> (name, canonical value)))
+  | `List values -> `List (List.map values ~f:canonical)
+  | value -> value
+
+let fingerprint fields =
+  Digestif.SHA256.(
+    to_hex (digest_string (Yojson.Safe.to_string (canonical (`Assoc fields)))))
+
 let provenance_fields = [ "confidence"; "estimate_source"; "notes" ]
 
 let item_from_product fields =
@@ -389,7 +410,7 @@ type request =
   | Search_products of Search_query.t * int
   | Correct_meals_from_product of product_correction
   | Record_meal of {
-      idempotency_key : string option;
+      idempotency : Store_sqlite.idempotency option;
       eaten_at : Ptime.t option;
       label : string option;
       items : Meal_item.entry list;
@@ -405,6 +426,7 @@ type request =
       id : Meal_item_id.t;
       patch : Meal_item.Patch.t;
       reason : string option;
+      quantity : float option;
     }
   | Delete_meal_item of Meal_item_id.t
   | Record_weight of Weigh_in.Create.t
@@ -483,6 +505,17 @@ let parse ~now ~default_zone ~compile_search ~name arguments =
           (`Assoc fields)
       in
       let* idempotency_key = nonblank_string "idempotency_key" fields in
+      let idempotency =
+        Option.map idempotency_key ~f:(fun key ->
+            Store_sqlite.
+              {
+                key;
+                fingerprint =
+                  fingerprint
+                    (List.Assoc.remove fields ~equal:String.equal
+                       "idempotency_key");
+              })
+      in
       let* label = nonblank_string "label" fields in
       let* eaten_at = optional_time "eaten_at" fields in
       let* items =
@@ -491,7 +524,7 @@ let parse ~now ~default_zone ~compile_search ~name arguments =
             Result.all (List.map items ~f:item_entry)
         | _ -> Error (Error.Rejected "items must be a nonempty array")
       in
-      Ok (Record_meal { idempotency_key; eaten_at; label; items })
+      Ok (Record_meal { idempotency; eaten_at; label; items })
   | "get_meal" ->
       let* fields = only_fields [ "id" ] (`Assoc fields) in
       let* value = required_string "id" fields in
@@ -517,6 +550,7 @@ let parse ~now ~default_zone ~compile_search ~name arguments =
       let* meal_id = id "id" value Meal_id.of_string in
       let* eaten_at = optional_time "eaten_at" fields in
       let* label = nonblank_string "label" fields in
+      let* () = at_least_one fields ~among:[ "eaten_at"; "label" ] in
       let* patch = Meal.Patch.of_raw { eaten_at; label } in
       Ok (Update_meal (meal_id, patch))
   | "add_meal_item" ->
@@ -532,15 +566,32 @@ let parse ~now ~default_zone ~compile_search ~name arguments =
   | "update_meal_item" ->
       let* fields =
         only_fields
-          (("id" :: "reason" :: "description" :: nutrition_fields)
+          (("id" :: "reason" :: "quantity" :: "description" :: nutrition_fields)
           @ provenance_fields)
           (`Assoc fields)
       in
       let* value = required_string "id" fields in
       let* item_id = id "id" value Meal_item_id.of_string in
       let* reason = nonblank_string "reason" fields in
+      let* () =
+        at_least_one fields
+          ~among:
+            (("quantity" :: "description" :: nutrition_fields)
+            @ provenance_fields)
+      in
+      let* quantity = optional_float "quantity" fields in
+      let* () =
+        if
+          Option.is_some quantity
+          && List.exists nutrition_fields ~f:(fun name -> has name fields)
+        then
+          rejected
+            "give quantity or nutrition values, not both: quantity rescales \
+             the item from its product"
+        else Ok ()
+      in
       let* patch = item_patch fields in
-      Ok (Update_meal_item { id = item_id; patch; reason })
+      Ok (Update_meal_item { id = item_id; patch; reason; quantity })
   | "delete_meal_item" ->
       let* fields = only_fields [ "id" ] (`Assoc fields) in
       let* value = required_string "id" fields in

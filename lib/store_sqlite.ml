@@ -434,9 +434,9 @@ let meal_row_of statement =
 let item_columns =
   "id, meal_id, description, calories_kcal, protein_g, carbs_g, fat_g, \
    confidence, estimate_source, notes, product_id, product_version, \
-   product_quantity, created_at, updated_at"
+   product_quantity, product_unit, created_at, updated_at"
 
-(* Columns [first] to [first + 2]; all three are set together or not at all.
+(* Columns [first] to [first + 3]; all four are set together or not at all.
    [None] is a decoding failure, [Some None] an item without a product. *)
 let product_link_of_row statement ~first =
   let quantity =
@@ -448,10 +448,11 @@ let product_link_of_row statement ~first =
   match
     ( optional_text statement first,
       Sqlite3.column statement (first + 1),
-      Sqlite3.column statement (first + 2) )
+      Sqlite3.column statement (first + 2),
+      optional_text statement (first + 3) )
   with
-  | None, Sqlite3.Data.NULL, Sqlite3.Data.NULL -> Some None
-  | Some product_id, Sqlite3.Data.INT version, _ -> (
+  | None, Sqlite3.Data.NULL, Sqlite3.Data.NULL, None -> Some None
+  | Some product_id, Sqlite3.Data.INT version, _, Some unit -> (
       match (Product_id.of_string product_id, quantity) with
       | Some product_id, Some quantity ->
           Some
@@ -461,17 +462,18 @@ let product_link_of_row statement ~first =
                    product_id;
                    product_version = Int64.to_int_exn version;
                    quantity;
+                   unit;
                  })
       | _ -> None)
   | _ -> None
 
-(* Columns 0-14 of [item_columns], with the owning meal's id. *)
+(* Columns 0-15 of [item_columns], with the owning meal's id. *)
 let item_of_row statement =
   match
     ( Meal_item_id.of_string (text statement 0),
       Meal_id.of_string (text statement 1),
-      parse_time (text statement 13),
-      parse_time (text statement 14) )
+      parse_time (text statement 14),
+      parse_time (text statement 15) )
   with
   | Some id, Some meal_id, Some created_at, Some updated_at
     when calorie_column statement 3 && numeric_column statement 4
@@ -555,12 +557,19 @@ let get_meal db ~user id =
        [ Sqlite3.Data.TEXT (Meal_id.to_string id); owner user ])
 
 let product_link_values = function
-  | None -> [ Sqlite3.Data.NULL; Sqlite3.Data.NULL; Sqlite3.Data.NULL ]
+  | None ->
+      [
+        Sqlite3.Data.NULL;
+        Sqlite3.Data.NULL;
+        Sqlite3.Data.NULL;
+        Sqlite3.Data.NULL;
+      ]
   | Some (link : Meal_item.product_link) ->
       [
         Sqlite3.Data.TEXT (Product_id.to_string link.product_id);
         Sqlite3.Data.INT (Int64.of_int link.product_version);
         Sqlite3.Data.FLOAT link.quantity;
+        Sqlite3.Data.TEXT link.unit;
       ]
 
 let execute statement values =
@@ -578,9 +587,10 @@ let insert_item db ~meal_id ~current (item, product) =
   with_statement db
     "INSERT INTO meal_items (id, meal_id, position, description, \
      calories_kcal, protein_g, carbs_g, fat_g, confidence, estimate_source, \
-     notes, product_id, product_version, product_quantity, created_at, \
-     updated_at) SELECT ?, ?, COALESCE(MAX(position), -1) + 1, ?, ?, ?, ?, ?, \
-     ?, ?, ?, ?, ?, ?, ?, ? FROM meal_items WHERE meal_id = ?" (fun statement ->
+     notes, product_id, product_version, product_quantity, product_unit, \
+     created_at, updated_at) SELECT ?, ?, COALESCE(MAX(position), -1) + 1, ?, \
+     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM meal_items WHERE meal_id = ?"
+    (fun statement ->
       execute statement
         ([
            Sqlite3.Data.TEXT (Meal_item_id.to_string (Meal_item_id.fresh ()));
@@ -609,31 +619,51 @@ let touch_meal db meal_id ~current =
 let in_transaction db f =
   with_checked_numeric_update db ~check:(fun () -> Ok ()) ~update:f
 
-(* A deleted meal keeps its key, so a retry cannot resurrect it. *)
-let meal_by_idempotency_key db ~user key =
-  let* meal =
-    Result.bind ~f:single
-      (select_meals db
-         ("SELECT " ^ meal_columns
-        ^ " FROM meals WHERE user_id = ? AND idempotency_key = ?")
-         [ owner user; Sqlite3.Data.TEXT key ])
-  in
-  if Option.is_some meal.deleted_at then
-    Error
-      (Error.Rejected
-         "idempotency_key belongs to a meal that was deleted; use a new key to \
-          record it again")
-  else Ok meal
+type idempotency = { key : string; fingerprint : string }
 
-let insert_meal db ~user ~idempotency_key ~eaten_at ~label items =
+(* [None] when the key is unused. A deleted meal keeps its key, so a retry
+   cannot resurrect it, and a key reused for different content is an error
+   rather than a silent answer with the first meal. *)
+let idempotent_meal db ~user { key; fingerprint } =
+  let* found =
+    with_statement db
+      "SELECT id, idempotency_fingerprint, deleted_at IS NOT NULL FROM meals \
+       WHERE user_id = ? AND idempotency_key = ?" (fun statement ->
+        match bind statement [ owner user; Sqlite3.Data.TEXT key ] with
+        | Error _ as error -> error
+        | Ok () ->
+            decode_all_rows statement (fun statement ->
+                Option.map
+                  (Meal_id.of_string (text statement 0))
+                  ~f:(fun id ->
+                    (id, optional_text statement 1, int statement 2 = 1))))
+  in
+  match found with
+  | [] -> Ok None
+  | [ (_, _, true) ] ->
+      Error
+        (Error.Rejected
+           "idempotency_key belongs to a meal that was deleted; use a new key \
+            to record it again")
+  | [ (id, stored, false) ]
+    when Option.equal String.equal stored (Some fingerprint) ->
+      Result.map (get_meal db ~user id) ~f:Option.some
+  | [ _ ] ->
+      Error
+        (Error.Rejected
+           "idempotency_key was already used for a different meal; use a new \
+            key for each meal you log, and the same key only to retry it")
+  | _ -> Error (storage_error ())
+
+let insert_meal db ~user ~idempotency ~eaten_at ~label items =
   let current_time = now () in
   let current = timestamp current_time in
   let id = Meal_id.fresh () in
   let* () =
     with_statement db
       "INSERT INTO meals (id, user_id, eaten_at, label, created_at, \
-       updated_at, deleted_at, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, \
-       NULL, ?)" (fun statement ->
+       updated_at, deleted_at, idempotency_key, idempotency_fingerprint) \
+       VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)" (fun statement ->
         execute statement
           [
             Sqlite3.Data.TEXT (Meal_id.to_string id);
@@ -643,7 +673,8 @@ let insert_meal db ~user ~idempotency_key ~eaten_at ~label items =
             nullable label;
             Sqlite3.Data.TEXT current;
             Sqlite3.Data.TEXT current;
-            nullable idempotency_key;
+            nullable (Option.map idempotency ~f:(fun i -> i.key));
+            nullable (Option.map idempotency ~f:(fun i -> i.fingerprint));
           ])
   in
   let* () =
@@ -652,19 +683,23 @@ let insert_meal db ~user ~idempotency_key ~eaten_at ~label items =
   in
   get_meal db ~user id
 
-let create_meal ?idempotency_key db ~user ~eaten_at ~label items =
+let create_meal ?idempotency db ~user ~eaten_at ~label items =
   let* () = Meal.validate_label label in
   if List.is_empty items then
     Error (Error.Rejected "a meal needs at least one item")
   else
     in_transaction db (fun () ->
-        match idempotency_key with
-        | None -> insert_meal db ~user ~idempotency_key ~eaten_at ~label items
-        | Some key -> (
-            match meal_by_idempotency_key db ~user key with
-            | Error Error.Not_found ->
-                insert_meal db ~user ~idempotency_key ~eaten_at ~label items
-            | result -> result))
+        let* existing =
+          match idempotency with
+          | None -> Ok None
+          | Some idempotency -> idempotent_meal db ~user idempotency
+        in
+        match existing with
+        | Some meal -> Ok (meal, `Replayed)
+        | None ->
+            Result.map
+              (insert_meal db ~user ~idempotency ~eaten_at ~label items)
+              ~f:(fun meal -> (meal, `Recorded)))
 
 let update_meal db ~user id patch =
   let patch = Meal.Patch.to_raw patch in
@@ -718,7 +753,7 @@ let owned_item db ~user item_id =
 let revision_columns =
   "item_id, revision, revised_at, reason, description, calories_kcal, \
    protein_g, carbs_g, fat_g, confidence, estimate_source, notes, product_id, \
-   product_version, product_quantity"
+   product_version, product_quantity, product_unit"
 
 (* Snapshot [item] as it stands, before the caller changes it, inside the
    caller's transaction. *)
@@ -726,7 +761,7 @@ let record_revision db (item : Meal_item.t) ~revised_at ~reason =
   with_statement db
     ("INSERT INTO meal_item_revisions (" ^ revision_columns
    ^ ") SELECT ?, COALESCE(MAX(revision), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
-      ?, ?, ?, ? FROM meal_item_revisions WHERE item_id = ?")
+      ?, ?, ?, ?, ? FROM meal_item_revisions WHERE item_id = ?")
     (fun statement ->
       let id = Sqlite3.Data.TEXT (Meal_item_id.to_string item.id) in
       execute statement
@@ -802,7 +837,7 @@ let set_item_nutrition db (item : Meal_item.t) ~current
   with_statement db
     "UPDATE meal_items SET calories_kcal = ?, protein_g = ?, carbs_g = ?, \
      fat_g = ?, product_id = ?, product_version = ?, product_quantity = ?, \
-     updated_at = ? WHERE id = ?" (fun statement ->
+     product_unit = ?, updated_at = ? WHERE id = ?" (fun statement ->
       execute statement
         ([
            Sqlite3.Data.INT (Int64.of_int portion.calories_kcal);
@@ -816,11 +851,34 @@ let set_item_nutrition db (item : Meal_item.t) ~current
             Sqlite3.Data.TEXT (Meal_item_id.to_string item.id);
           ]))
 
-let update_item ?reason db ~user item_id patch =
-  let detach_product = Meal_item.changes_nutrition patch in
+let update_item ?reason ?quantity db ~user item_id patch =
+  let changes_nutrition = Meal_item.changes_nutrition patch in
   let patch = Meal_item.Patch.to_raw patch in
   in_transaction db (fun () ->
       let* meal_id, item = owned_item db ~user item_id in
+      (* A new quantity rescales the item and keeps its link; a hand-edited
+         value no longer follows from the product, so it detaches. *)
+      let* rescaled =
+        match quantity with
+        | None -> Ok None
+        | Some quantity ->
+            Result.map (Meal_item.rescale item ~quantity) ~f:Option.some
+      in
+      let calories_kcal, protein_g, carbs_g, fat_g, detach_product =
+        match rescaled with
+        | Some ((portion : Product.portion), _) ->
+            ( Some portion.calories_kcal,
+              Some portion.protein_g,
+              portion.carbs_g,
+              portion.fat_g,
+              false )
+        | None ->
+            ( patch.calories_kcal,
+              patch.protein_g,
+              patch.carbs_g,
+              patch.fat_g,
+              changes_nutrition )
+      in
       let current = timestamp (now ()) in
       let* () = record_revision db item ~revised_at:current ~reason in
       let detach = Sqlite3.Data.INT (if detach_product then 1L else 0L) in
@@ -834,25 +892,40 @@ let update_item ?reason db ~user item_id patch =
            product_id = CASE WHEN ? THEN NULL ELSE product_id END, \
            product_version = CASE WHEN ? THEN NULL ELSE product_version END, \
            product_quantity = CASE WHEN ? THEN NULL ELSE product_quantity END, \
+           product_unit = CASE WHEN ? THEN NULL ELSE product_unit END, \
            updated_at = ? WHERE id = ?" (fun statement ->
             execute statement
               [
                 nullable patch.description;
-                (match patch.calories_kcal with
+                (match calories_kcal with
                 | None -> Sqlite3.Data.NULL
                 | Some value -> Sqlite3.Data.INT (Int64.of_int value));
-                nullable_float patch.protein_g;
-                nullable_float patch.carbs_g;
-                nullable_float patch.fat_g;
+                nullable_float protein_g;
+                nullable_float carbs_g;
+                nullable_float fat_g;
                 nullable_float patch.confidence;
                 nullable patch.estimate_source;
                 nullable patch.notes;
                 detach;
                 detach;
                 detach;
+                detach;
                 Sqlite3.Data.TEXT current;
                 Sqlite3.Data.TEXT (Meal_item_id.to_string item_id);
               ])
+      in
+      let* () =
+        match rescaled with
+        | None -> Ok ()
+        | Some (_, (link : Meal_item.product_link)) ->
+            with_statement db
+              "UPDATE meal_items SET product_quantity = ? WHERE id = ?"
+              (fun statement ->
+                execute statement
+                  [
+                    Sqlite3.Data.FLOAT link.quantity;
+                    Sqlite3.Data.TEXT (Meal_item_id.to_string item_id);
+                  ])
       in
       let* () = touch_meal db meal_id ~current in
       get_meal db ~user meal_id)
@@ -964,7 +1037,7 @@ let items_from_earlier_versions db ~user (product : Product.t) =
       | Error _ as error -> error
       | Ok () ->
           decode_all_rows statement (fun statement ->
-              match (item_of_row statement, parse_time (text statement 15)) with
+              match (item_of_row statement, parse_time (text statement 16)) with
               | Some (meal_id, item), Some eaten_at ->
                   Some (meal_id, eaten_at, item)
               | _ -> None))

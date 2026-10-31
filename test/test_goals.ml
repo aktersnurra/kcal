@@ -186,6 +186,10 @@ let test_context () =
     "last meal"
     (Some (time "2026-10-30T11:30:00Z"))
     fasting.last_meal_at;
+  let month_range, _ = context.last_four_weeks in
+  Alcotest.(check string)
+    "the 28 days end yesterday, excluding today's partial intake" "2026-10-29"
+    (Date.to_string (Date_range.last month_range));
   let week_range, _ = context.last_week in
   Alcotest.(check (pair string string))
     "last week ends yesterday"

@@ -2,6 +2,7 @@ val meal_json : Meal.t -> (Yojson.Safe.t, Error.t) result
 (** Fails if the items' totals overflow. *)
 
 val product_json : Product.t -> Yojson.Safe.t
+val with_field : Yojson.Safe.t -> string * Yojson.Safe.t -> Yojson.Safe.t
 val day_json : Summary.day -> Yojson.Safe.t
 val range_json : Time.zone -> Date_range.t -> (string * Yojson.Safe.t) list
 val summary_json : Time.zone -> Date_range.t -> Service.summary -> Yojson.Safe.t

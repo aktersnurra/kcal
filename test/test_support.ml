@@ -125,8 +125,10 @@ let create_meal_raw store ~user (input : meal_input) =
   Result.bind
     (Meal_item.Create.of_raw (item_of_input input))
     ~f:(fun item ->
-      Store_sqlite.create_meal store ~user ~eaten_at:input.eaten_at ~label:None
-        [ (item, None) ])
+      Result.map ~f:fst
+        (Store_sqlite.create_meal store ~user ~eaten_at:input.eaten_at
+           ~label:None
+           [ (item, None) ]))
 
 let only_item (meal : Meal.t) =
   match meal.items with
@@ -168,8 +170,9 @@ let record_meal_raw service ~user (input : meal_input) =
   Result.bind
     (Meal_item.Create.of_raw (item_of_input input))
     ~f:(fun item ->
-      Service.record_meal service ~user ~eaten_at:input.eaten_at ~label:None
-        [ Meal_item.Estimated item ])
+      Result.map ~f:fst
+        (Service.record_meal service ~user ~eaten_at:input.eaten_at ~label:None
+           [ Meal_item.Estimated item ]))
 
 let record_manual_weigh_in_raw service ~user raw =
   Result.bind

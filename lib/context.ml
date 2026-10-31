@@ -30,7 +30,8 @@ type t = {
   recent_products : (Product.t * Ptime.t) list;
 }
 
-let history_days = 28
+(* Today plus the 28 complete days before it. *)
+let history_days = 29
 
 (* [days] dates ending [offset] days from today. *)
 let days_ending zone ~now ~offset days =
@@ -65,7 +66,7 @@ let today_of (goals : Goals.t option) (day : Summary.day) =
 let build ~now ~zone ~goals ~meals ~weigh_ins ~latest_weight ~recent_products =
   let* today_range = days_ending zone ~now ~offset:0 1 in
   let* week = days_ending zone ~now ~offset:(-1) 7 in
-  let* four_weeks = history zone ~now in
+  let* four_weeks = days_ending zone ~now ~offset:(-1) 28 in
   let* series = Summary.daily_series zone today_range ~meals ~weigh_ins:[] in
   let* today =
     match series with

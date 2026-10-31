@@ -26,7 +26,8 @@ type t = {
   last_week : Date_range.t * Summary.t;
       (** The seven complete days before today: intake against targets. *)
   last_four_weeks : Date_range.t * Summary.t;
-      (** The 28 days through today: weight trend and maintenance. *)
+      (** The 28 complete days before today: weight trend and maintenance, so
+          today's partial intake does not lower the average. *)
   recent_products : (Product.t * Ptime.t) list;
       (** With when each was last eaten. *)
 }

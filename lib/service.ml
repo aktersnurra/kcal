@@ -11,14 +11,26 @@ let resolve_user service ~issuer ~subject =
 
 let ( let* ) result f = Result.bind result ~f
 
+let product_for_item service ~user product_id =
+  match Store_sqlite.get_product service.store ~user product_id with
+  | Error Error.Not_found ->
+      Error
+        (Error.Rejected
+           ("product_id "
+           ^ Product_id.to_string product_id
+           ^ " was not found; find the product with search_products"))
+  | result -> result
+
 (* An item from a product takes the product's current version, scaled. *)
 let resolve_item service ~user = function
   | Meal_item.Estimated input -> Ok (input, None)
   | From_product entry ->
-      let* product =
-        Store_sqlite.get_product service.store ~user entry.product_id
-      in
+      let* product = product_for_item service ~user entry.product_id in
       let* portion = Product.portion product ~quantity:entry.quantity in
+      let* serving =
+        Result.of_option product.serving
+          ~error:(Error.Storage_decoding "product serving")
+      in
       let* input =
         Meal_item.Create.of_raw
           {
@@ -41,12 +53,26 @@ let resolve_item service ~user = function
                 product_id = product.id;
                 product_version = product.version;
                 quantity = entry.quantity;
+                unit = serving.unit;
               } )
 
-let record_meal ?idempotency_key service ~user ~eaten_at ~label entries =
-  let* items = Result.all (List.map entries ~f:(resolve_item service ~user)) in
-  Store_sqlite.create_meal ?idempotency_key service.store ~user ~eaten_at ~label
-    items
+(* A retry is answered before its items are resolved, so it replays even if a
+   product it named has changed since. *)
+let record_meal ?idempotency service ~user ~eaten_at ~label entries =
+  let* existing =
+    match idempotency with
+    | None -> Ok None
+    | Some idempotency ->
+        Store_sqlite.idempotent_meal service.store ~user idempotency
+  in
+  match existing with
+  | Some meal -> Ok (meal, `Replayed)
+  | None ->
+      let* items =
+        Result.all (List.map entries ~f:(resolve_item service ~user))
+      in
+      Store_sqlite.create_meal ?idempotency service.store ~user ~eaten_at ~label
+        items
 
 let get_meal service ~user id =
   Store_sqlite.get_meal_with_revisions service.store ~user id
@@ -55,8 +81,8 @@ let add_item service ~user meal_id entry =
   let* item = resolve_item service ~user entry in
   Store_sqlite.add_item service.store ~user meal_id item
 
-let update_item ?reason service ~user id patch =
-  Store_sqlite.update_item ?reason service.store ~user id patch
+let update_item ?reason ?quantity service ~user id patch =
+  Store_sqlite.update_item ?reason ?quantity service.store ~user id patch
 
 let delete_item service ~user id =
   Store_sqlite.delete_item service.store ~user id
@@ -135,39 +161,55 @@ let default_zone service ~user =
     | Some (goals : Goals.t) -> goals.timezone
     | None -> Time.utc)
 
+type correction_skip =
+  | Unit_changed of { logged_unit : string; current_unit : string }
+  | No_structured_basis
+
 type product_correction = {
   product : Product.t;
   items : (Meal_id.t * Ptime.t * Meal_item.t * Product.portion) list;
+  skipped : (Meal_id.t * Meal_item.t * correction_skip) list;
   applied : bool;
 }
+
+(* An item's quantity is only meaningful in the unit it was logged in, so an
+   item is rescaled only while the product's basis unit is unchanged. *)
+let plan_correction (product : Product.t)
+    (meal_id, eaten_at, (item : Meal_item.t)) =
+  match (item.product, product.serving) with
+  | None, _ -> Error (Error.Storage_decoding "meal item product link")
+  | Some _, None -> Ok (Either.Second (meal_id, item, No_structured_basis))
+  | Some link, Some serving when not (String.equal link.unit serving.unit) ->
+      Ok
+        (Either.Second
+           ( meal_id,
+             item,
+             Unit_changed
+               { logged_unit = link.unit; current_unit = serving.unit } ))
+  | Some link, Some _ ->
+      let* portion = Product.portion product ~quantity:link.quantity in
+      Ok
+        (Either.First
+           ( (meal_id, eaten_at, item, portion),
+             Meal_item.{ link with product_version = product.version } ))
 
 let correct_meals_from_product service ~user product_id ~reason ~dry_run =
   let* product = Store_sqlite.get_product service.store ~user product_id in
   let* stale =
     Store_sqlite.items_from_earlier_versions service.store ~user product
   in
-  let* changes =
-    List.map stale ~f:(fun (meal_id, eaten_at, (item : Meal_item.t)) ->
-        let* link =
-          Result.of_option item.product
-            ~error:(Error.Storage_decoding "meal item product link")
-        in
-        let* portion = Product.portion product ~quantity:link.quantity in
-        Ok
-          ( (meal_id, eaten_at, item, portion),
-            Meal_item.{ link with product_version = product.version } ))
-    |> Result.all
-  in
+  let* plans = Result.all (List.map stale ~f:(plan_correction product)) in
+  let changes, skipped = List.partition_map plans ~f:Fn.id in
   let items = List.map changes ~f:fst in
   if dry_run || List.is_empty changes then
-    Ok { product; items; applied = false }
+    Ok { product; items; skipped; applied = false }
   else
     let* () =
       Store_sqlite.rescale_items service.store ~reason
         (List.map changes ~f:(fun ((meal_id, _, item, portion), link) ->
              (meal_id, item, portion, link)))
     in
-    Ok { product; items; applied = true }
+    Ok { product; items; skipped; applied = true }
 
 let records_in_range service ~user ~zone ~range =
   let* start, stop = Date_range.utc_bounds zone range in

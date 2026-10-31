@@ -1,7 +1,10 @@
 type product_link = {
   product_id : Product_id.t;
   product_version : int;
-  quantity : float;  (** In the product's serving unit. *)
+  quantity : float;  (** In [unit]. *)
+  unit : string;
+      (** The product's basis unit when the item was logged, so a later version
+          in another unit is never applied to this quantity. *)
 }
 (** Where an item's nutrition came from when it was logged from a product. The
     item still stores its own values; the link only records their origin. *)
@@ -113,3 +116,9 @@ type from_product = {
 (** How an item is given: estimated nutrition, or a product and quantity for the
     server to scale. *)
 type entry = Estimated of Create.t | From_product of from_product
+
+val rescale :
+  t -> quantity:float -> (Product.portion * product_link, Error.t) result
+(** The item's own values scaled to a new quantity of the same product version,
+    calories rounded to the nearest kcal. Rejected for an item not logged from a
+    product. *)

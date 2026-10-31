@@ -266,6 +266,7 @@ let test_logging_from_a_product () =
              ("product_id", field "id" product);
              ("product_version", `Int 1);
              ("quantity", `Float 45.);
+             ("unit", `String "g");
            ])
         (field "product" item);
       Alcotest.check json "mixed with an estimated item" (`Int 430)
@@ -371,6 +372,157 @@ let test_correcting_meals_from_a_product () =
            (payload service user "correct_meals_from_product"
               [ ("product_id", id); reason; ("dry_run", `Bool false) ])))
 
+let test_idempotency_replays_only_the_same_request () =
+  with_service (fun service user ->
+      let product = payload service user "save_product" shake in
+      let request =
+        [
+          ("items", `List [ from_product product 40 ]);
+          ("idempotency_key", `String "shake-1");
+        ]
+      in
+      let first = payload service user "record_meal" request in
+      Alcotest.check json "first call records" (`Bool false)
+        (field "replayed" first);
+      (* The product loses its structured basis, so resolving the items again
+         would fail; a retry must still replay. *)
+      ignore
+        (payload service user "save_product"
+           (("id", field "id" product)
+           :: List.filter shake ~f:(fun (name, _) ->
+               not (String.is_prefix name ~prefix:"basis_"))));
+      let retry = payload service user "record_meal" (List.rev request) in
+      Alcotest.check json "a retry replays" (`Bool true)
+        (field "replayed" retry);
+      Alcotest.check json "the same meal" (field "id" first) (field "id" retry);
+      Alcotest.(check bool)
+        "the same key with other content is rejected" true
+        (String.is_substring
+           (error_text service user "record_meal"
+              [
+                ("items", `List [ soup ]); ("idempotency_key", `String "shake-1");
+              ])
+           ~substring:"already used for a different meal"))
+
+let test_updates_must_change_something () =
+  with_service (fun service user ->
+      let meal =
+        payload service user "record_meal" [ ("items", `List [ soup ]) ]
+      in
+      let item_id = field "id" (only_item meal) in
+      Alcotest.(check bool)
+        "an empty item update is rejected" true
+        (String.is_substring
+           (error_text service user "update_meal_item"
+              [ ("id", item_id); ("reason", `String "no change") ])
+           ~substring:"give at least one field to change");
+      Alcotest.(check bool)
+        "an empty meal update is rejected" true
+        (String.is_substring
+           (error_text service user "update_meal" [ ("id", field "id" meal) ])
+           ~substring:"give at least one field to change");
+      Alcotest.check json "no revision was written" (`List [])
+        (field "revisions"
+           (only_item
+              (payload service user "get_meal" [ ("id", field "id" meal) ]))))
+
+let test_quantity_rescales_a_product_item () =
+  with_service (fun service user ->
+      let product = payload service user "save_product" shake in
+      let meal =
+        payload service user "record_meal"
+          [ ("items", `List [ from_product product 45; soup ]) ]
+      in
+      let shake_item = List.hd_exn (items_of meal) in
+      let doubled =
+        List.hd_exn
+          (items_of
+             (payload service user "update_meal_item"
+                [
+                  ("id", field "id" shake_item);
+                  ("quantity", `Int 90);
+                  ("reason", `String "two portions");
+                ]))
+      in
+      Alcotest.check json "kcal doubled" (`Int 360)
+        (field "calories_kcal" doubled);
+      Alcotest.check json "still linked, new quantity" (`Float 90.)
+        (field "quantity" (field "product" doubled));
+      Alcotest.(check bool)
+        "quantity with nutrition is rejected" true
+        (String.is_substring
+           (error_text service user "update_meal_item"
+              [
+                ("id", field "id" shake_item);
+                ("quantity", `Int 10);
+                ("calories_kcal", `Int 1);
+              ])
+           ~substring:"not both");
+      Alcotest.(check bool)
+        "quantity on an estimated item is rejected" true
+        (String.is_substring
+           (error_text service user "update_meal_item"
+              [
+                ("id", field "id" (List.last_exn (items_of meal)));
+                ("quantity", `Int 2);
+              ])
+           ~substring:"only applies to an item logged from a product");
+      Alcotest.(check bool)
+        "an unknown product is named" true
+        (String.is_substring
+           (error_text service user "record_meal"
+              [
+                ( "items",
+                  `List
+                    [
+                      `Assoc
+                        [
+                          ( "product_id",
+                            `String "12345678-1234-4234-8234-123456789abc" );
+                          ("quantity", `Int 1);
+                        ];
+                    ] );
+              ])
+           ~substring:
+             "product_id 12345678-1234-4234-8234-123456789abc was not found"))
+
+let test_correction_skips_a_changed_unit () =
+  with_service (fun service user ->
+      let product = payload service user "save_product" shake in
+      let id = field "id" product in
+      let meal =
+        payload service user "record_meal"
+          [ ("items", `List [ from_product product 45 ]) ]
+      in
+      ignore
+        (payload service user "save_product"
+           (("id", id)
+           :: List.map shake ~f:(function
+             | "basis_quantity", _ -> ("basis_quantity", `Int 1)
+             | "basis_unit", _ -> ("basis_unit", `String "scoop")
+             | other -> other)));
+      let applied =
+        payload service user "correct_meals_from_product"
+          [
+            ("product_id", id);
+            ("reason", `String "now per scoop");
+            ("dry_run", `Bool false);
+          ]
+      in
+      Alcotest.check json "nothing rescaled" (`List []) (field "items" applied);
+      (match field "skipped" applied with
+      | `List [ skipped ] ->
+          Alcotest.(check bool)
+            "the unit change is explained" true
+            (String.is_substring
+               (string_field "reason" skipped)
+               ~substring:"logged in g, but the product is now per scoop")
+      | _ -> Alcotest.fail "expected one skipped item");
+      Alcotest.check json "the item keeps its values" (`Int 180)
+        (field "calories_kcal"
+           (only_item
+              (payload service user "get_meal" [ ("id", field "id" meal) ]))))
+
 let test_goals_round_trip_and_context () =
   with_service (fun service user ->
       let goals =
@@ -430,6 +582,14 @@ let () =
         [
           Alcotest.test_case "idempotency key" `Quick test_idempotency_key;
           Alcotest.test_case "a meal has items" `Quick test_a_meal_has_items;
+          Alcotest.test_case "idempotency replays only the same request" `Quick
+            test_idempotency_replays_only_the_same_request;
+          Alcotest.test_case "updates must change something" `Quick
+            test_updates_must_change_something;
+          Alcotest.test_case "quantity rescales a product item" `Quick
+            test_quantity_rescales_a_product_item;
+          Alcotest.test_case "correction skips a changed unit" `Quick
+            test_correction_skips_a_changed_unit;
           Alcotest.test_case "update keeps revisions" `Quick
             test_update_keeps_revisions;
           Alcotest.test_case "logging from a product" `Quick

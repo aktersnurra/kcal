@@ -19,16 +19,25 @@ val search_products :
 
 type new_item = Meal_item.Create.t * Meal_item.product_link option
 
+type idempotency = { key : string; fingerprint : string }
+(** [fingerprint] identifies the request content, so a reused key with other
+    content is told apart from a retry. *)
+
+val idempotent_meal :
+  t -> user:User.t -> idempotency -> (Meal.t option, Error.t) result
+(** The meal a key already recorded, [None] when the key is unused; rejected for
+    a deleted meal or different content. *)
+
 val create_meal :
-  ?idempotency_key:string ->
+  ?idempotency:idempotency ->
   t ->
   user:User.t ->
   eaten_at:Ptime.t option ->
   label:string option ->
   new_item list ->
-  (Meal.t, Error.t) result
-(** Rejects an empty item list. With a key the user already used, returns that
-    meal unchanged instead of inserting; a deleted meal's key is rejected. *)
+  (Meal.t * [ `Recorded | `Replayed ], Error.t) result
+(** Rejects an empty item list. A retry with the same key and content returns
+    the meal already recorded; see [idempotent_meal]. *)
 
 val get_meal : t -> user:User.t -> Meal_id.t -> (Meal.t, Error.t) result
 
@@ -60,13 +69,15 @@ val add_item :
 
 val update_item :
   ?reason:string ->
+  ?quantity:float ->
   t ->
   user:User.t ->
   Meal_item_id.t ->
   Meal_item.Patch.t ->
   (Meal.t, Error.t) result
-(** Records the item as it was in a revision, in the same transaction. A
-    nutrition change detaches any product link. *)
+(** Records the item as it was in a revision, in the same transaction. A new
+    [quantity] rescales a product-linked item from its own values and keeps the
+    link; a hand-edited nutrition value detaches it. *)
 
 val delete_item : t -> user:User.t -> Meal_item_id.t -> (Meal.t, Error.t) result
 (** Rejected for a meal's last item. *)

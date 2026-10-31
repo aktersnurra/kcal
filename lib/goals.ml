@@ -86,7 +86,7 @@ module Eating_window = struct
     in
     let minute = Time.local_minute_of_day zone now in
     if contains_minute window minute then
-      (* Past midnight in a crossing window, it closes later today. *)
+      (* Before midnight in a crossing window, it closes tomorrow. *)
       let days =
         if crosses_midnight window && minute >= window.start_minute then 1
         else 0

@@ -93,12 +93,17 @@ let call ?withings service (identity : Auth.identity) name arguments =
           Mcp_json.text_result (Mcp_json.correction_json correction))
         (Service.correct_meals_from_product service ~user product_id ~reason
            ~dry_run)
-  | Record_meal { idempotency_key; eaten_at; label; items } ->
-      let* meal =
-        Service.record_meal ?idempotency_key service ~user ~eaten_at ~label
-          items
+  | Record_meal { idempotency; eaten_at; label; items } ->
+      let* meal, outcome =
+        Service.record_meal ?idempotency service ~user ~eaten_at ~label items
       in
-      meal_result meal
+      let* json = Mcp_json.meal_json meal in
+      Ok
+        (Mcp_json.text_result
+           (Mcp_json.with_field json
+              ( "replayed",
+                `Bool
+                  (match outcome with `Replayed -> true | `Recorded -> false) )))
   | Get_meal meal_id ->
       let* meal, revisions = Service.get_meal service ~user meal_id in
       Result.map ~f:Mcp_json.text_result
@@ -113,9 +118,9 @@ let call ?withings service (identity : Auth.identity) name arguments =
       Result.bind (Service.update_meal service ~user id patch) ~f:meal_result
   | Add_meal_item (meal_id, entry) ->
       Result.bind (Service.add_item service ~user meal_id entry) ~f:meal_result
-  | Update_meal_item { id; patch; reason } ->
+  | Update_meal_item { id; patch; reason; quantity } ->
       Result.bind
-        (Service.update_item ?reason service ~user id patch)
+        (Service.update_item ?reason ?quantity service ~user id patch)
         ~f:meal_result
   | Delete_meal_item id ->
       Result.bind (Service.delete_item service ~user id) ~f:meal_result

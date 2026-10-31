@@ -28,17 +28,19 @@ CREATE TABLE meal_items (
   product_id TEXT REFERENCES products(id),
   product_version INTEGER,
   product_quantity REAL,
+  product_unit TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   deleted_at TEXT,
   CHECK ((product_id IS NULL) = (product_version IS NULL)
-     AND (product_id IS NULL) = (product_quantity IS NULL))
+     AND (product_id IS NULL) = (product_quantity IS NULL)
+     AND (product_id IS NULL) = (product_unit IS NULL))
 );
 -- Every existing meal was one estimate: it becomes a meal with that one item,
 -- which keeps the meal's id.
 INSERT INTO meal_items
 SELECT id, id, 0, description, calories_kcal, protein_g, carbs_g, fat_g, confidence,
-       estimate_source, notes, NULL, NULL, NULL, created_at, updated_at, NULL
+       estimate_source, notes, NULL, NULL, NULL, NULL, created_at, updated_at, NULL
 FROM meals;
 CREATE INDEX meal_items_meal_idx ON meal_items(meal_id, position);
 CREATE INDEX meal_items_product_idx ON meal_items(product_id) WHERE product_id IS NOT NULL;
@@ -56,6 +58,9 @@ ALTER TABLE meals DROP COLUMN estimate_source;
 ALTER TABLE meals DROP COLUMN notes;
 ALTER TABLE meals ADD COLUMN label TEXT;
 ALTER TABLE meals ADD COLUMN idempotency_key TEXT;
+-- A digest of the request that used the key, so a reused key with different
+-- content is rejected rather than silently answered with the first meal.
+ALTER TABLE meals ADD COLUMN idempotency_fingerprint TEXT;
 CREATE UNIQUE INDEX meals_user_idempotency_key_idx ON meals(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE VIRTUAL TABLE meal_items_fts USING fts5(description, estimate_source, notes, content='meal_items', content_rowid='rowid', tokenize='unicode61 remove_diacritics 0');
 INSERT INTO meal_items_fts(meal_items_fts) VALUES ('rebuild');
@@ -85,5 +90,6 @@ CREATE TABLE meal_item_revisions (
   product_id TEXT,
   product_version INTEGER,
   product_quantity REAL,
+  product_unit TEXT,
   PRIMARY KEY (item_id, revision)
 );
