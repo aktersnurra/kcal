@@ -18,3 +18,17 @@ jobs:
       - run: opam exec -- dune build @all
       - run: opam exec -- dune runtest
       - run: opam exec -- dune build @fmt
+
+  # serai update on the NUC deploys what this job marks: a commit on master
+  # whose tests passed. Pushed without force, so deploy only moves forward.
+  deploy:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: git push origin HEAD:refs/heads/deploy
