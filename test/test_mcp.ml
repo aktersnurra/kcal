@@ -1,3 +1,4 @@
+module Domain_error = Error
 open Base
 
 let identity user scopes = Auth.{ user; scopes }
@@ -151,9 +152,23 @@ let withings store =
     Withings_oauth.make ~store ~now:(fun () ->
         Option.value_exn (Ptime.of_float_s 1_800_000_000.))
   in
-  Mcp.
+  let module Unused_client = struct
+    let unused = Error (Domain_error.Invalid_input "unused")
+    let exchange_code ~redirect_uri:_ ~code:_ = unused
+    let refresh ~refresh_token:_ = unused
+    let get_measurements ~access_token:_ ~lastupdate:_ = unused
+    let subscribe ~access_token:_ ~callback_url:_ = unused
+  end in
+  Withings_integration.
     {
+      store;
       oauth;
+      client = (module Unused_client);
+      token_key =
+        Option.value_exn (Result.ok (Secret.Key.of_bytes (Bytes.make 32 'k')));
+      sync = (fun _ _ -> Ok ());
+      sync_gate = Sync_gate.create ();
+      callback_url = "https://kcal.example/withings/webhook";
       client_id = "mcp-client";
       redirect_uri = "https://kcal.example/mcp-callback";
     }

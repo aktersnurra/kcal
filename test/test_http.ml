@@ -65,6 +65,21 @@ let test_metadata_endpoints_are_identical () =
       Alcotest.(check int) "same status" alias.status path_specific.status;
       Alcotest.(check string) "same body" alias.body path_specific.body)
 
+let test_bearer_scheme_is_case_insensitive () =
+  Test_support.with_store (fun store _ ->
+      List.iter [ "Bearer token"; "bearer token"; "BEARER token" ]
+        ~f:(fun authorization ->
+          Alcotest.(check int)
+            authorization 200
+            (request store
+               ~headers:
+                 [
+                   ("Authorization", authorization);
+                   ("content-type", "application/json");
+                 ]
+               `POST "/mcp" {|{"jsonrpc":"2.0","id":1,"method":"tools/list"}|})
+              .status))
+
 let test_unconfigured_protected_resource_is_not_found () =
   Test_support.with_store (fun store _ ->
       Alcotest.(check int)
@@ -339,6 +354,8 @@ let () =
             (test_calendar_endpoint_http "9999-12-31" "UTC");
           Alcotest.test_case "lower calendar endpoint HTTP" `Quick
             (test_calendar_endpoint_http "0000-01-01" "+02:00");
+          Alcotest.test_case "bearer scheme is case-insensitive" `Quick
+            test_bearer_scheme_is_case_insensitive;
           Alcotest.test_case "protected resource metadata alias" `Quick
             test_protected_resource_metadata_alias;
           Alcotest.test_case "overflow reaches HTTP as tool error" `Quick

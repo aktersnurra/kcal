@@ -1,0 +1,160 @@
+type t
+
+val make : store:Store_sqlite.t -> t
+
+val resolve_user :
+  t -> issuer:string -> subject:string -> (User.t, Error.t) result
+
+val save_product :
+  t ->
+  user:User.t ->
+  id:Product_id.t option ->
+  Product.Create.t ->
+  (Product.t, Error.t) result
+
+val search_products :
+  t ->
+  user:User.t ->
+  query:Search_query.t ->
+  limit:int ->
+  (Product.t list, Error.t) result
+
+val get_meal :
+  t ->
+  user:User.t ->
+  Meal_id.t ->
+  (Meal.t * (Meal_item_id.t * Meal_item.revision) list, Error.t) result
+(** With its items' revisions, oldest first. *)
+
+val query_meals :
+  ?search:Search_query.t ->
+  t ->
+  user:User.t ->
+  from:Ptime.t option ->
+  to_:Ptime.t option ->
+  limit:int ->
+  (Meal.t list, Error.t) result
+
+val update_meal :
+  t -> user:User.t -> Meal_id.t -> Meal.Patch.t -> (Meal.t, Error.t) result
+
+val add_item :
+  t -> user:User.t -> Meal_id.t -> Meal_item.entry -> (Meal.t, Error.t) result
+
+val update_item :
+  ?reason:string ->
+  ?quantity:float ->
+  t ->
+  user:User.t ->
+  Meal_item_id.t ->
+  Meal_item.Patch.t ->
+  (Meal.t, Error.t) result
+(** With [quantity], a product-linked item is rescaled from its own values and
+    keeps its link. *)
+
+val delete_item : t -> user:User.t -> Meal_item_id.t -> (Meal.t, Error.t) result
+val delete_meal : t -> user:User.t -> Meal_id.t -> (unit, Error.t) result
+
+val get_weigh_in :
+  t -> user:User.t -> Weigh_in_id.t -> (Weigh_in.t, Error.t) result
+
+val query_weigh_ins :
+  t ->
+  user:User.t ->
+  from:Ptime.t option ->
+  to_:Ptime.t option ->
+  limit:int ->
+  (Weigh_in.t list, Error.t) result
+
+val update_manual_weigh_in :
+  t ->
+  user:User.t ->
+  Weigh_in_id.t ->
+  Weigh_in.Patch.t ->
+  (Weigh_in.t, Error.t) result
+
+val delete_weigh_in :
+  t -> user:User.t -> Weigh_in_id.t -> (unit, Error.t) result
+
+val latest_weigh_in : t -> user:User.t -> (Weigh_in.t, Error.t) result
+val compile_search_query : t -> string list -> (Search_query.t, Error.t) result
+
+val daily_series :
+  t ->
+  user:User.t ->
+  zone:Time.zone ->
+  range:Date_range.t ->
+  (Summary.day list, Error.t) result
+
+type summary = {
+  current : Summary.t;
+  previous : (Date_range.t * Summary.t) option;
+      (** The equally long range just before, when it is representable. *)
+}
+
+val summary :
+  t ->
+  user:User.t ->
+  zone:Time.zone ->
+  range:Date_range.t ->
+  (summary, Error.t) result
+(** Judged against the user's goals, when set. *)
+
+val context : t -> user:User.t -> now:Ptime.t -> (Context.t, Error.t) result
+val goals : t -> user:User.t -> (Goals.t option, Error.t) result
+
+val set_goals : t -> user:User.t -> Goals.patch -> (Goals.t, Error.t) result
+(** Applies [patch] to the current goals: omitted goals are kept. *)
+
+val default_zone : t -> user:User.t -> (Time.zone, Error.t) result
+(** The goals' timezone, or UTC without goals. *)
+
+type correction_skip =
+  | Unit_changed of { logged_unit : string; current_unit : string }
+  | No_structured_basis
+
+type product_correction = {
+  product : Product.t;
+  items : (Meal_id.t * Ptime.t * Meal_item.t * Product.portion) list;
+      (** Each item as it stands, with its meal, when it was eaten, and the
+          nutrition the product now gives. *)
+  skipped : (Meal_id.t * Meal_item.t * correction_skip) list;
+      (** Items whose quantity the current version cannot interpret. *)
+  applied : bool;
+}
+
+val correct_meals_from_product :
+  t ->
+  user:User.t ->
+  Product_id.t ->
+  reason:string ->
+  dry_run:bool ->
+  (product_correction, Error.t) result
+(** Rescales live items logged from an earlier version of the product to its
+    current version, recording a revision with [reason] on each. *)
+
+val connect_withings :
+  t ->
+  user:User.t ->
+  key:Secret.Key.t ->
+  Withings.credentials ->
+  (Withings_connection.connected, Error.t) result
+
+val disconnect_withings : t -> user:User.t -> (unit, Error.t) result
+
+val withings_status :
+  t -> user:User.t -> (Withings_connection.status, Error.t) result
+
+val record_meal :
+  ?idempotency:Meal.idempotency ->
+  t ->
+  user:User.t ->
+  eaten_at:Ptime.t option ->
+  label:string option ->
+  Meal_item.entry list ->
+  (Meal.t * [ `Recorded | `Replayed ], Error.t) result
+(** Items from a product take its current version, scaled to the quantity and
+    linked to it. A retry with the same key and content replays. *)
+
+val record_manual_weigh_in :
+  t -> user:User.t -> Weigh_in.Create.t -> (Weigh_in.t, Error.t) result

@@ -2,7 +2,10 @@
 
 ; Library interfaces are enforced by lib/dune; entry points and tests have no public API.
 
+; Warnings are errors in every profile, so a release build cannot ship code the
+; development build would reject.
+
 (env
- (dev
+ (_
   (flags
    (:standard -w @A-4-33-40-41-42-43-34-44-70))))

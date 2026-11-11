@@ -9,6 +9,24 @@ let parse name fields =
     ~compile_search:(fun _ -> Alcotest.fail "unexpected search compilation")
     (`Assoc fields)
 
+let test_tools_and_published_schemas_agree () =
+  let published =
+    List.map Mcp_schema.tools ~f:(fun tool ->
+        match Yojson.Safe.Util.member "name" tool with
+        | `String name -> name
+        | _ -> Alcotest.fail "a published tool has no name")
+  in
+  let sorted = List.sort ~compare:String.compare in
+  Alcotest.(check (list string))
+    "every tool is published and every published tool exists"
+    (sorted (List.map Mcp_arguments.Tool.all ~f:Mcp_arguments.Tool.name))
+    (sorted published);
+  List.iter Mcp_arguments.Tool.all ~f:(fun tool ->
+      Alcotest.(check bool)
+        "name round-trips" true
+        (Option.is_some
+           (Mcp_arguments.Tool.of_name (Mcp_arguments.Tool.name tool))))
+
 let test_query_bounds_are_validated () =
   List.iter [ 0; -1; 501; Int.max_value ] ~f:(fun limit ->
       Alcotest.(check bool)
@@ -99,6 +117,8 @@ let () =
     [
       ( "query",
         [
+          Alcotest.test_case "tools and published schemas agree" `Quick
+            test_tools_and_published_schemas_agree;
           Alcotest.test_case "validates bounds" `Quick
             test_query_bounds_are_validated;
           Alcotest.test_case "defaults and endpoints" `Quick

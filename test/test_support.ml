@@ -70,6 +70,15 @@ let with_exclusive_lock setup f =
                 ~subject:"alice"))
       in
       let value = setup store user in
+      (* A rollback journal and no waiting, so the lock below fails reads as
+         well as writes, and at once. *)
+      let raw = Store_sqlite.For_testing.raw_database store in
+      Sqlite3.busy_timeout raw 0;
+      Alcotest.(check bool)
+        "rollback journal" true
+        (match Sqlite3.exec raw "PRAGMA journal_mode = DELETE" with
+        | Sqlite3.Rc.OK -> true
+        | _ -> false);
       let locker = Sqlite3.db_open path in
       Stdlib.Fun.protect
         ~finally:(fun () ->

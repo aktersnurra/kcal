@@ -11,14 +11,20 @@ let claims ?(issuer = "https://issuer.example") ?(subject = "alice")
 
 let verifier results = Oidc.of_verified_claims (fun _ -> results)
 
-let signed_token ?(issuer = "https://issuer.example")
+let jwk ?(kid = "test") ?(secret = "c2VjcmV0") () =
+  Stdlib.Printf.sprintf {|{"kty":"oct","k":"%s","kid":"%s","alg":"HS256"}|}
+    secret kid
+
+let jwks keys =
+  Jose.Jwks.of_string
+    (Stdlib.Printf.sprintf {|{"keys":[%s]}|} (String.concat ~sep:"," keys))
+
+let signed_token ?kid ?secret ?(issuer = "https://issuer.example")
     ?(audience = "kcal-client") ?(expires_at = 2_000_000_000) ?(scopes = "")
     ?scopes_json () =
   let key =
     Option.value_exn
-      (Result.ok
-         (Jose.Jwk.of_priv_json_string
-            {|{"kty":"oct","k":"c2VjcmV0","kid":"test","alg":"HS256"}|}))
+      (Result.ok (Jose.Jwk.of_priv_json_string (jwk ?kid ?secret ())))
   in
   let header = Jose.Header.make_header key in
   let scopes_json =
@@ -32,11 +38,11 @@ let signed_token ?(issuer = "https://issuer.example")
   Jose.Jws.sign ~header ~payload key
   |> Result.ok |> Option.value_exn |> Jose.Jws.to_string
 
-let oidc ?(max_age_s = Some 60) ~clock () =
-  let keys =
-    Jose.Jwks.of_string
-      {|{"keys":[{"kty":"oct","k":"c2VjcmV0","kid":"test","alg":"HS256"}]}|}
-  in
+(* A verifier over a provider whose published keys and availability the test
+   controls; [fetches] counts the JWKS requests it receives. *)
+let provider ?(max_age_s = Some 60) ?(before_fetch = fun () -> ()) ~clock () =
+  let keys = ref (jwks [ jwk () ]) in
+  let available = ref true in
   let fetches = ref 0 in
   let client =
     Oidc.
@@ -47,12 +53,95 @@ let oidc ?(max_age_s = Some 60) ~clock () =
         fetch_jwks =
           (fun ~uri:_ ->
             Int.incr fetches;
-            Ok { keys; max_age_s });
+            before_fetch ();
+            if !available then Ok { keys = !keys; max_age_s } else Error ());
       }
   in
   ( Oidc.make ~issuer:"https://issuer.example" ~audience:"kcal-client" ~clock
       ~client (),
+    keys,
+    available,
     fetches )
+
+let oidc ?max_age_s ~clock () =
+  let verifier, _, _, fetches = provider ?max_age_s ~clock () in
+  (verifier, fetches)
+
+let test_oidc_refetches_keys_for_an_unknown_key_id () =
+  let now = ref (time 1_000.) in
+  let verifier, keys, _, fetches = provider ~clock:(fun () -> !now) () in
+  ignore (verifier (signed_token ()));
+  (* The provider rotates its key well inside the cache lifetime. *)
+  keys := jwks [ jwk ~kid:"next" ~secret:"bmV4dA" () ];
+  let rotated = signed_token ~kid:"next" ~secret:"bmV4dA" () in
+  Alcotest.(check bool)
+    "too soon after the last fetch to ask again" true
+    (Result.is_error (verifier rotated));
+  Alcotest.(check int) "no refetch yet" 1 !fetches;
+  now := time 1_061.;
+  Alcotest.(check bool)
+    "rotated key accepted" true
+    (Result.is_ok (verifier rotated));
+  Alcotest.(check int) "one refetch" 2 !fetches;
+  ignore (verifier (signed_token ~kid:"ghost" ()));
+  ignore (verifier (signed_token ~kid:"ghost" ()));
+  Alcotest.(check int) "unknown key ids cannot force more refetches" 2 !fetches
+
+let test_oidc_serves_stale_keys_while_the_provider_is_down () =
+  let now = ref (time 1_000.) in
+  let verifier, _, available, fetches =
+    provider ~max_age_s:(Some 1) ~clock:(fun () -> !now) ()
+  in
+  ignore (verifier (signed_token ()));
+  available := false;
+  now := time 1_002.;
+  Alcotest.(check bool)
+    "expired keys still verify" true
+    (Result.is_ok (verifier (signed_token ())));
+  Alcotest.(check int) "one failed refresh" 2 !fetches;
+  now := time 1_003.;
+  ignore (verifier (signed_token ()));
+  Alcotest.(check int) "the failure is not retried at once" 2 !fetches;
+  now := time 1_040.;
+  ignore (verifier (signed_token ()));
+  Alcotest.(check int) "retried after the cooldown" 3 !fetches;
+  now := time 100_000.;
+  Alcotest.(check bool)
+    "keys a day past expiry are not trusted" true
+    (Result.is_error (verifier (signed_token ())))
+
+let test_oidc_does_not_hammer_an_unreachable_provider () =
+  let now = ref (time 1_000.) in
+  let verifier, _, available, fetches = provider ~clock:(fun () -> !now) () in
+  available := false;
+  Alcotest.(check bool)
+    "no keys, no verification" true
+    (Result.is_error (verifier (signed_token ())));
+  ignore (verifier (signed_token ()));
+  Alcotest.(check int) "one attempt" 1 !fetches;
+  available := true;
+  now := time 1_031.;
+  Alcotest.(check bool)
+    "recovers after the cooldown" true
+    (Result.is_ok (verifier (signed_token ())))
+
+let test_oidc_concurrent_requests_share_one_refresh () =
+  Eio_main.run @@ fun _ ->
+  let verifier, _, _, fetches =
+    provider ~before_fetch:Eio.Fiber.yield ~clock:(fun () -> time 1_000.) ()
+  in
+  let verify () = Result.is_ok (verifier (signed_token ())) in
+  let first, second = Eio.Fiber.pair verify verify in
+  Alcotest.(check bool) "both verified" true (first && second);
+  Alcotest.(check int) "one fetch" 1 !fetches
+
+let test_oidc_timeout_is_a_transport_failure () =
+  let client =
+    Oidc.For_testing.client_of_get (fun _ -> raise Eio.Time.Timeout)
+  in
+  Alcotest.(check bool)
+    "timed out fetch fails without raising" true
+    (Result.is_error (client.fetch_jwks ~uri:"https://example.test/keys"))
 
 let test_oidc_verifies_signed_jwt_and_cache () =
   let now = ref (time 1_000.) in
@@ -316,6 +405,16 @@ let () =
             (test_oidc_rejects_invalid_endpoint "https://-invalid.example/keys");
           Alcotest.test_case "numeric HTTPS host" `Quick
             (test_oidc_rejects_invalid_endpoint "https://127.0.0.1:443/keys");
+          Alcotest.test_case "unknown key id refetches keys" `Quick
+            test_oidc_refetches_keys_for_an_unknown_key_id;
+          Alcotest.test_case "stale keys while the provider is down" `Quick
+            test_oidc_serves_stale_keys_while_the_provider_is_down;
+          Alcotest.test_case "unreachable provider is not hammered" `Quick
+            test_oidc_does_not_hammer_an_unreachable_provider;
+          Alcotest.test_case "concurrent requests share one refresh" `Quick
+            test_oidc_concurrent_requests_share_one_refresh;
+          Alcotest.test_case "timeout is a transport failure" `Quick
+            test_oidc_timeout_is_a_transport_failure;
           Alcotest.test_case "OIDC preserves validated scopes" `Quick
             test_oidc_preserves_validated_scopes;
           Alcotest.test_case "OIDC preserves array scopes" `Quick

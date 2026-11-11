@@ -1,0 +1,16 @@
+(library
+ (name kcal_application)
+ (wrapped false)
+ (libraries
+  kcal_store
+  kcal_domain
+  kcal_kernel
+  base
+  ptime
+  logs
+  uri
+  eio
+  digestif
+  base64
+  mirage-crypto-rng
+  mirage-crypto-rng.unix))

@@ -113,6 +113,64 @@ let test_credentials_are_replaced_and_refresh_failure_marks_reauthorization () =
         | _ -> false);
       ignore connection)
 
+let test_stale_rejection_cannot_condemn_refreshed_connection () =
+  Test_support.with_store (fun store user ->
+      let key =
+        Option.value_exn (Result.ok (Secret.Key.of_bytes (Bytes.make 32 'k')))
+      in
+      let stale =
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.replace_withings_connection store ~user ~key
+                (credentials "old-access" "old-refresh")))
+      in
+      (* Another sync refreshes the tokens after [stale] was read. *)
+      ignore
+        (Option.value_exn
+           (Result.ok
+              (Store_sqlite.refresh_withings_credentials store ~user
+                 ~connection:stale ~key
+                 {
+                   (credentials "new-access" "new-refresh") with
+                   expires_at =
+                     Option.value_exn (Ptime.of_float_s 1_800_010_800.);
+                 })));
+      Alcotest.(check bool)
+        "mark with the stale connection is refused" true
+        (Result.is_error
+           (Store_sqlite.mark_withings_reauthorization store ~user
+              ~connection:stale));
+      Alcotest.(check bool)
+        "still connected" true
+        (match Store_sqlite.get_withings_status store ~user with
+        | Ok (Withings_connection.Connected _) -> true
+        | _ -> false))
+
+let test_new_oauth_state_discards_expired_ones () =
+  Test_support.with_store (fun store user ->
+      let at seconds = Option.value_exn (Ptime.of_float_s seconds) in
+      let create hash ~expires_at ~now =
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.create_withings_oauth_state store ~user
+                ~state_hash:hash ~expires_at:(at expires_at) ~now:(at now)))
+      in
+      create "first" ~expires_at:1_600. ~now:1_000.;
+      create "second" ~expires_at:1_700. ~now:1_100.;
+      create "third" ~expires_at:2_300. ~now:1_700.;
+      let statement =
+        Sqlite3.prepare
+          (Store_sqlite.For_testing.raw_database store)
+          "SELECT group_concat(state_hash) FROM withings_oauth_states"
+      in
+      Stdlib.Fun.protect
+        ~finally:(fun () -> ignore (Sqlite3.finalize statement))
+        (fun () ->
+          ignore (Sqlite3.step statement);
+          Alcotest.(check string)
+            "only the live state remains" "third"
+            (Sqlite3.column_text statement 0)))
+
 let test_exchange_code_sends_redirect_uri () =
   let calls = ref [] in
   let request =
@@ -600,6 +658,11 @@ let () =
     [
       ( "atomic lifecycle",
         [
+          Alcotest.test_case
+            "stale rejection cannot condemn refreshed connection" `Quick
+            test_stale_rejection_cannot_condemn_refreshed_connection;
+          Alcotest.test_case "new OAuth state discards expired ones" `Quick
+            test_new_oauth_state_discards_expired_ones;
           Alcotest.test_case "stale refresh scoped to expected account" `Quick
             test_refresh_scoped_to_expected_account;
           Alcotest.test_case "disconnected and incomplete status" `Quick

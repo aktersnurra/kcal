@@ -2,12 +2,12 @@
  (name calendar_test_support)
  (wrapped false)
  (modules calendar_test_support)
- (libraries base kcal hegel))
+ (libraries base kcal hegel ptime))
 
 (test
  (name test_migration)
  (modules test_migration test_support)
- (libraries alcotest sqlite3 kcal base)
+ (libraries alcotest sqlite3 kcal base ptime yojson)
  (deps
   (glob_files ../migrations/[0-9]*.sql)))
 
@@ -21,19 +21,19 @@
 (test
  (name test_withings_oauth)
  (modules test_withings_oauth test_support)
- (libraries alcotest sqlite3 kcal base)
+ (libraries alcotest sqlite3 kcal base ptime uri yojson)
  (deps ../migrations/001_ledger.sql ../migrations/002_withings.sql))
 
 (test
  (name test_withings_client)
  (modules test_withings_client test_support)
- (libraries alcotest sqlite3 kcal base)
+ (libraries alcotest sqlite3 kcal base eio ptime yojson)
  (deps ../migrations/001_ledger.sql ../migrations/002_withings.sql))
 
 (test
  (name test_withings_sync)
  (modules test_withings_sync test_support)
- (libraries alcotest sqlite3 kcal hegel base)
+ (libraries alcotest sqlite3 kcal hegel base ptime yojson)
  (preprocess
   (per_module
    ((pps ppx_sexp_conv ppx_compare ppx_hegel_test)
@@ -43,26 +43,26 @@
 (test
  (name test_withings_http)
  (modules test_withings_http test_support)
- (libraries alcotest sqlite3 kcal base)
+ (libraries alcotest sqlite3 kcal base ptime yojson)
  (deps ../migrations/001_ledger.sql ../migrations/002_withings.sql))
 
 (test
  (name test_withings_reconciliation)
  (modules test_withings_reconciliation test_support)
- (libraries alcotest sqlite3 kcal base)
+ (libraries alcotest sqlite3 kcal base ptime yojson)
  (deps ../migrations/001_ledger.sql ../migrations/002_withings.sql))
 
 (test
  (name test_domain)
  (modules test_domain)
- (libraries alcotest kcal hegel calendar_test_support base)
+ (libraries alcotest kcal hegel calendar_test_support base ptime)
  (preprocess
   (pps ppx_sexp_conv ppx_compare ppx_hegel_test)))
 
 (test
  (name test_meal_store)
  (modules test_meal_store test_support)
- (libraries alcotest sqlite3 kcal hegel base)
+ (libraries alcotest sqlite3 kcal hegel base logs ptime yojson)
  (preprocess
   (per_module
    ((pps ppx_sexp_conv ppx_compare ppx_hegel_test)
@@ -72,31 +72,42 @@
 (test
  (name test_weigh_in_store)
  (modules test_weigh_in_store test_support)
- (libraries alcotest sqlite3 kcal base)
+ (libraries alcotest sqlite3 kcal base ptime yojson)
  (deps ../migrations/001_ledger.sql))
 
 (test
  (name test_auth)
  (modules test_auth test_support)
- (libraries alcotest sqlite3 kcal base)
+ (libraries
+  alcotest
+  sqlite3
+  kcal
+  base
+  eio_main
+  base64
+  cohttp
+  eio
+  jose
+  ptime
+  yojson)
  (deps ../migrations/001_ledger.sql))
 
 (test
  (name test_service_isolation)
  (modules test_service_isolation test_support)
- (libraries alcotest sqlite3 kcal base)
+ (libraries alcotest sqlite3 kcal base ptime yojson)
  (deps ../migrations/001_ledger.sql))
 
 (test
  (name test_http)
  (modules test_http test_support)
- (libraries alcotest sqlite3 kcal base)
+ (libraries alcotest sqlite3 kcal base httpun ptime yojson)
  (deps ../migrations/001_ledger.sql))
 
 (test
  (name test_mcp)
  (modules test_mcp test_support)
- (libraries alcotest sqlite3 yojson kcal base logs)
+ (libraries alcotest sqlite3 yojson kcal base logs ptime uri)
  (deps ../migrations/001_ledger.sql))
 
 (test
@@ -107,19 +118,19 @@
 (test
  (name test_summary)
  (modules test_summary)
- (libraries alcotest kcal hegel calendar_test_support base)
+ (libraries alcotest kcal hegel calendar_test_support base ptime)
  (preprocess
   (pps ppx_sexp_conv ppx_compare ppx_hegel_test)))
 
 (test
  (name test_product_store)
  (modules test_product_store test_support)
- (libraries alcotest sqlite3 kcal base))
+ (libraries alcotest sqlite3 kcal base ptime yojson))
 
 (test
  (name test_ranked_search)
  (modules test_ranked_search test_support)
- (libraries alcotest sqlite3 yojson kcal hegel base)
+ (libraries alcotest sqlite3 yojson kcal hegel base ptime)
  (preprocess
   (per_module
    ((pps ppx_sexp_conv ppx_compare ppx_hegel_test)
@@ -132,13 +143,13 @@
 
 (rule
  (target search_query_fault_injected.ml)
- (deps search_query_fault_prefix.ml.inc ../lib/search_query.ml)
+ (deps search_query_fault_prefix.ml.inc ../lib/store/search_query.ml)
  (action
   (with-stdout-to
    %{target}
    (progn
     (cat search_query_fault_prefix.ml.inc)
-    (cat ../lib/search_query.ml)))))
+    (cat ../lib/store/search_query.ml)))))
 
 (test
  (name test_search_query_cleanup)
@@ -148,17 +159,17 @@
 (test
  (name test_test_support)
  (modules test_test_support test_support)
- (libraries alcotest sqlite3 kcal base))
+ (libraries alcotest sqlite3 kcal base ptime yojson))
 
 (test
  (name test_id)
  (modules test_id)
- (libraries alcotest base kcal))
+ (libraries alcotest base kcal sexplib0))
 
 (test
  (name test_mcp_arguments)
  (modules test_mcp_arguments)
- (libraries alcotest base kcal))
+ (libraries alcotest base kcal ptime yojson))
 
 (test
  (name test_cli)
@@ -171,11 +182,11 @@
 (test
  (name test_goals)
  (modules test_goals)
- (libraries alcotest kcal base))
+ (libraries alcotest kcal base ptime))
 
 (test
  (name test_meal_history)
  (modules test_meal_history test_support)
- (libraries alcotest sqlite3 kcal base yojson)
+ (libraries alcotest sqlite3 kcal base yojson ptime)
  (deps
   (glob_files ../migrations/[0-9]*.sql)))

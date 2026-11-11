@@ -37,11 +37,19 @@ Configuration errors name the offending setting but never print its value.
 
 `KCAL_PUBLIC_BASE_URL` is an absolute HTTPS URL, optionally with a deployment path; the protected MCP resource is `BASE/mcp`. `KCAL_OIDC_AUDIENCE` is the expected token audience and is independent of that URL, so an opaque ID such as `kcal` is valid. `KCAL_LISTEN_ADDRESS` is a private listener — a reverse proxy such as Caddy is expected to own public TLS, and the service is expected to run under a supervisor such as FreeBSD `rc.d`. Provisioning and deployment live outside this repository.
 
-Migrations are forward-only and run when the database is opened. Back up the SQLite file before upgrading.
+Migrations are forward-only and run when the database is opened. The database uses SQLite write-ahead logging, so recent writes can live in `<database>-wal` beside the main file: back up with `sqlite3 <database> ".backup <copy>"`, or stop the service first, rather than copying the main file alone. Back up before upgrading.
 
 ## Architecture
 
-- `lib/` — the library: domain types, SQLite store, MCP dispatch, OIDC verification, Withings client and transport
+- `lib/` — the library, one dune library per layer. Each layer may use only the layers listed before it, and the build rejects anything else:
+  - `kernel/` — identifiers, errors, dates and times, nutrition values
+  - `domain/` — users, meals, products, weigh-ins, goals, summaries, context, Withings types, secrets
+  - `store/` — SQLite: `Sqlite_db` (the connection and shared query helpers) under one `Store_*` module per aggregate, gathered by `Store_sqlite`, plus migrations and search queries
+  - `application/` — `Service` and the Withings OAuth, sync and integration flows
+  - `mcp/` — MCP argument parsing, JSON, schemas and dispatch; may not use `store/`
+  - `edge/` — HTTPS, OIDC, auth, the Withings transport, config, logging and the HTTP adapter; may not use `store/`
+
+  `lib/dune` defines the `kcal` library, which re-exports all six for `bin/` and `test/`.
 - `bin/kcal.ml` — CLI entry points (`serve`, `migrate`, `sync-withings`)
 - `migrations/` — forward-only SQL migrations
 - `test/` — Alcotest suites; the store and HTTP layers are tested against real SQLite
@@ -111,7 +119,7 @@ Every argument mistake comes back as a tool result with `isError: true` and an e
 
 Set `WITHINGS_CLIENT_ID`, `WITHINGS_CLIENT_SECRET`, and `KCAL_TOKEN_ENCRYPTION_KEY` to enable Withings in `kcal serve`; `kcal sync-withings` requires all three. The encryption key is exactly 64 hexadecimal characters (32 bytes); keep it secret and stable, since it encrypts access and refresh tokens at rest.
 
-Configure the Withings callback URL as `$KCAL_PUBLIC_BASE_URL/withings/callback` and webhook URL as `$KCAL_PUBLIC_BASE_URL/withings/webhook`. OAuth requests only `user.metrics`. Credentials are never returned in MCP or HTTP responses.
+Configure the Withings callback URL as `$KCAL_PUBLIC_BASE_URL/withings/callback` and webhook URL as `$KCAL_PUBLIC_BASE_URL/withings/webhook`. OAuth requests only `user.metrics`. Credentials are never returned in MCP or HTTP responses. The webhook is unauthenticated, so it answers `200` for connected and unknown accounts alike and runs at most one sync per connection at a time; notifications that arrive during a sync are folded into one further run.
 
 Invoke this command periodically to reconcile connected accounts:
 

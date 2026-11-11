@@ -55,14 +55,16 @@ let serve (config : Config.server) =
               Withings_sync.make ~store ~client
                 ~token_key:integration.token_encryption_key ~now
             in
-            Http_adapter.
+            Withings_integration.
               {
+                store;
                 oauth = Withings_oauth.make ~store ~now;
                 client;
                 token_key = integration.token_encryption_key;
                 sync =
                   (fun user connection ->
                     Withings_sync.sync sync ~user ~connection);
+                sync_gate = Sync_gate.create ();
                 callback_url = config.public_base_url ^ "/withings/webhook";
                 client_id = integration.client_id;
                 redirect_uri = config.public_base_url ^ "/withings/callback";

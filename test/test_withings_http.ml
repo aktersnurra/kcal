@@ -29,8 +29,9 @@ let integration ?(sync = fun _ _ -> Ok ()) store =
 
     let subscribe ~access_token:_ ~callback_url:_ = Ok ()
   end in
-  Http_adapter.
+  Withings_integration.
     {
+      store;
       oauth =
         Withings_oauth.make ~store ~now:(fun () ->
             Option.value_exn (Ptime.of_float_s 1_800_000_000.));
@@ -38,6 +39,7 @@ let integration ?(sync = fun _ _ -> Ok ()) store =
       token_key =
         Option.value_exn (Result.ok (Secret.Key.of_bytes (Bytes.make 32 'k')));
       sync;
+      sync_gate = Sync_gate.create ();
       callback_url = "https://kcal.example.com/withings/webhook";
       client_id = "client";
       redirect_uri = "https://kcal.example.com/withings/callback";
@@ -60,8 +62,10 @@ let test_webhook_boundaries () =
            ~headers:[ ("content-type", "application/x-www-form-urlencoded") ]
            `POST "/withings/webhook" "{}")
           .status;
+      (* The same answer as for a known account, so the endpoint does not
+         reveal which Withings accounts are connected. *)
       Alcotest.(check int)
-        "unknown identity" 404
+        "unknown identity" 200
         (request store
            ~headers:[ ("content-type", "application/x-www-form-urlencoded") ]
            `POST "/withings/webhook" "userid=unknown&appli=1")
@@ -104,6 +108,74 @@ let test_known_webhook_schedules_sync_after_validation () =
       Option.iter ~f:(fun sync -> sync ()) !scheduled;
       Alcotest.(check int) "known webhook triggers shared sync" 1 !sync_calls;
       ignore connection)
+
+let webhook store ~withings ~schedule_sync =
+  Http_adapter.handle_withings ~protected_resource:None ~schedule_sync
+    ~withings:(Some withings) ~auth:(auth store [])
+    ~service:(Service.make ~store) ~method_:`POST ~path:"/withings/webhook"
+    ~headers:[ ("content-type", "application/x-www-form-urlencoded") ]
+    ~body:"userid=known&appli=1"
+
+let with_known_connection f =
+  Test_support.with_store (fun store _ ->
+      let user =
+        Option.value_exn
+          (Result.ok
+             (Store_sqlite.resolve_user store ~issuer:"issuer"
+                ~subject:"webhook-user"))
+      in
+      ignore
+        (Option.value_exn
+           (Result.ok
+              (Test_support.ensure_withings_connection store ~user
+                 ~withings_user_id:"known")));
+      f store)
+
+let test_failing_webhook_sync_does_not_escape () =
+  with_known_connection (fun store ->
+      let withings =
+        integration ~sync:(fun _ _ -> failwith "unexpected failure") store
+      in
+      let response =
+        webhook store ~withings ~schedule_sync:(fun sync -> sync ())
+      in
+      Alcotest.(check int) "acknowledged" 200 response.status)
+
+let test_overlapping_webhooks_share_one_sync () =
+  with_known_connection (fun store ->
+      let sync_calls = ref 0 in
+      let during_first_sync = ref (fun () -> ()) in
+      let withings =
+        integration
+          ~sync:(fun _ _ ->
+            Int.incr sync_calls;
+            if !sync_calls = 1 then !during_first_sync ();
+            Ok ())
+          store
+      in
+      let scheduled = Queue.create () in
+      let notify () =
+        Alcotest.(check int)
+          "acknowledged" 200
+          (webhook store ~withings ~schedule_sync:(Queue.enqueue scheduled))
+            .status
+      in
+      notify ();
+      notify ();
+      Alcotest.(check int)
+        "waiting notifications schedule one sync" 1 (Queue.length scheduled);
+      (during_first_sync :=
+         fun () ->
+           notify ();
+           notify ());
+      (Queue.dequeue_exn scheduled) ();
+      Alcotest.(check int)
+        "nothing more scheduled while it ran" 0 (Queue.length scheduled);
+      Alcotest.(check int)
+        "notifications during the sync get exactly one more run" 2 !sync_calls;
+      notify ();
+      Alcotest.(check int)
+        "a later notification schedules again" 1 (Queue.length scheduled))
 
 let test_connect_requires_authentication () =
   Test_support.with_store (fun store _ ->
@@ -258,6 +330,10 @@ let () =
       ( "routes",
         [
           Alcotest.test_case "webhook boundaries" `Quick test_webhook_boundaries;
+          Alcotest.test_case "failing webhook sync does not escape" `Quick
+            test_failing_webhook_sync_does_not_escape;
+          Alcotest.test_case "overlapping webhooks share one sync" `Quick
+            test_overlapping_webhooks_share_one_sync;
           Alcotest.test_case "known webhook schedules sync" `Quick
             test_known_webhook_schedules_sync_after_validation;
           Alcotest.test_case "connect authentication" `Quick

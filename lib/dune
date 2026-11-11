@@ -1,41 +1,20 @@
+; Umbrella over the six layer libraries, so entry points and tests depend on one name.
+
 (library
  (name kcal)
  (wrapped false)
- (preprocess
-  (pps ppx_sexp_conv ppx_compare ppx_let))
+ (modules)
  (libraries
-  base
-  cmdliner
-  jose
-  ptime
-  sqlite3
-  unix
-  uuidm
-  yojson
-  base64
-  digestif
-  mirage-crypto
-  mirage-crypto-rng.unix
-  eio
-  eio_posix
-  httpun
-  httpun-eio
-  cohttp-eio
-  tls-eio
-  logs))
-
-(rule
- (target embedded_migrations.ml)
- (deps
-  (glob_files ../migrations/[0-9]*.sql))
- (action
-  (with-stdout-to
-   %{target}
-   (run %{exe:../tools/embed_migrations.exe} %{deps}))))
+  (re_export kcal_kernel)
+  (re_export kcal_domain)
+  (re_export kcal_store)
+  (re_export kcal_application)
+  (re_export kcal_mcp)
+  (re_export kcal_edge)))
 
 ; Executable/test modules have no exported API; every library module must.
 
 (env
- (dev
+ (_
   (flags
    (:standard -w @70))))

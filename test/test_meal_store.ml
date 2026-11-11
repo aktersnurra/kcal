@@ -20,6 +20,104 @@ let test_user_resolution_is_stable () =
         (User_id.to_string first.id)
         (User_id.to_string second.id))
 
+let test_known_user_resolution_does_not_write () =
+  Test_support.with_store (fun store first ->
+      Alcotest.(check bool)
+        "updates to users abort" true
+        (match
+           Sqlite3.exec
+             (Store_sqlite.For_testing.raw_database store)
+             "CREATE TEMP TRIGGER users_are_not_rewritten BEFORE UPDATE ON \
+              users BEGIN SELECT RAISE(ABORT, 'user row rewritten'); END"
+         with
+        | Sqlite3.Rc.OK -> true
+        | _ -> false);
+      match
+        Store_sqlite.resolve_user store ~issuer:"https://issuer.example"
+          ~subject:"alice"
+      with
+      | Ok user ->
+          Alcotest.(check string)
+            "same user"
+            (User_id.to_string first.id)
+            (User_id.to_string user.id)
+      | Error _ -> Alcotest.fail "resolving a known user wrote to its row")
+
+let pragma raw name =
+  let statement = Sqlite3.prepare raw ("PRAGMA " ^ name) in
+  Stdlib.Fun.protect
+    ~finally:(fun () -> ignore (Sqlite3.finalize statement))
+    (fun () ->
+      match Sqlite3.step statement with
+      | Sqlite3.Rc.ROW -> Sqlite3.column_text statement 0
+      | _ -> Alcotest.fail ("no value for PRAGMA " ^ name))
+
+let test_file_database_uses_wal_and_waits_for_locks () =
+  let path = Stdlib.Filename.temp_file "kcal-store" ".sqlite" in
+  let store = Option.value_exn (Result.ok (Store_sqlite.open_database ~path)) in
+  Stdlib.Fun.protect
+    ~finally:(fun () ->
+      Option.value_exn (Result.ok (Store_sqlite.close store));
+      Stdlib.Sys.remove path)
+    (fun () ->
+      let raw = Store_sqlite.For_testing.raw_database store in
+      Alcotest.(check string) "journal mode" "wal" (pragma raw "journal_mode");
+      Alcotest.(check string) "busy timeout" "5000" (pragma raw "busy_timeout");
+      Alcotest.(check string) "foreign keys" "1" (pragma raw "foreign_keys"))
+
+(* The messages logged while [f] runs. *)
+let logged f =
+  let messages = ref [] in
+  let report _ _ ~over k msgf =
+    msgf (fun ?header:_ ?tags:_ fmt ->
+        Stdlib.Format.kasprintf
+          (fun message ->
+            messages := message :: !messages;
+            over ();
+            k ())
+          fmt)
+  in
+  let previous = Logs.reporter () and level = Logs.level () in
+  Logs.set_reporter { Logs.report };
+  Logs.set_level ~all:true (Some Logs.Error);
+  Stdlib.Fun.protect
+    ~finally:(fun () ->
+      Logs.set_reporter previous;
+      Logs.set_level ~all:true level)
+    (fun () ->
+      let value = f () in
+      (value, List.rev !messages))
+
+let test_storage_failure_is_logged_with_its_cause () =
+  Test_support.with_exclusive_lock
+    (fun store user -> Test_support.create_meal store user)
+    (fun store user meal ->
+      let result, messages =
+        logged (fun () -> Store_sqlite.delete_meal store ~user meal.id)
+      in
+      Alcotest.(check bool) "write failed" true (Result.is_error result);
+      Alcotest.(check bool)
+        "the log names SQLite's reason" true
+        (List.exists messages ~f:(fun message ->
+             String.is_substring message ~substring:"database is locked")))
+
+let test_statements_are_prepared_once_and_reused () =
+  Test_support.with_store (fun store user ->
+      let meal = Test_support.create_meal store user in
+      let read () =
+        Alcotest.(check bool)
+          "meal read" true
+          (Result.is_ok (Store_sqlite.get_meal store ~user meal.id))
+      in
+      read ();
+      let cached = Store_sqlite.For_testing.cached_statement_count store in
+      Alcotest.(check bool) "statements are kept" true (cached > 0);
+      read ();
+      read ();
+      Alcotest.(check int)
+        "repeating a query prepares nothing new" cached
+        (Store_sqlite.For_testing.cached_statement_count store))
+
 let test_cannot_read_another_users_meal () =
   Test_support.with_two_users (fun store alice bob ->
       let meal = Test_support.create_meal store alice in
@@ -445,6 +543,14 @@ let () =
             `Quick test_search_rejects_blank_text_and_invalid_limits;
           Alcotest.test_case "user resolution is stable" `Quick
             test_user_resolution_is_stable;
+          Alcotest.test_case "resolving a known user does not write" `Quick
+            test_known_user_resolution_does_not_write;
+          Alcotest.test_case "file database uses WAL and waits for locks" `Quick
+            test_file_database_uses_wal_and_waits_for_locks;
+          Alcotest.test_case "storage failure is logged with its cause" `Quick
+            test_storage_failure_is_logged_with_its_cause;
+          Alcotest.test_case "statements are prepared once and reused" `Quick
+            test_statements_are_prepared_once_and_reused;
           Alcotest.test_case "users cannot read each other's meals" `Quick
             test_cannot_read_another_users_meal;
           Alcotest.test_case "foreign meal operations are hidden" `Quick

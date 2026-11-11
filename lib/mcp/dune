@@ -1,0 +1,13 @@
+(library
+ (name kcal_mcp)
+ (wrapped false)
+ (libraries
+  kcal_application
+  kcal_domain
+  kcal_kernel
+  base
+  ptime
+  yojson
+  logs
+  unix
+  digestif))

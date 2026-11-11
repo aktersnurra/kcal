@@ -16,18 +16,25 @@ depends: [
   "ppx_sexp_conv" {>= "v0.17" & < "v0.18~"}
   "ppx_compare" {>= "v0.17" & < "v0.18~"}
   "ppx_let" {>= "v0.17" & < "v0.18~"}
+  "sexplib0" {>= "v0.17" & < "v0.18~"}
   "ocamlformat" {= "0.29.0" & with-dev-setup}
   "eio"
   "eio_main"
   "eio_posix"
+  "cohttp"
   "cohttp-eio"
+  "tls"
   "tls-eio"
+  "httpun"
   "httpun-eio"
+  "gluten"
+  "bigstringaf"
   "jose"
   "mirage-crypto"
   "mirage-crypto-rng"
   "digestif"
   "x509"
+  "domain-name"
   "base64"
   "uri"
   "sqlite3"

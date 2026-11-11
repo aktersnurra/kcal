@@ -1,0 +1,30 @@
+(library
+ (name kcal_edge)
+ (wrapped false)
+ (preprocess
+  (pps ppx_sexp_conv ppx_let))
+ (libraries
+  kcal_mcp
+  kcal_application
+  kcal_domain
+  kcal_kernel
+  base
+  cmdliner
+  ptime
+  uri
+  yojson
+  logs
+  unix
+  jose
+  eio
+  httpun
+  httpun-eio
+  gluten
+  bigstringaf
+  cohttp
+  cohttp-eio
+  tls
+  tls-eio
+  x509
+  domain-name
+  mirage-crypto-rng.unix))
