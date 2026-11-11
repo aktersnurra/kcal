@@ -1907,3 +1907,16 @@ let set_goals db ~user (goals : Goals.t) =
       with
       | Error _ as error -> error
       | Ok () -> row_or_not_found statement goals_of_row)
+
+(* Read and write in one transaction, so a concurrent set_goals cannot land
+   between them and be silently overwritten by the merge. *)
+let update_goals db ~user f =
+  in_transaction db (fun () ->
+      let* current =
+        match get_goals db ~user with
+        | Ok goals -> Ok (Some goals)
+        | Error Error.Not_found -> Ok None
+        | Error _ as error -> error
+      in
+      let* goals = f current in
+      set_goals db ~user goals)

@@ -300,7 +300,7 @@ let handle_withings ~protected_resource ~schedule_sync ~withings ~auth ~service
                           m "method=%s notification=%b outcome=%s" method_name
                             notification outcome);
                       if notification then plain 202 ""
-                      else json 200 (Yojson.Safe.to_string response)
+                      else json 200 (Mcp_json.to_string response)
                   | Error `Forbidden ->
                       Mcp_log.warn (fun m ->
                           m "method=%s notification=%b outcome=forbidden"

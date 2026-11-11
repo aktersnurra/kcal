@@ -99,6 +99,18 @@ module Eating_window = struct
       Ok (Closed { opens_at })
 end
 
+type 'a change = Keep | Clear | Set of 'a
+
+type patch = {
+  timezone : Time.zone option;
+  weekday_calories : Calorie_target.t option;
+  weekend_calories : Calorie_target.t option;
+  protein : Protein_target.t change;
+  eating_window : Eating_window.t change;
+  target_weight_kg : Nutrition.Kilograms.t change;
+  notes : string change;
+}
+
 type t = {
   timezone : Time.zone;
   weekday_calories : Calorie_target.t;
@@ -116,3 +128,57 @@ let max_notes_length = 2000
 let calorie_target_on goals date =
   if Date.is_weekend date then goals.weekend_calories
   else goals.weekday_calories
+
+let change current = function
+  | Keep -> current
+  | Clear -> None
+  | Set value -> Some value
+
+let apply (current : t option) (patch : patch) : (t, Error.t) Result.t =
+  let required name value from_current =
+    match (value, current) with
+    | Some value, _ -> Ok value
+    | None, Some goals -> Ok (from_current goals)
+    | None, None -> Error name
+  in
+  let timezone =
+    required "timezone" patch.timezone (fun (g : t) -> g.timezone)
+  in
+  let weekday =
+    required "weekday_calorie_target_kcal" patch.weekday_calories
+      (fun (g : t) -> g.weekday_calories)
+  in
+  let weekend =
+    required "weekend_calorie_target_kcal" patch.weekend_calories
+      (fun (g : t) -> g.weekend_calories)
+  in
+  match (timezone, weekday, weekend) with
+  | Ok timezone, Ok weekday_calories, Ok weekend_calories ->
+      let kept f = Option.bind current ~f in
+      Ok
+        ({
+           timezone;
+           weekday_calories;
+           weekend_calories;
+           protein = change (kept (fun (g : t) -> g.protein)) patch.protein;
+           eating_window =
+             change (kept (fun (g : t) -> g.eating_window)) patch.eating_window;
+           target_weight_kg =
+             change
+               (kept (fun (g : t) -> g.target_weight_kg))
+               patch.target_weight_kg;
+           notes = change (kept (fun (g : t) -> g.notes)) patch.notes;
+         }
+          : t)
+  | _ ->
+      let missing =
+        List.filter_map
+          [ Result.error timezone; Result.error weekday; Result.error weekend ]
+          ~f:Fn.id
+      in
+      Error
+        (Error.Rejected
+           ("no goals are set yet, so the first set_goals needs timezone, \
+             weekday_calorie_target_kcal and weekend_calorie_target_kcal; \
+             missing: "
+           ^ String.concat ~sep:", " missing))

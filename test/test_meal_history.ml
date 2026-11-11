@@ -41,6 +41,17 @@ let error_text service user name arguments =
       Yojson.Safe.Util.to_string (field "text" content)
   | _ -> Alcotest.fail (name ^ ": expected a tool error")
 
+(* What a client receives: the tool's text content and the whole JSON-RPC
+   response as kcal serializes it. *)
+let emitted service user name arguments =
+  let result = `Assoc (call service user name arguments) in
+  let text =
+    match field "content" result with
+    | `List [ content ] -> Yojson.Safe.Util.to_string (field "text" content)
+    | _ -> Alcotest.fail (name ^ ": expected one content item")
+  in
+  (text, Mcp_json.to_string result)
+
 let json =
   Alcotest.testable (Yojson.Safe.pretty_print ?std:None) Yojson.Safe.equal
 
@@ -256,7 +267,7 @@ let test_logging_from_a_product () =
       let item = List.hd_exn (items_of meal) in
       Alcotest.check json "kcal scaled 45/40 and rounded" (`Int 180)
         (field "calories_kcal" item);
-      Alcotest.check json "protein scaled" (`Float 33.75)
+      Alcotest.check json "protein scaled, shown to 0.1 g" (`Float 33.8)
         (field "protein_g" item);
       Alcotest.check json "description defaults to the name"
         (`String "Protein shake") (field "description" item);
@@ -566,17 +577,283 @@ let test_goals_round_trip_and_context () =
               (List.filter goals ~f:(fun (name, _) ->
                    not (String.equal name "eating_window_end"))))
            ~substring:"together");
-      let cleared =
+      let partial =
         payload service user "set_goals"
           (List.filter goals ~f:(fun (name, _) ->
                not (String.is_prefix name ~prefix:"eating_window")))
       in
-      Alcotest.check json "replacement clears omitted goals" `Null
-        (field "eating_window_start" cleared);
-      Alcotest.check json "omitted notes are cleared too" `Null
+      Alcotest.check json "omitting the window keeps it" (`String "12:00")
+        (field "eating_window_start" partial);
+      Alcotest.check json "omitted notes are kept"
+        (`String "Losing about 0.5 kg a week; weekends are flexible.")
         (field "notes"
            (payload service user "set_goals"
               (List.Assoc.remove goals ~equal:String.equal "notes"))))
+
+let goals_field service user name =
+  field name (payload service user "get_context" [] |> field "goals")
+
+let test_set_goals_is_a_partial_update () =
+  with_service (fun service user ->
+      let first_error =
+        error_text service user "set_goals"
+          [
+            ("timezone", `String "UTC");
+            ("weekday_calorie_target_kcal", `Int 1800);
+          ]
+      in
+      Alcotest.(check bool)
+        "the first call names the missing required goal" true
+        (String.is_substring first_error
+           ~substring:"missing: weekend_calorie_target_kcal");
+      Alcotest.check json "nothing was stored" `Null
+        (field "goals" (payload service user "get_context" []));
+      ignore
+        (payload service user "set_goals"
+           [
+             ("timezone", `String "Europe/Stockholm");
+             ("weekday_calorie_target_kcal", `Int 1750);
+             ("weekend_calorie_target_kcal", `Int 1950);
+             ("protein_target_g", `Int 140);
+             ("eating_window_start", `String "12:00");
+             ("eating_window_end", `String "20:00");
+             ("target_weight_kg", `Int 70);
+             ("notes", `String "Weekends are flexible.");
+           ]);
+      let updated =
+        payload service user "set_goals"
+          [ ("weekday_calorie_target_kcal", `Int 1700) ]
+      in
+      Alcotest.check json "the given goal changes" (`Int 1700)
+        (field "weekday_calorie_target_kcal" updated);
+      List.iter
+        [
+          ("timezone", `String "Europe/Stockholm");
+          ("weekend_calorie_target_kcal", `Int 1950);
+          ("protein_target_g", `Float 140.);
+          ("eating_window_start", `String "12:00");
+          ("eating_window_end", `String "20:00");
+          ("target_weight_kg", `Float 70.);
+          ("notes", `String "Weekends are flexible.");
+        ]
+        ~f:(fun (name, expected) ->
+          Alcotest.check json (name ^ " is kept") expected (field name updated);
+          Alcotest.check json
+            (name ^ " is kept in get_context")
+            expected
+            (goals_field service user name));
+      Alcotest.check json "get_context judges today by the kept goals"
+        (`String "Europe/Stockholm")
+        (field "timezone" (payload service user "get_context" []));
+      let cleared =
+        payload service user "set_goals"
+          [
+            ("target_weight_kg", `Null);
+            ("eating_window_start", `Null);
+            ("eating_window_end", `Null);
+            ("notes", `Null);
+          ]
+      in
+      List.iter
+        [
+          "target_weight_kg";
+          "eating_window_start";
+          "eating_window_end";
+          "fasting_hours";
+          "notes";
+        ] ~f:(fun name ->
+          Alcotest.check json
+            (name ^ " is cleared by null")
+            `Null (field name cleared));
+      Alcotest.check json "null leaves other goals alone" (`Float 140.)
+        (field "protein_target_g" cleared);
+      Alcotest.check json "no eating window in get_context" `Null
+        (field "eating_window" (payload service user "get_context" []));
+      let rejects name arguments substring =
+        Alcotest.(check bool)
+          name true
+          (String.is_substring
+             (error_text service user "set_goals" arguments)
+             ~substring)
+      in
+      rejects "a required goal cannot be cleared"
+        [ ("timezone", `Null) ]
+        "timezone cannot be cleared";
+      rejects "a calorie target cannot be cleared"
+        [ ("weekend_calorie_target_kcal", `Null) ]
+        "weekend_calorie_target_kcal cannot be cleared";
+      rejects "half a window cannot be cleared"
+        [ ("eating_window_start", `Null) ]
+        "together";
+      rejects "half a window cannot be set"
+        [
+          ("eating_window_start", `String "10:00"); ("eating_window_end", `Null);
+        ]
+        "together";
+      Alcotest.check json "a rejected update changes nothing" (`Int 1700)
+        (goals_field service user "weekday_calorie_target_kcal"))
+
+(* 74.9, 26.1 and 40.3 g are exact as decimals but not in binary, so sums
+   and product scaling leave noise: 74.9 + 0.2 is 75.10000000000001 and
+   26.1 g per 100 g scaled to 300 g is 78.30000000000001. *)
+let test_grams_are_rounded_in_responses () =
+  with_service (fun service user ->
+      let noon = `String "2026-07-14T12:00:00Z" in
+      let item description ~protein_g ~carbs_g ~fat_g =
+        `Assoc
+          [
+            ("description", `String description);
+            ("calories_kcal", `Int 300);
+            ("protein_g", `Float protein_g);
+            ("carbs_g", `Float carbs_g);
+            ("fat_g", `Float fat_g);
+          ]
+      in
+      let meal =
+        payload service user "record_meal"
+          [
+            ("eaten_at", noon);
+            ( "items",
+              `List
+                [
+                  item "Pasta" ~protein_g:26.1 ~carbs_g:74.9 ~fat_g:40.3;
+                  item "Sauce" ~protein_g:0.1 ~carbs_g:0.2 ~fat_g:0.3;
+                ] );
+          ]
+      in
+      List.iter
+        [
+          ("carbs_g", 75.1, 74.9 +. 0.2);
+          ("protein_g", 26.2, 26.1 +. 0.1);
+          ("fat_g", 40.6, 40.3 +. 0.3);
+        ]
+        ~f:(fun (name, shown, raw) ->
+          Alcotest.(check bool)
+            (name ^ ": the raw sum is noisy")
+            true
+            (not (Float.equal raw shown));
+          Alcotest.check json (name ^ " total") (`Float shown) (field name meal));
+      Alcotest.check json "kcal is an integer" (`Int 600)
+        (field "calories_kcal" meal);
+      let single =
+        payload service user "record_meal"
+          [
+            ("eaten_at", noon);
+            ( "items",
+              `List [ item "Rice" ~protein_g:26.1 ~carbs_g:74.9 ~fat_g:40.3 ] );
+          ]
+      in
+      List.iter
+        [ ("carbs_g", 74.9); ("protein_g", 26.1); ("fat_g", 40.3) ]
+        ~f:(fun (name, value) ->
+          Alcotest.check json
+            (name ^ ": a single item is unchanged")
+            (`Float value) (field name single));
+      let product =
+        payload service user "save_product"
+          [
+            ("name", `String "Muesli");
+            ("basis", `String "100 g");
+            ("basis_quantity", `Int 100);
+            ("basis_unit", `String "g");
+            ("calories_kcal", `Int 380);
+            ("protein_g", `Float 40.3);
+            ("carbs_g", `Float 26.1);
+            ("fat_g", `Float 74.9);
+            ("source", `String "label");
+          ]
+      in
+      let scaled =
+        payload service user "record_meal"
+          [ ("eaten_at", noon); ("items", `List [ from_product product 300 ]) ]
+      in
+      let scaled_item = only_item scaled in
+      List.iter
+        [
+          ("protein_g", 120.9, 40.3 *. 3.);
+          ("carbs_g", 78.3, 26.1 *. 3.);
+          ("fat_g", 224.7, 74.9 *. 3.);
+        ]
+        ~f:(fun (name, shown, raw) ->
+          Alcotest.(check bool)
+            (name ^ " scaling is noisy")
+            true
+            (not (Float.equal raw shown));
+          Alcotest.check json (name ^ " item") (`Float shown)
+            (field name scaled_item);
+          Alcotest.check json (name ^ " total") (`Float shown)
+            (field name scaled));
+      Alcotest.check json "scaled kcal is an integer" (`Int 1140)
+        (field "calories_kcal" scaled);
+      (* A single 74.9 is not changed by any arithmetic; it was the printer that
+         turned it into 74.90000000000001. *)
+      let text, response =
+        emitted service user "get_meal" [ ("id", field "id" single) ]
+      in
+      List.iter
+        [ ("text content", text); ("response", response) ]
+        ~f:(fun (name, emitted) ->
+          List.iter
+            [ {|"carbs_g":74.9,|}; {|"protein_g":26.1,|}; {|"fat_g":40.3,|} ]
+            ~f:(fun fragment ->
+              Alcotest.(check bool)
+                (name ^ " has " ^ fragment ^ ": " ^ emitted)
+                true
+                (String.is_substring emitted ~substring:fragment));
+          Alcotest.(check bool)
+            (name ^ " has no float noise: " ^ emitted)
+            false
+            (String.is_substring emitted ~substring:"0000000"
+            || String.is_substring emitted ~substring:"9999999"));
+      List.iter
+        [
+          ("summed meal", field "id" meal, [ {|"carbs_g":75.1,|} ]);
+          ( "scaled meal",
+            field "id" scaled,
+            [ {|"carbs_g":78.3,|}; {|"protein_g":120.9,|}; {|"fat_g":224.7,|} ]
+          );
+        ]
+        ~f:(fun (name, id, fragments) ->
+          let text, response = emitted service user "get_meal" [ ("id", id) ] in
+          List.iter [ text; response ] ~f:(fun emitted ->
+              List.iter fragments ~f:(fun fragment ->
+                  Alcotest.(check bool)
+                    (name ^ " has " ^ fragment ^ ": " ^ emitted)
+                    true
+                    (String.is_substring emitted ~substring:fragment));
+              Alcotest.(check bool)
+                (name ^ " has no float noise: " ^ emitted)
+                false
+                (String.is_substring emitted ~substring:"0000000"
+                || String.is_substring emitted ~substring:"9999999")));
+      (* Storage keeps full precision, so later sums do not compound rounding. *)
+      let meal_id =
+        Option.value_exn (Meal_id.of_string (string_field "id" scaled))
+      in
+      (match Service.get_meal service ~user meal_id with
+      | Ok ({ items = [ stored ]; _ }, _) ->
+          Alcotest.(check (option (float 0.)))
+            "stored carbs keep full precision"
+            (Some (26.1 *. 3.))
+            stored.carbs_g
+      | _ -> Alcotest.fail "expected the stored meal");
+      let day =
+        match
+          field "days"
+            (payload service user "get_daily_series"
+               [
+                 ("from_date", `String "2026-07-14");
+                 ("to_date", `String "2026-07-14");
+               ])
+        with
+        | `List [ day ] -> day
+        | _ -> Alcotest.fail "expected one day"
+      in
+      Alcotest.check json "daily carbs" (`Float 228.3) (field "carbs_g" day);
+      Alcotest.check json "daily protein" (`Float 173.2) (field "protein_g" day);
+      Alcotest.check json "daily fat" (`Float 305.6) (field "fat_g" day);
+      Alcotest.check json "daily kcal is an integer" (`Int 2040)
+        (field "calories_kcal" day))
 
 let test_recent_products_in_context () =
   with_service (fun service user ->
@@ -615,5 +892,9 @@ let () =
             test_goals_round_trip_and_context;
           Alcotest.test_case "recent products in context" `Quick
             test_recent_products_in_context;
+          Alcotest.test_case "set_goals is a partial update" `Quick
+            test_set_goals_is_a_partial_update;
+          Alcotest.test_case "grams are rounded in responses" `Quick
+            test_grams_are_rounded_in_responses;
         ] );
     ]

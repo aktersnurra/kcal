@@ -96,7 +96,7 @@
 (test
  (name test_mcp)
  (modules test_mcp test_support)
- (libraries alcotest sqlite3 yojson kcal base)
+ (libraries alcotest sqlite3 yojson kcal base logs)
  (deps ../migrations/001_ledger.sql))
 
 (test

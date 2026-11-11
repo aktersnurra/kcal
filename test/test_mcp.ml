@@ -411,6 +411,159 @@ let check_tool_error message fragment response =
         true (contains text fragment)
   | None -> Alcotest.fail (message ^ ": expected an isError tool result")
 
+let error_data = function
+  | Ok (`Assoc fields) -> (
+      match List.Assoc.find fields ~equal:String.equal "error" with
+      | Some (`Assoc error) -> List.Assoc.find error ~equal:String.equal "data"
+      | _ -> None)
+  | _ -> None
+
+let envelope ?params method_ =
+  `Assoc
+    ([ ("jsonrpc", `String "2.0"); ("id", `Int 7); ("method", `String method_) ]
+    @ match params with None -> [] | Some params -> [ ("params", params) ])
+
+(* Every -32602 kcal itself returns says which field is wrong and why. *)
+let test_invalid_params_name_the_field () =
+  Test_support.with_store (fun store user ->
+      let service = Service.make ~store in
+      let handle request =
+        Mcp.handle ~service
+          ~identity:(identity user [ "ledger:read"; "ledger:write" ])
+          request
+      in
+      let check name request expected_field =
+        let response = handle request in
+        Alcotest.(check bool)
+          (name ^ ": -32602") true
+          (response_has_error_code (-32602) response);
+        match error_data response with
+        | Some (`Assoc data) -> (
+            Alcotest.check json (name ^ ": field") (`String expected_field)
+              (field "field" data);
+            match field "reason" data with
+            | `String reason when not (String.is_empty reason) -> ()
+            | _ -> Alcotest.fail (name ^ ": no reason"))
+        | _ -> Alcotest.fail (name ^ ": no error data")
+      in
+      check "tools/call without params" (envelope "tools/call") "params";
+      check "tools/call params not an object"
+        (envelope ~params:(`List []) "tools/call")
+        "params";
+      check "tools/call without a name"
+        (envelope ~params:(`Assoc [ ("arguments", `Assoc []) ]) "tools/call")
+        "params.name";
+      check "tools/call name not a string"
+        (envelope ~params:(`Assoc [ ("name", `Int 3) ]) "tools/call")
+        "params.name";
+      check "initialize without params" (envelope "initialize") "params";
+      check "initialize with an unsupported version"
+        (envelope
+           ~params:(`Assoc [ ("protocolVersion", `String "1999-01-01") ])
+           "initialize")
+        "params.protocolVersion";
+      (* Bad tool arguments stay tool results that name the field, which the
+         model sees and can act on. *)
+      check_tool_error "wrong argument type" "calories_kcal must be an integer"
+        (handle
+           (call "record_meal"
+              (`Assoc
+                 [
+                   ( "items",
+                     `List
+                       [
+                         `Assoc
+                           [
+                             ("description", `String "Soup");
+                             ("calories_kcal", `String "many");
+                             ("protein_g", `Int 1);
+                           ];
+                       ] );
+                 ])));
+      check_tool_error "unknown argument" "unknown field \"carb_g\""
+        (handle
+           (call "record_meal"
+              (`Assoc
+                 [
+                   ( "items",
+                     `List
+                       [
+                         `Assoc
+                           [
+                             ("description", `String "Soup");
+                             ("calories_kcal", `Int 250);
+                             ("protein_g", `Int 1);
+                             ("carb_g", `Float 74.9);
+                           ];
+                       ] );
+                 ]))))
+
+let with_captured_logs f =
+  let buffer = Stdlib.Buffer.create 256 in
+  let report src _level ~over k msgf =
+    msgf (fun ?header:_ ?tags:_ fmt ->
+        Stdlib.Format.kasprintf
+          (fun line ->
+            Stdlib.Buffer.add_string buffer
+              (Logs.Src.name src ^ " " ^ line ^ "\n");
+            over ();
+            k ())
+          fmt)
+  in
+  let reporter = Logs.reporter () and level = Logs.level () in
+  Logs.set_reporter { Logs.report };
+  Logs.set_level (Some Logs.Info);
+  Exn.protect ~f ~finally:(fun () ->
+      Logs.set_reporter reporter;
+      Logs.set_level level);
+  Stdlib.Buffer.contents buffer
+
+let test_tool_calls_are_logged () =
+  Test_support.with_store (fun store user ->
+      let service = Service.make ~store in
+      let soup = "Secret soup" in
+      let item =
+        `Assoc
+          [
+            ("description", `String soup);
+            ("calories_kcal", `Int 250);
+            ("protein_g", `Float 26.1);
+          ]
+      in
+      let logs =
+        with_captured_logs (fun () ->
+            let handle scopes request =
+              ignore
+                (Mcp.handle ~service ~identity:(identity user scopes) request)
+            in
+            handle [ "ledger:write" ]
+              (call "record_meal" (`Assoc [ ("items", `List [ item ]) ]));
+            handle [ "ledger:write" ]
+              (call "record_meal"
+                 (`Assoc [ ("items", `List [ item ]); ("kcal", `Int 1) ]));
+            handle [ "ledger:read" ]
+              (call "record_meal" (`Assoc [ ("items", `List [ item ]) ]));
+            handle [ "ledger:write" ] (envelope "tools/call"))
+      in
+      let lines = String.split_lines logs in
+      let logged fragment =
+        Alcotest.(check bool)
+          (fragment ^ " in\n" ^ logs)
+          true
+          (List.exists lines ~f:(fun line ->
+               String.is_substring line ~substring:fragment))
+      in
+      logged
+        {|kcal.mcp.tools tool="record_meal" request_id=- keys=["items"] outcome=ok|};
+      logged
+        {|tool="record_meal" request_id=- keys=["items","kcal"] outcome=tool_error stage=arguments error=rejected|};
+      logged
+        {|tool="record_meal" request_id=- keys=["items"] outcome=forbidden scope=ledger:write|};
+      logged {|tool=- request_id=7 keys=- outcome=rpc_error error=-32602|};
+      Alcotest.(check bool)
+        "argument values are never logged" false
+        (String.is_substring logs ~substring:soup))
+
 let test_range_tools_explain_a_malformed_date () =
   Test_support.with_store (fun store user ->
       let service = Service.make ~store in
@@ -1402,6 +1555,10 @@ let () =
             test_query_meals_search_composes_with_dates_and_limit;
           Alcotest.test_case "rejects user id" `Quick
             test_record_meal_rejects_user_id;
+          Alcotest.test_case "invalid params name the field" `Quick
+            test_invalid_params_name_the_field;
+          Alcotest.test_case "tool calls are logged" `Quick
+            test_tool_calls_are_logged;
           Alcotest.test_case "rejects bad JSON-RPC and provenance" `Quick
             test_mcp_rejects_bad_jsonrpc_and_provenance_fields;
           Alcotest.test_case "read scope permits reads only" `Quick

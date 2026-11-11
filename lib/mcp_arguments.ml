@@ -288,6 +288,8 @@ let parse_range_request ~now ~default_zone fields =
   in
   parse_range ~now ~default_zone fields
 
+(* set_goals is a partial update: an omitted field keeps its current value and
+   null clears an optional one, so changing one goal cannot wipe the others. *)
 let parse_goals fields =
   let* fields =
     only_fields
@@ -303,62 +305,89 @@ let parse_goals fields =
       ]
       (`Assoc fields)
   in
-  let* timezone =
-    Result.bind (required_string "timezone" fields) ~f:Time.parse_zone
+  (* Absent, null and a value are three different requests. *)
+  let present name parse =
+    match field name fields with
+    | None -> Ok None
+    | Some `Null -> Ok (Some None)
+    | Some _ ->
+        Result.map (parse name fields) ~f:(fun value -> Some (Some value))
   in
+  let not_clearable name =
+    rejected
+      (name
+     ^ " cannot be cleared; give a new value, or omit it to keep the current \
+        one")
+  in
+  let required parse name of_value =
+    let* value = present name parse in
+    match value with
+    | None -> Ok None
+    | Some None -> not_clearable name
+    | Some (Some value) -> Result.map (of_value value) ~f:Option.some
+  in
+  let optional parse name of_value =
+    let* value = present name parse in
+    match value with
+    | None -> Ok Goals.Keep
+    | Some None -> Ok Goals.Clear
+    | Some (Some value) ->
+        Result.map (of_value value) ~f:(fun value -> Goals.Set value)
+  in
+  let* timezone = required required_string "timezone" Time.parse_zone in
   let calories name =
-    Result.bind (required_int name fields) ~f:(fun kcal ->
+    required required_int name (fun kcal ->
         Result.map_error (Goals.Calorie_target.of_kcal kcal) ~f:(fun _ ->
             Error.Rejected (name ^ " must be positive")))
   in
   let* weekday_calories = calories "weekday_calorie_target_kcal" in
   let* weekend_calories = calories "weekend_calorie_target_kcal" in
-  let optional parse name of_value =
-    let* value = parse name fields in
-    match value with
-    | None -> Ok None
-    | Some value -> Result.map (of_value value) ~f:Option.some
-  in
   let* protein =
-    optional optional_float "protein_target_g" Goals.Protein_target.of_g
+    optional required_float "protein_target_g" Goals.Protein_target.of_g
   in
   let* target_weight_kg =
-    optional optional_float "target_weight_kg" Nutrition.Kilograms.of_float
+    optional required_float "target_weight_kg" Nutrition.Kilograms.of_float
   in
-  let* notes = optional_string "notes" fields in
   let* notes =
-    match notes with
-    | Some text when String.is_empty (String.strip text) -> Ok None
-    | Some text when String.length text > Goals.max_notes_length ->
-        rejected
-          (Printf.sprintf "notes must be at most %d characters"
-             Goals.max_notes_length)
-    | notes -> Ok notes
+    optional required_string "notes" (fun text ->
+        if String.length text > Goals.max_notes_length then
+          rejected
+            (Printf.sprintf "notes must be at most %d characters"
+               Goals.max_notes_length)
+        else Ok text)
   in
-  let* start = optional_string "eating_window_start" fields in
-  let* end_ = optional_string "eating_window_end" fields in
+  (* Blank notes have always meant no notes. *)
+  let notes =
+    match notes with
+    | Goals.Set text when String.is_empty (String.strip text) -> Goals.Clear
+    | notes -> notes
+  in
+  let* start = present "eating_window_start" required_string in
+  let* end_ = present "eating_window_end" required_string in
   let* eating_window =
     match (start, end_) with
-    | None, None -> Ok None
-    | Some start, Some end_ ->
-        Result.map (Goals.Eating_window.of_strings ~start ~end_) ~f:Option.some
+    | None, None -> Ok Goals.Keep
+    | Some None, Some None -> Ok Goals.Clear
+    | Some (Some start), Some (Some end_) ->
+        Result.map (Goals.Eating_window.of_strings ~start ~end_) ~f:(fun w ->
+            Goals.Set w)
     | _ ->
-        Error
-          (Error.Rejected
-             "give eating_window_start and eating_window_end together, or \
-              neither")
+        rejected
+          "give eating_window_start and eating_window_end together: both HH:MM \
+           to set the window, both null to remove it, or omit both to keep the \
+           current one"
   in
   Ok
-    Goals.
-      {
-        timezone;
-        weekday_calories;
-        weekend_calories;
-        protein;
-        eating_window;
-        target_weight_kg;
-        notes;
-      }
+    ({
+       timezone;
+       weekday_calories;
+       weekend_calories;
+       protein;
+       eating_window;
+       target_weight_kg;
+       notes;
+     }
+      : Goals.patch)
 
 let product_input fields : (Product.Create.t, Error.t) Result.t =
   let* name = required_string "name" fields in
@@ -417,7 +446,7 @@ type request =
   | Get_withings_status
   | Disconnect_withings
   | Get_context
-  | Set_goals of Goals.t
+  | Set_goals of Goals.patch
   | Save_product of Product_id.t option * Product.Create.t
   | Search_products of Search_query.t * int
   | Correct_meals_from_product of product_correction

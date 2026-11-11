@@ -17,7 +17,7 @@ type request = private
   | Get_withings_status
   | Disconnect_withings
   | Get_context
-  | Set_goals of Goals.t
+  | Set_goals of Goals.patch
   | Save_product of Product_id.t option * Product.Create.t
   | Search_products of Search_query.t * int
   | Correct_meals_from_product of product_correction

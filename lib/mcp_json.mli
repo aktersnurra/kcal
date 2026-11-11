@@ -18,5 +18,10 @@ val correction_json : Service.product_correction -> Yojson.Safe.t
 val weight_json : Weigh_in.t -> Yojson.Safe.t
 val withings_status_json : Withings_connection.status -> Yojson.Safe.t
 val text_result : Yojson.Safe.t -> Yojson.Safe.t
+
+val to_string : Yojson.Safe.t -> string
+(** Serializes a response, writing each float as the shortest decimal that reads
+    back as the same float (74.9, not 74.90000000000001). *)
+
 val tool_error : string -> Yojson.Safe.t
 val cacheable : (string * Yojson.Safe.t) list -> Yojson.Safe.t
