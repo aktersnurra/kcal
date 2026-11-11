@@ -28,11 +28,11 @@ type patch = {
   description : string option;
   calories_kcal : int option;
   protein_g : float option;
-  carbs_g : float option;
-  fat_g : float option;
-  confidence : float option;
-  estimate_source : string option;
-  notes : string option;
+  carbs_g : float Change.t;
+  fat_g : float Change.t;
+  confidence : float Change.t;
+  estimate_source : string Change.t;
+  notes : string Change.t;
 }
 
 type create = {
@@ -71,24 +71,28 @@ let validate_create (input : create) =
   let* () = optional (grams Fat_g) input.fat_g in
   optional Nutrition.Confidence.of_float input.confidence
 
+let changed f = function
+  | Change.Set value -> Result.map (f value) ~f:(fun _ -> ())
+  | Keep | Clear -> Ok ()
+
 let validate_patch (input : patch) =
   let* () = optional (nonblank Description) input.description in
   let* () = optional Nutrition.Calories.of_int input.calories_kcal in
   let* () = optional (grams Protein_g) input.protein_g in
-  let* () = optional (grams Carbs_g) input.carbs_g in
-  let* () = optional (grams Fat_g) input.fat_g in
-  optional Nutrition.Confidence.of_float input.confidence
+  let* () = changed (grams Carbs_g) input.carbs_g in
+  let* () = changed (grams Fat_g) input.fat_g in
+  changed Nutrition.Confidence.of_float input.confidence
 
 let empty_patch : patch =
   {
     description = None;
     calories_kcal = None;
     protein_g = None;
-    carbs_g = None;
-    fat_g = None;
-    confidence = None;
-    estimate_source = None;
-    notes = None;
+    carbs_g = Keep;
+    fat_g = Keep;
+    confidence = Keep;
+    estimate_source = Keep;
+    notes = Keep;
   }
 
 module Create = struct
@@ -167,8 +171,9 @@ let changes_nutrition patch =
   let ({ calories_kcal; protein_g; carbs_g; fat_g; _ } : patch) =
     Patch.to_raw patch
   in
+  let changes = function Change.Keep -> false | Clear | Set _ -> true in
   Option.is_some calories_kcal
-  || Option.is_some protein_g || Option.is_some carbs_g || Option.is_some fat_g
+  || Option.is_some protein_g || changes carbs_g || changes fat_g
 
 type from_product = {
   product_id : Product_id.t;

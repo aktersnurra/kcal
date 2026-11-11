@@ -112,6 +112,55 @@ let test_errors_name_the_field_and_the_fix () =
       ("unknown tool", "record_lunch", [], "unknown tool record_lunch");
     ]
 
+let item_id = Meal_item_id.to_string (Meal_item_id.fresh ())
+let meal_id = Meal_id.to_string (Meal_id.fresh ())
+
+let test_patches_tell_absent_null_and_value_apart () =
+  (match
+     parse "update_meal_item"
+       [
+         ("id", `String item_id);
+         ("carbs_g", `Null);
+         ("notes", `String "with bread");
+       ]
+   with
+  | Ok (Mcp_arguments.Update_meal_item { patch; _ }) ->
+      let patch = Meal_item.Patch.to_raw patch in
+      Alcotest.(check bool)
+        "null clears" true
+        (match patch.carbs_g with Clear -> true | _ -> false);
+      Alcotest.(check bool)
+        "a value sets" true
+        (match patch.notes with Set "with bread" -> true | _ -> false);
+      Alcotest.(check bool)
+        "absent keeps" true
+        (match patch.fat_g with Keep -> true | _ -> false)
+  | _ -> Alcotest.fail "expected an item update");
+  match parse "update_meal" [ ("id", `String meal_id); ("label", `Null) ] with
+  | Ok (Mcp_arguments.Update_meal (_, patch)) ->
+      Alcotest.(check bool)
+        "null clears the label" true
+        (match (Meal.Patch.to_raw patch).label with
+        | Clear -> true
+        | _ -> false)
+  | _ -> Alcotest.fail "expected a meal update"
+
+let test_required_fields_cannot_be_cleared () =
+  List.iter
+    ~f:(fun (tool, id, name) ->
+      Alcotest.(check string)
+        name
+        (name
+       ^ " cannot be cleared; give a new value, or omit it to keep the current \
+          one")
+        (message tool [ ("id", `String id); (name, `Null) ]))
+    [
+      ("update_meal_item", item_id, "description");
+      ("update_meal_item", item_id, "calories_kcal");
+      ("update_meal_item", item_id, "protein_g");
+      ("update_meal", meal_id, "eaten_at");
+    ]
+
 let () =
   Alcotest.run "Mcp_arguments"
     [
@@ -128,5 +177,12 @@ let () =
         [
           Alcotest.test_case "name the field and the fix" `Quick
             test_errors_name_the_field_and_the_fix;
+          Alcotest.test_case "required fields cannot be cleared" `Quick
+            test_required_fields_cannot_be_cleared;
+        ] );
+      ( "patches",
+        [
+          Alcotest.test_case "absent, null and value differ" `Quick
+            test_patches_tell_absent_null_and_value_apart;
         ] );
     ]

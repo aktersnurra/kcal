@@ -31,6 +31,10 @@ val open_database : path:string -> (t, Error.t) result
     waits up to five seconds for another process's write. *)
 
 val close : t -> (unit, Error.t) result
+
+val check_readable : t -> (unit, Error.t) result
+(** Reads from the database file, so a health check fails when it cannot. *)
+
 val compile_search_query : t -> string list -> (Search_query.t, Error.t) result
 
 module For_testing : sig

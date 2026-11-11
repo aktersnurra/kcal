@@ -75,16 +75,41 @@ let load_credentials t ~user ~connection ~user_id =
             (Error.to_string error));
       result
 
+(* The tokens another sync stored after rotating the refresh token this one
+   read, when they are for the same account and still valid. *)
+let refreshed_elsewhere t ~user ~connection ~user_id =
+  match Store_sqlite.get_withings_status t.store ~user with
+  | Ok (Withings_connection.Connected current)
+    when String.equal
+           (Withings_connection.Account.to_string current.account)
+           (Withings_connection.Account.to_string
+              connection.Withings_connection.account) ->
+      let* credentials =
+        load_credentials t ~user ~connection:current ~user_id
+      in
+      if Ptime.compare credentials.Withings.expires_at (t.now ()) > 0 then (
+        Log.info (fun m ->
+            m "user=%s Withings tokens were refreshed by another sync" user_id);
+        Ok (credentials, current))
+      else Error Error.Not_found
+  | Ok _ -> Error Error.Not_found
+  | Error _ as error -> error
+
 let require_reauthorization t ~user ~connection ~user_id =
-  Log.warn (fun m ->
-      m
-        "user=%s Withings refresh token rejected, marking connection for \
-         reauthorization"
-        user_id);
   match
     Store_sqlite.mark_withings_reauthorization t.store ~user ~connection
   with
-  | Ok () -> Error (Error.Invalid_input "Withings reauthorization required")
+  | Ok () ->
+      Log.warn (fun m ->
+          m
+            "user=%s Withings refresh token rejected, connection marked for \
+             reauthorization"
+            user_id);
+      Error (Error.Invalid_input "Withings reauthorization required")
+  | Error Error.Not_found ->
+      (* Another sync rotated the tokens after this one read them, so the
+         rejection was for a refresh token that is no longer current. *)
+      refreshed_elsewhere t ~user ~connection ~user_id
   | Error error as result ->
       Log.err (fun m ->
           m "user=%s failed to mark Withings connection for reauthorization: %s"

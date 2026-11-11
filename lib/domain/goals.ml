@@ -99,7 +99,7 @@ module Eating_window = struct
       Ok (Closed { opens_at })
 end
 
-type 'a change = Keep | Clear | Set of 'a
+type 'a change = 'a Change.t = Keep | Clear | Set of 'a
 
 type patch = {
   timezone : Time.zone option;
@@ -129,11 +129,6 @@ let calorie_target_on goals date =
   if Date.is_weekend date then goals.weekend_calories
   else goals.weekday_calories
 
-let change current = function
-  | Keep -> current
-  | Clear -> None
-  | Set value -> Some value
-
 let apply (current : t option) (patch : patch) : (t, Error.t) Result.t =
   let required name value from_current =
     match (value, current) with
@@ -160,14 +155,17 @@ let apply (current : t option) (patch : patch) : (t, Error.t) Result.t =
            timezone;
            weekday_calories;
            weekend_calories;
-           protein = change (kept (fun (g : t) -> g.protein)) patch.protein;
+           protein =
+             Change.apply (kept (fun (g : t) -> g.protein)) patch.protein;
            eating_window =
-             change (kept (fun (g : t) -> g.eating_window)) patch.eating_window;
+             Change.apply
+               (kept (fun (g : t) -> g.eating_window))
+               patch.eating_window;
            target_weight_kg =
-             change
+             Change.apply
                (kept (fun (g : t) -> g.target_weight_kg))
                patch.target_weight_kg;
-           notes = change (kept (fun (g : t) -> g.notes)) patch.notes;
+           notes = Change.apply (kept (fun (g : t) -> g.notes)) patch.notes;
          }
           : t)
   | _ ->

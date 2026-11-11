@@ -166,6 +166,8 @@ let%hegel_test scalar_constructors_accept_exactly_their_domains tc =
       (Result.is_ok (Goals.Protein_target.of_g value))
       (finite && Float.(value > 0.0)))
 
+let set_or_keep = function Some value -> Change.Set value | None -> Keep
+
 let%hegel_test meal_create_and_patch_share_numeric_rules tc =
   let calories_kcal = Hegel.draw tc (Hegel.integers ()) in
   let protein_g = Hegel.draw tc (Hegel.floats ()) in
@@ -189,9 +191,9 @@ let%hegel_test meal_create_and_patch_share_numeric_rules tc =
         Meal_item.empty_patch with
         calories_kcal = Some calories_kcal;
         protein_g = Some protein_g;
-        carbs_g;
-        fat_g;
-        confidence;
+        carbs_g = set_or_keep carbs_g;
+        fat_g = set_or_keep fat_g;
+        confidence = set_or_keep confidence;
       }
   in
   assert (Bool.equal (Result.is_ok create) (Result.is_ok patch))
@@ -213,13 +215,13 @@ let test_all_numeric_inputs_reject_nonfinite () =
         (Meal_item.Create.of_raw { (valid_meal ()) with carbs_g = Some value });
       rejected "meal fat patch"
         (Meal_item.Patch.of_raw
-           { Meal_item.empty_patch with fat_g = Some value });
+           { Meal_item.empty_patch with fat_g = Set value });
       rejected "meal confidence create"
         (Meal_item.Create.of_raw
            { (valid_meal ()) with confidence = Some value });
       rejected "meal confidence patch"
         (Meal_item.Patch.of_raw
-           { Meal_item.empty_patch with confidence = Some value });
+           { Meal_item.empty_patch with confidence = Set value });
       rejected "manual weight patch"
         (Weigh_in.Patch.of_raw
            { Weigh_in.empty_patch with weight_kg = Some value });

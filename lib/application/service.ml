@@ -5,6 +5,7 @@ module Error = Domain_error
 type t = { store : Store_sqlite.t }
 
 let make ~store = { store }
+let check_storage service = Store_sqlite.check_readable service.store
 
 let resolve_user service ~issuer ~subject =
   Store_sqlite.resolve_user service.store ~issuer ~subject

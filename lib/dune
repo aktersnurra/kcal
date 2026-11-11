@@ -1,4 +1,4 @@
-; Umbrella over the six layer libraries, so entry points and tests depend on one name.
+; Umbrella over the seven layer libraries, so entry points and tests depend on one name.
 
 (library
  (name kcal)
@@ -7,6 +7,7 @@
  (libraries
   (re_export kcal_kernel)
   (re_export kcal_domain)
+  (re_export kcal_infrastructure)
   (re_export kcal_store)
   (re_export kcal_application)
   (re_export kcal_mcp)

@@ -15,7 +15,7 @@ type t = {
   deleted_at : Ptime.t option;
 }
 
-type patch = { eaten_at : Ptime.t option; label : string option }
+type patch = { eaten_at : Ptime.t option; label : string Change.t }
 
 let validate_label = function
   | Some label when String.is_empty (String.strip label) ->
@@ -27,7 +27,11 @@ module Patch = struct
   type t = raw
 
   let of_raw (input : raw) =
-    let* () = validate_label input.label in
+    let* () =
+      match input.label with
+      | Set label -> validate_label (Some label)
+      | Keep | Clear -> Ok ()
+    in
     Ok input
 
   let to_raw input = input

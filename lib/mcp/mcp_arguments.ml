@@ -219,15 +219,34 @@ let item_entry = function
       else estimated_item fields
   | _ -> Error (Error.Rejected "each item must be an object")
 
+let not_clearable name =
+  rejected
+    (name
+   ^ " cannot be cleared; give a new value, or omit it to keep the current one"
+    )
+
+(* In a patch: absent keeps the field and null is refused. *)
+let unclearable parse name fields =
+  match field name fields with
+  | Some `Null -> not_clearable name
+  | _ -> parse name fields
+
+(* In a patch: absent keeps the field, null clears it and a value sets it. *)
+let change parse name fields =
+  match field name fields with
+  | None -> Ok Change.Keep
+  | Some `Null -> Ok Change.Clear
+  | Some _ -> Result.map (parse name fields) ~f:(fun value -> Change.Set value)
+
 let item_patch fields : (Meal_item.Patch.t, Error.t) Result.t =
-  let* description = optional_string "description" fields in
-  let* calories_kcal = optional_int "calories_kcal" fields in
-  let* protein_g = optional_float "protein_g" fields in
-  let* carbs_g = optional_float "carbs_g" fields in
-  let* fat_g = optional_float "fat_g" fields in
-  let* confidence = optional_float "confidence" fields in
-  let* estimate_source = optional_string "estimate_source" fields in
-  let* notes = optional_string "notes" fields in
+  let* description = unclearable optional_string "description" fields in
+  let* calories_kcal = unclearable optional_int "calories_kcal" fields in
+  let* protein_g = unclearable optional_float "protein_g" fields in
+  let* carbs_g = change required_float "carbs_g" fields in
+  let* fat_g = change required_float "fat_g" fields in
+  let* confidence = change required_float "confidence" fields in
+  let* estimate_source = change required_string "estimate_source" fields in
+  let* notes = change required_string "notes" fields in
   Meal_item.Patch.of_raw
     {
       description;
@@ -312,12 +331,6 @@ let parse_goals fields =
     | Some `Null -> Ok (Some None)
     | Some _ ->
         Result.map (parse name fields) ~f:(fun value -> Some (Some value))
-  in
-  let not_clearable name =
-    rejected
-      (name
-     ^ " cannot be cleared; give a new value, or omit it to keep the current \
-        one")
   in
   let required parse name of_value =
     let* value = present name parse in
@@ -671,8 +684,16 @@ let parse_tool ~now ~default_zone ~compile_search tool arguments =
       let* fields = only_fields [ "id"; "eaten_at"; "label" ] (`Assoc fields) in
       let* value = required_string "id" fields in
       let* meal_id = id "id" value Meal_id.of_string in
-      let* eaten_at = optional_time "eaten_at" fields in
-      let* label = nonblank_string "label" fields in
+      let* eaten_at = unclearable optional_time "eaten_at" fields in
+      let* label =
+        change
+          (fun name fields ->
+            let* label = required_string name fields in
+            if String.is_empty (String.strip label) then
+              rejected (name ^ " must not be blank")
+            else Ok label)
+          "label" fields
+      in
       let* () = at_least_one fields ~among:[ "eaten_at"; "label" ] in
       let* patch = Meal.Patch.of_raw { eaten_at; label } in
       Ok (Update_meal (meal_id, patch))

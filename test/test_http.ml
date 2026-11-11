@@ -132,6 +132,15 @@ let test_health_and_unauthenticated_mcp () =
       Alcotest.(check int)
         "MCP bearer required" 401 (request store `POST "/mcp" "{}").status)
 
+let test_health_reports_an_unreadable_database () =
+  let store =
+    Option.value_exn (Result.ok (Store_sqlite.open_database ~path:":memory:"))
+  in
+  Option.value_exn (Result.ok (Store_sqlite.close store));
+  let response = request store `GET "/health" "" in
+  Alcotest.(check int) "status" 503 response.status;
+  Alcotest.(check string) "body" {|{"status":"unavailable"}|} response.body
+
 let test_http_response_has_fixed_length () =
   Test_support.with_store (fun store _ ->
       let response =
@@ -387,6 +396,8 @@ let () =
             `Quick test_unconfigured_protected_resource_is_not_found;
           Alcotest.test_case "health and bearer" `Quick
             test_health_and_unauthenticated_mcp;
+          Alcotest.test_case "health reports an unreadable database" `Quick
+            test_health_reports_an_unreadable_database;
           Alcotest.test_case "fixed response length" `Quick
             test_http_response_has_fixed_length;
           Alcotest.test_case "502 wire framing" `Quick

@@ -6,6 +6,7 @@
  (libraries
   kcal_mcp
   kcal_application
+  kcal_infrastructure
   kcal_domain
   kcal_kernel
   base

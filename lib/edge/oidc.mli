@@ -24,8 +24,10 @@ val make :
     cached for the lifetime the provider states, at most an hour. A token signed
     with a key id the cache lacks triggers one refetch, at most once a minute.
     While the provider cannot be reached, expired keys stay trusted for up to a
-    day and the fetch is retried every thirty seconds. Concurrent requests share
-    one fetch. *)
+    day and the fetch is retried every thirty seconds; the outage is logged
+    once, not per request. Concurrent requests share one fetch. A token is
+    accepted until a minute past its expiry, so a small clock difference with
+    the provider does not reject it. *)
 
 val https_client :
   < net : _ Eio.Net.t ; clock : _ Eio.Time.clock ; .. > -> client

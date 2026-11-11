@@ -55,7 +55,7 @@ let goals_of_row statement =
 let get_goals db ~user =
   query_one db
     ("SELECT " ^ goals_columns ^ " FROM goals WHERE user_id = ?")
-    [ owner user ]
+    [ Store_rows.owner user ]
     goals_of_row
 
 let set_goals db ~user (goals : Goals.t) =
@@ -72,7 +72,7 @@ let set_goals db ~user (goals : Goals.t) =
       excluded.target_weight_kg, notes = excluded.notes, updated_at = \
       excluded.updated_at RETURNING " ^ goals_columns)
     [
-      owner user;
+      Store_rows.owner user;
       text_value (Time.zone_name goals.timezone);
       int_value (goals.weekday_calories :> int);
       int_value (goals.weekend_calories :> int);

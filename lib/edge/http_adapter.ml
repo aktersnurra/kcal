@@ -231,7 +231,13 @@ let handle_withings ~protected_resource ~schedule_sync ~withings ~auth ~service
             (Yojson.Safe.to_string
                (protected_resource_metadata ~resource ~authorization_server))
       | None -> plain 404 "Not Found")
-  | `GET, "/health" -> json 200 "{\"status\":\"ok\"}"
+  | `GET, "/health" -> (
+      match Service.check_storage service with
+      | Ok () -> json 200 "{\"status\":\"ok\"}"
+      | Error error ->
+          Http_log.err (fun m ->
+              m "health check failed: %s" (Error.to_string error));
+          json 503 "{\"status\":\"unavailable\"}")
   | `GET, "/withings/connect" -> (
       match withings with
       | Some withings ->
@@ -279,6 +285,7 @@ let status = function
   | 413 -> `Payload_too_large
   | 415 -> `Unsupported_media_type
   | 502 -> `Bad_gateway
+  | 503 -> `Service_unavailable
   | 302 -> `Found
   | _ -> `Internal_server_error
 

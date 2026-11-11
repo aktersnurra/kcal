@@ -334,6 +334,59 @@ let test_transient_refresh_failure_does_not_require_reauthorization () =
         | Withings_connection.Reauthorization_required _ -> true
         | _ -> false))
 
+let test_losing_a_refresh_race_continues_with_the_winners_tokens () =
+  with_setup
+    [ measurement "one" ]
+    (fun store user connection client ->
+      let later =
+        Option.value_exn (Ptime.add_span now (Ptime.Span.of_int_s 7200))
+      in
+      let fetched_with = ref "" in
+      let module Fake = struct
+        include (val client : Withings.S)
+
+        (* Another sync refreshes first, so Withings rejects the refresh token
+           this one read. *)
+        let refresh ~refresh_token:_ =
+          ignore
+            (Option.value_exn
+               (Result.ok
+                  (Store_sqlite.refresh_withings_credentials store ~user
+                     ~connection ~key
+                     Withings.
+                       {
+                         access_token = "winner";
+                         refresh_token = "winner-refresh";
+                         expires_at =
+                           Option.value_exn
+                             (Ptime.add_span later (Ptime.Span.of_int_s 3600));
+                         withings_user_id = "upstream-alice";
+                       })));
+          Error (Error.Withings_failure (Credential_rejection 401))
+
+        let get_measurements ~access_token ~lastupdate =
+          fetched_with := access_token;
+          get_measurements ~access_token ~lastupdate
+      end in
+      let result =
+        Withings_sync.sync
+          (Withings_sync.make ~store
+             ~client:(module Fake)
+             ~token_key:key
+             ~now:(fun () -> later))
+          ~user ~connection
+      in
+      Alcotest.(check bool) "sync succeeds" true (Result.is_ok result);
+      Alcotest.(check string)
+        "measurements fetched with the winner's token" "winner" !fetched_with;
+      Alcotest.(check (option int64))
+        "cursor advanced" (Some 77L) (sync_cursor store);
+      Alcotest.(check bool)
+        "still connected" true
+        (match Store_sqlite.get_withings_status store ~user with
+        | Ok (Withings_connection.Connected _) -> true
+        | _ -> false))
+
 let test_refresh_race_with_account_replacement () =
   with_setup [] (fun store user connection client ->
       let replacement =
@@ -1205,6 +1258,8 @@ let () =
         [
           Alcotest.test_case "refresh race with account replacement" `Quick
             test_refresh_race_with_account_replacement;
+          Alcotest.test_case "losing a refresh race continues" `Quick
+            test_losing_a_refresh_race_continues_with_the_winners_tokens;
           Alcotest.test_case "import requires account and group" `Quick
             test_import_requires_account_and_group;
           Alcotest.test_case "raw missing watermark concurrent cursor" `Quick

@@ -150,7 +150,7 @@ let get_meal db ~user id =
     (select_meals db
        ("SELECT " ^ meal_columns
       ^ " FROM meals WHERE id = ? AND user_id = ? AND deleted_at IS NULL")
-       [ text_value (Meal_id.to_string id); owner user ])
+       [ text_value (Meal_id.to_string id); Store_rows.owner user ])
 
 let product_link_values = function
   | None ->
@@ -207,7 +207,7 @@ let idempotent_meal db ~user { key; fingerprint } =
     query db
       "SELECT id, idempotency_fingerprint, deleted_at IS NOT NULL FROM meals \
        WHERE user_id = ? AND idempotency_key = ?"
-      [ owner user; text_value key ]
+      [ Store_rows.owner user; text_value key ]
       (fun statement ->
         Option.map
           (Meal_id.of_string (text statement 0))
@@ -241,7 +241,7 @@ let insert_meal db ~user ~idempotency ~eaten_at ~label items =
        VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)"
       [
         text_value (Meal_id.to_string id);
-        owner user;
+        Store_rows.owner user;
         time_value (Option.value eaten_at ~default:current_time);
         nullable label;
         text_value current;
@@ -274,20 +274,27 @@ let create_meal ?idempotency db ~user ~eaten_at ~label items =
               (insert_meal db ~user ~idempotency ~eaten_at ~label items)
               ~f:(fun meal -> (meal, `Recorded)))
 
+(* Binds [CASE WHEN ? THEN ? ELSE column END]: whether the column changes,
+   and its new value. *)
+let change_values value = function
+  | Change.Keep -> [ Sqlite3.Data.INT 0L; Sqlite3.Data.NULL ]
+  | Clear -> [ Sqlite3.Data.INT 1L; Sqlite3.Data.NULL ]
+  | Set new_value -> [ Sqlite3.Data.INT 1L; value new_value ]
+
 let update_meal db ~user id patch =
   let patch = Meal.Patch.to_raw patch in
   let* rows =
     query db
-      ("UPDATE meals SET eaten_at = COALESCE(?, eaten_at), label = COALESCE(?, \
-        label), updated_at = ? WHERE id = ? AND user_id = ? AND deleted_at IS \
-        NULL RETURNING " ^ meal_columns)
-      [
-        nullable (Option.map ~f:timestamp patch.eaten_at);
-        nullable patch.label;
-        time_value (now ());
-        text_value (Meal_id.to_string id);
-        owner user;
-      ]
+      ("UPDATE meals SET eaten_at = COALESCE(?, eaten_at), label = CASE WHEN ? \
+        THEN ? ELSE label END, updated_at = ? WHERE id = ? AND user_id = ? AND \
+        deleted_at IS NULL RETURNING " ^ meal_columns)
+      ([ nullable (Option.map ~f:timestamp patch.eaten_at) ]
+      @ change_values text_value patch.label
+      @ [
+          time_value (now ());
+          text_value (Meal_id.to_string id);
+          Store_rows.owner user;
+        ])
       meal_row_of
   in
   Result.bind (attach_items db rows) ~f:single
@@ -308,7 +315,7 @@ let owned_item db ~user item_id =
       ^ " FROM meal_items JOIN meals ON meals.id = meal_items.meal_id WHERE \
          meal_items.id = ? AND meals.user_id = ? AND meals.deleted_at IS NULL \
          AND meal_items.deleted_at IS NULL")
-       [ text_value (Meal_item_id.to_string item_id); owner user ]
+       [ text_value (Meal_item_id.to_string item_id); Store_rows.owner user ]
        item_of_row)
 
 let revision_columns =
@@ -417,10 +424,15 @@ let update_item ?reason ?quantity db ~user item_id patch =
       let calories_kcal, protein_g, carbs_g, fat_g, detach_product =
         match rescaled with
         | Some ((portion : Product.portion), _) ->
+            (* A macro the item never had stays unknown. *)
+            let rescaled = function
+              | Some value -> Change.Set value
+              | None -> Keep
+            in
             ( Some portion.calories_kcal,
               Some portion.protein_g,
-              portion.carbs_g,
-              portion.fat_g,
+              rescaled portion.carbs_g,
+              rescaled portion.fat_g,
               false )
         | None ->
             ( patch.calories_kcal,
@@ -440,31 +452,34 @@ let update_item ?reason ?quantity db ~user item_id patch =
         execute db
           "UPDATE meal_items SET description = COALESCE(?, description), \
            calories_kcal = COALESCE(?, calories_kcal), protein_g = COALESCE(?, \
-           protein_g), carbs_g = COALESCE(?, carbs_g), fat_g = COALESCE(?, \
-           fat_g), confidence = COALESCE(?, confidence), estimate_source = \
-           COALESCE(?, estimate_source), notes = COALESCE(?, notes), \
+           protein_g), carbs_g = CASE WHEN ? THEN ? ELSE carbs_g END, fat_g = \
+           CASE WHEN ? THEN ? ELSE fat_g END, confidence = CASE WHEN ? THEN ? \
+           ELSE confidence END, estimate_source = CASE WHEN ? THEN ? ELSE \
+           estimate_source END, notes = CASE WHEN ? THEN ? ELSE notes END, \
            product_id = CASE WHEN ? THEN NULL ELSE product_id END, \
            product_version = CASE WHEN ? THEN NULL ELSE product_version END, \
            product_quantity = CASE WHEN ? THEN NULL ELSE COALESCE(?, \
            product_quantity) END, product_unit = CASE WHEN ? THEN NULL ELSE \
            product_unit END, updated_at = ? WHERE id = ?"
-          [
-            nullable patch.description;
-            nullable_int calories_kcal;
-            nullable_float protein_g;
-            nullable_float carbs_g;
-            nullable_float fat_g;
-            nullable_float patch.confidence;
-            nullable patch.estimate_source;
-            nullable patch.notes;
-            detach;
-            detach;
-            detach;
-            nullable_float rescaled_quantity;
-            detach;
-            text_value current;
-            text_value (Meal_item_id.to_string item_id);
-          ]
+          ([
+             nullable patch.description;
+             nullable_int calories_kcal;
+             nullable_float protein_g;
+           ]
+          @ change_values float_value carbs_g
+          @ change_values float_value fat_g
+          @ change_values float_value patch.confidence
+          @ change_values text_value patch.estimate_source
+          @ change_values text_value patch.notes
+          @ [
+              detach;
+              detach;
+              detach;
+              nullable_float rescaled_quantity;
+              detach;
+              text_value current;
+              text_value (Meal_item_id.to_string item_id);
+            ])
       in
       let* () = touch_meal db meal_id ~current in
       get_meal db ~user meal_id)
@@ -514,7 +529,10 @@ let query_meals ?search db ~user ~from ~to_ ~limit =
       (with_clause ^ "SELECT " ^ qualified_meal_columns ^ " FROM meals" ^ join
      ^ " WHERE meals.user_id = ? AND meals.deleted_at IS NULL" ^ range
      ^ " ORDER BY " ^ ordering ^ " LIMIT ?")
-      (search_values @ [ owner user ] @ range_values @ [ int_value limit ])
+      (search_values
+      @ [ Store_rows.owner user ]
+      @ range_values
+      @ [ int_value limit ])
 
 (* Every meal in [start, stop), unpaginated, for server-side aggregation. *)
 let meals_between db ~user ~start ~stop =
@@ -522,7 +540,7 @@ let meals_between db ~user ~start ~stop =
     ("SELECT " ^ meal_columns
    ^ " FROM meals WHERE user_id = ? AND deleted_at IS NULL AND eaten_at >= ? \
       AND eaten_at < ? ORDER BY eaten_at ASC, id ASC")
-    [ owner user; time_value start; time_value stop ]
+    [ Store_rows.owner user; time_value start; time_value stop ]
 
 (* Live items of live meals logged from an earlier version of [product], with
    their meal and when it was eaten. *)
@@ -535,7 +553,7 @@ let items_from_earlier_versions db ~user (product : Product.t) =
       meal_items.product_version < ? ORDER BY meals.eaten_at ASC, \
       meal_items.id ASC")
     [
-      owner user;
+      Store_rows.owner user;
       text_value (Product_id.to_string product.id);
       int_value product.version;
     ]
@@ -557,4 +575,4 @@ let rescale_items db ~reason changes =
           touch_meal db meal_id ~current))
 
 let delete_meal db ~user id =
-  soft_delete db ~table:"meals" ~user (Meal_id.to_string id)
+  Store_rows.soft_delete db ~table:"meals" ~user (Meal_id.to_string id)

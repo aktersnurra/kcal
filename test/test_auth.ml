@@ -110,6 +110,60 @@ let test_oidc_serves_stale_keys_while_the_provider_is_down () =
     "keys a day past expiry are not trusted" true
     (Result.is_error (verifier (signed_token ())))
 
+(* The warnings logged while [f] runs. *)
+let warnings f =
+  let messages = ref [] in
+  let report _ level ~over k msgf =
+    msgf (fun ?header:_ ?tags:_ fmt ->
+        Stdlib.Format.kasprintf
+          (fun message ->
+            (match level with
+            | Logs.Warning -> messages := message :: !messages
+            | _ -> ());
+            over ();
+            k ())
+          fmt)
+  in
+  let previous = Logs.reporter () and level = Logs.level () in
+  Logs.set_reporter { Logs.report };
+  Logs.set_level ~all:true (Some Logs.Warning);
+  Stdlib.Fun.protect
+    ~finally:(fun () ->
+      Logs.set_reporter previous;
+      Logs.set_level ~all:true level)
+    (fun () ->
+      f ();
+      List.rev !messages)
+
+let test_oidc_warns_about_stale_keys_once_per_outage () =
+  let now = ref (time 1_000.) in
+  let verifier, _, available, _ =
+    provider ~max_age_s:(Some 1) ~clock:(fun () -> !now) ()
+  in
+  let verify_at seconds =
+    now := time seconds;
+    Alcotest.(check bool)
+      "verified" true
+      (Result.is_ok (verifier (signed_token ())))
+  in
+  let stale_warnings =
+    warnings (fun () ->
+        verify_at 1_000.;
+        available := false;
+        verify_at 1_002.;
+        verify_at 1_003.;
+        (* A retry after the cooldown that fails again is the same outage. *)
+        verify_at 1_040.;
+        available := true;
+        verify_at 1_080.;
+        (* The keys from the recovery expire and the provider goes down again. *)
+        available := false;
+        verify_at 1_082.;
+        verify_at 1_083.)
+    |> List.filter ~f:(String.is_substring ~substring:"using JWKS that expired")
+  in
+  Alcotest.(check int) "one warning per outage" 2 (List.length stale_warnings)
+
 let test_oidc_does_not_hammer_an_unreachable_provider () =
   let now = ref (time 1_000.) in
   let verifier, _, available, fetches = provider ~clock:(fun () -> !now) () in
@@ -195,6 +249,18 @@ let test_oidc_rejects_bad_tokens_and_claims () =
   Alcotest.(check bool)
     "tampered" true
     (Result.is_error (verifier (token ^ "x")))
+
+let test_oidc_tolerates_clock_skew () =
+  let now = ref (time 1_030.) in
+  let verifier, _ = oidc ~clock:(fun () -> !now) () in
+  let token = signed_token ~expires_at:1_000 () in
+  Alcotest.(check bool)
+    "just expired by our clock" true
+    (Result.is_ok (verifier token));
+  now := time 1_061.;
+  Alcotest.(check bool)
+    "expired beyond the leeway" true
+    (Result.is_error (verifier token))
 
 let test_auth_returns_user_and_scopes () =
   Test_support.with_store (fun store _ ->
@@ -409,6 +475,8 @@ let () =
             test_oidc_refetches_keys_for_an_unknown_key_id;
           Alcotest.test_case "stale keys while the provider is down" `Quick
             test_oidc_serves_stale_keys_while_the_provider_is_down;
+          Alcotest.test_case "stale keys warn once per outage" `Quick
+            test_oidc_warns_about_stale_keys_once_per_outage;
           Alcotest.test_case "unreachable provider is not hammered" `Quick
             test_oidc_does_not_hammer_an_unreachable_provider;
           Alcotest.test_case "concurrent requests share one refresh" `Quick
@@ -421,6 +489,8 @@ let () =
             test_oidc_preserves_array_scopes;
           Alcotest.test_case "OIDC rejects malformed and bad claims" `Quick
             test_oidc_rejects_bad_tokens_and_claims;
+          Alcotest.test_case "OIDC tolerates clock skew" `Quick
+            test_oidc_tolerates_clock_skew;
           Alcotest.test_case "user and scopes" `Quick
             test_auth_returns_user_and_scopes;
           Alcotest.test_case "expired token" `Quick test_rejects_expired_token;

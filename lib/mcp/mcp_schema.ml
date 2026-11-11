@@ -20,13 +20,41 @@ let describe text = function
 
 let property name text field_schema = (name, describe text field_schema)
 
-let nutrition_properties =
+(* An optional field also accepts null, which clears it in a partial update. *)
+let nullable = function
+  | `Assoc fields ->
+      `Assoc
+        (List.map fields ~f:(function
+          | "type", `String kind ->
+              ("type", `List [ `String kind; `String "null" ])
+          | field -> field))
+  | other -> other
+
+(* A partial update's optional field: null clears it. *)
+let clearable (name, field_schema) =
+  ( name,
+    match nullable field_schema with
+    | `Assoc fields ->
+        `Assoc
+          (List.map fields ~f:(function
+            | "description", `String text ->
+                ("description", `String (text ^ " Null clears it."))
+            | field -> field))
+    | other -> other )
+
+let required_nutrition_properties =
   [
     property "calories_kcal" "Energy in kilocalories." integer;
     property "protein_g" "Protein in grams." number;
+  ]
+
+let macro_properties =
+  [
     property "carbs_g" "Carbohydrates in grams, if known." number;
     property "fat_g" "Fat in grams, if known." number;
   ]
+
+let nutrition_properties = required_nutrition_properties @ macro_properties
 
 let provenance_properties =
   [
@@ -115,7 +143,8 @@ let item_update_properties =
     property "id" "The item's id, from the meal's items." string;
     item_description_property;
   ]
-  @ nutrition_properties @ provenance_properties
+  @ required_nutrition_properties
+  @ List.map ~f:clearable (macro_properties @ provenance_properties)
   @ [
       property "quantity"
         "For an item logged from a product: the new amount in its unit. The \
@@ -248,16 +277,6 @@ let range_properties =
       string;
     timezone_property;
   ]
-
-(* An optional goal also accepts null, which clears it in set_goals. *)
-let nullable = function
-  | `Assoc fields ->
-      `Assoc
-        (List.map fields ~f:(function
-          | "type", `String kind ->
-              ("type", `List [ `String kind; `String "null" ])
-          | field -> field))
-  | other -> other
 
 let goals_properties =
   [
@@ -401,7 +420,9 @@ let tools =
         "Change when a meal was eaten or its label; give at least one, and \
          omitted fields are left unchanged. To change what was eaten, use the \
          item tools."
-      (schema (id_properties @ [ eaten_at_property; label_property ]) [ "id" ]);
+      (schema
+         (id_properties @ [ eaten_at_property; clearable label_property ])
+         [ "id" ]);
     tool "delete_meal" ~description:"Delete a meal and its items."
       (schema id_properties [ "id" ]);
     tool "add_meal_item" ~description:"Add something eaten to an existing meal."
@@ -410,11 +431,11 @@ let tools =
          [ "meal_id"; "item" ]);
     tool "update_meal_item"
       ~description:
-        "Correct an item's estimate; give at least one field, and omitted \
-         fields are left unchanged. The previous values are kept as a revision \
-         with the reason. For an item from a product, give quantity to change \
-         the amount; changing calories or a macro by hand detaches the item \
-         from its product."
+        "Correct an item's estimate; give at least one field. Omitted fields \
+         are left unchanged, and null clears an optional one. The previous \
+         values are kept as a revision with the reason. For an item from a \
+         product, give quantity to change the amount; changing calories or a \
+         macro by hand detaches the item from its product."
       (schema item_update_properties [ "id" ]);
     tool "delete_meal_item"
       ~description:

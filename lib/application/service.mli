@@ -2,6 +2,9 @@ type t
 
 val make : store:Store_sqlite.t -> t
 
+val check_storage : t -> (unit, Error.t) result
+(** Whether the ledger can be read. *)
+
 val resolve_user :
   t -> issuer:string -> subject:string -> (User.t, Error.t) result
 

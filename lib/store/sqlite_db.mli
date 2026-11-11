@@ -83,11 +83,6 @@ val with_checked_numeric_update :
 (** [check] then [update] in one transaction, so invalid stored numeric values
     are reported, never repaired as a side effect of an ordinary update. *)
 
-val soft_delete :
-  t -> table:string -> user:User.t -> string -> (unit, Error.t) result
-(** Marks the user's row with that id deleted. Succeeds for a row already
-    deleted; not found for one that never existed for this user. *)
-
 (** {1 Building queries} *)
 
 val text_value : string -> Sqlite3.Data.t
@@ -97,7 +92,6 @@ val time_value : Ptime.t -> Sqlite3.Data.t
 val nullable : string option -> Sqlite3.Data.t
 val nullable_float : float option -> Sqlite3.Data.t
 val nullable_int : int option -> Sqlite3.Data.t
-val owner : User.t -> Sqlite3.Data.t
 
 val json_ids : string list -> Sqlite3.Data.t
 (** A JSON array to match against with [json_each]. *)

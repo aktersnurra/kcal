@@ -1,7 +1,16 @@
 (library
  (name kcal_store)
  (wrapped false)
- (libraries kcal_domain kcal_kernel base ptime sqlite3 logs yojson unix))
+ (libraries
+  kcal_infrastructure
+  kcal_domain
+  kcal_kernel
+  base
+  ptime
+  sqlite3
+  logs
+  yojson
+  unix))
 
 (rule
  (target embedded_migrations.ml)

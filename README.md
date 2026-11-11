@@ -43,13 +43,14 @@ Migrations are forward-only and run when the database is opened. The database us
 
 - `lib/` — the library, one dune library per layer. Each layer may use only the layers listed before it, and the build rejects anything else:
   - `kernel/` — identifiers, errors, dates and times, nutrition values
-  - `domain/` — users, meals, products, weigh-ins, goals, summaries, context, Withings types, secrets
+  - `domain/` — users, meals, products, weigh-ins, goals, summaries, context, Withings connections
+  - `infrastructure/` — token encryption (`Secret`) and the Withings API client (`Withings`), behind the transport the edge supplies
   - `store/` — SQLite: `Sqlite_db` (the connection and shared query helpers) under one `Store_*` module per aggregate, gathered by `Store_sqlite`, plus migrations and search queries
   - `application/` — `Service` and the Withings OAuth, sync and integration flows
   - `mcp/` — MCP argument parsing, JSON, schemas and dispatch; may not use `store/`
   - `edge/` — HTTPS, OIDC, auth, the Withings transport, config, logging and the HTTP adapter; may not use `store/`
 
-  `lib/dune` defines the `kcal` library, which re-exports all six for `bin/` and `test/`.
+  `lib/dune` defines the `kcal` library, which re-exports all seven for `bin/` and `test/`.
 - `bin/kcal.ml` — CLI entry points (`serve`, `migrate`, `sync-withings`)
 - `migrations/` — forward-only SQL migrations
 - `test/` — Alcotest suites; the store and HTTP layers are tested against real SQLite

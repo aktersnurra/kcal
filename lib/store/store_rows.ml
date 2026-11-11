@@ -1,6 +1,9 @@
+module Domain_error = Error
 open Base
+module Error = Domain_error
 open Sqlite_db
 
+let owner user = text_value (User_id.to_string user.User.id)
 let user_columns = "id, oidc_issuer, oidc_subject, created_at"
 
 let user_of_row statement =
@@ -52,3 +55,23 @@ let weigh_in_of_row statement =
                  (Option.bind (optional_text statement 8) ~f:parse_time))
       | None -> None)
   | _ -> None
+
+(* Deleting a record that is already deleted succeeds; one that never existed
+   for this user is not found. [table] is a literal from the store. *)
+let soft_delete db ~table ~user id =
+  let current = time_value (now ()) in
+  let* changed =
+    execute_changes db
+      ("UPDATE " ^ table
+     ^ " SET deleted_at = ?, updated_at = ? WHERE id = ? AND user_id = ? AND \
+        deleted_at IS NULL")
+      [ current; current; text_value id; owner user ]
+  in
+  if changed = 1 then Ok ()
+  else
+    first_row db
+      ("SELECT 1 FROM " ^ table
+     ^ " WHERE id = ? AND user_id = ? AND deleted_at IS NOT NULL")
+      [ text_value id; owner user ]
+      ~absent:(fun () -> Error Error.Not_found)
+      ~present:(fun _ -> Ok ())

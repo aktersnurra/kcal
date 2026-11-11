@@ -77,7 +77,8 @@ let expiration_of_payload = function
       | _ -> None)
   | _ -> None
 
-let claims_of_jwt ~issuer ~audience ~now jwt =
+(* A token counts as expired only once [exp] is before [expired_before]. *)
+let claims_of_jwt ~issuer ~audience ~expired_before jwt =
   match
     ( Jose.Jwt.get_string_claim jwt "iss",
       Jose.Jwt.get_string_claim jwt "sub",
@@ -88,7 +89,7 @@ let claims_of_jwt ~issuer ~audience ~now jwt =
     when String.equal token_issuer issuer
          && (not (String.equal subject ""))
          && List.mem token_audience audience ~equal:String.equal
-         && Ptime.compare expires_at now > 0 ->
+         && Ptime.compare expires_at expired_before > 0 ->
       Ok
         {
           issuer = token_issuer;
@@ -104,7 +105,8 @@ let claims_of_jwt ~issuer ~audience ~now jwt =
              %S"
             token_issuer issuer);
       Error ()
-  | _, _, _, Some expires_at when Ptime.compare expires_at now <= 0 ->
+  | _, _, _, Some expires_at when Ptime.compare expires_at expired_before <= 0
+    ->
       Log.debug (fun m ->
           m "rejected bearer token: expired at %s"
             (Ptime.to_rfc3339 ~tz_offset_s:0 expires_at));
@@ -164,14 +166,29 @@ type cache = {
   mutable retry_at : Ptime.t option;
       (** Set while a failed fetch cools down. *)
   mutable in_flight : (Jose.Jwks.t, unit) Result.t Eio.Promise.t option;
+  mutable serving_stale : bool;
+      (** Set once an outage has been reported, until a fetch succeeds. *)
 }
+
+(* How long past its expiry by kcal's clock a token is still accepted, so a
+   clock running ahead of the provider's does not reject valid tokens. *)
+let clock_skew_s = 60
 
 let after time seconds =
   Option.value (Ptime.add_span time (Ptime.Span.of_int_s seconds)) ~default:time
 
+let before time seconds =
+  Option.value (Ptime.sub_span time (Ptime.Span.of_int_s seconds)) ~default:time
+
 let make ~issuer ~audience ?(clock = unix_clock) ~client () =
   let cache =
-    { keys = None; fetched_at = None; retry_at = None; in_flight = None }
+    {
+      keys = None;
+      fetched_at = None;
+      retry_at = None;
+      in_flight = None;
+      serving_stale = false;
+    }
   in
   let fetch () =
     match client.discover ~issuer with
@@ -222,6 +239,9 @@ let make ~issuer ~audience ?(clock = unix_clock) ~client () =
               cache.keys <- Some (keys, after now ttl);
               cache.fetched_at <- Some now;
               cache.retry_at <- None;
+              if cache.serving_stale then (
+                cache.serving_stale <- false;
+                Log.info (fun m -> m "JWKS provider reachable again"));
               Ok keys
           | Error () ->
               cache.retry_at <- Some (after now failure_cooldown_s);
@@ -233,13 +253,16 @@ let make ~issuer ~audience ?(clock = unix_clock) ~client () =
   let reached time now =
     Option.for_all time ~f:(fun time -> Ptime.compare now time >= 0)
   in
+  (* Every request during an outage would otherwise repeat the warning. *)
   let stale_keys now =
     match cache.keys with
     | Some (keys, expires_at)
       when Ptime.compare now (after expires_at maximum_stale_s) < 0 ->
-        Log.warn (fun m ->
-            m "using JWKS that expired at %s: the provider is unreachable"
-              (Ptime.to_rfc3339 ~tz_offset_s:0 expires_at));
+        if not cache.serving_stale then (
+          cache.serving_stale <- true;
+          Log.warn (fun m ->
+              m "using JWKS that expired at %s: the provider is unreachable"
+                (Ptime.to_rfc3339 ~tz_offset_s:0 expires_at)));
         Ok keys
     | _ -> Error ()
   in
@@ -277,18 +300,21 @@ let make ~issuer ~audience ?(clock = unix_clock) ~client () =
   in
   fun token ->
     let now = clock () in
+    let expired_before = before now clock_skew_s in
     match Result.bind (keys now) ~f:(fun keys -> key now keys token) with
     | Error () -> Error ()
     | Ok key -> (
         match
-          decode_jose (fun () -> Jose.Jwt.of_string ~jwk:key ~now token)
+          decode_jose (fun () ->
+              Jose.Jwt.of_string ~jwk:key ~now:expired_before token)
         with
         | Error _ ->
             Log.warn (fun m ->
                 m "rejected bearer token: signature verification failed");
             Error ()
         | Ok jwt ->
-            decode_jose (fun () -> claims_of_jwt ~issuer ~audience ~now jwt))
+            decode_jose (fun () ->
+                claims_of_jwt ~issuer ~audience ~expired_before jwt))
 
 let max_age headers =
   match Cohttp.Header.get headers "cache-control" with

@@ -35,9 +35,8 @@ module Eating_window : sig
   val status : t -> Time.zone -> now:Ptime.t -> (status, Error.t) result
 end
 
-(** How [set_goals] treats one optional goal: an omitted field is kept, null
-    clears it, and a value sets it. *)
-type 'a change = Keep | Clear | Set of 'a
+(** How [set_goals] treats one optional goal. *)
+type 'a change = 'a Change.t = Keep | Clear | Set of 'a
 
 type patch = {
   timezone : Time.zone option;  (** [None] keeps the current timezone. *)

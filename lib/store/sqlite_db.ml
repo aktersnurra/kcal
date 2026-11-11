@@ -213,8 +213,6 @@ let nullable_int = function
   | None -> Sqlite3.Data.NULL
   | Some value -> int_value value
 
-let owner user = text_value (User_id.to_string user.User.id)
-
 let qualified_columns table columns =
   String.split columns ~on:','
   |> List.map ~f:(fun column -> table ^ "." ^ String.strip column)
@@ -279,23 +277,3 @@ let is_valid_query ~from ~to_ ~limit =
   match (from, to_) with
   | Some lower, Some upper -> Ptime.compare lower upper <= 0
   | _ -> true
-
-(* Deleting a record that is already deleted succeeds; one that never existed
-   for this user is not found. [table] is a literal from this module. *)
-let soft_delete db ~table ~user id =
-  let current = time_value (now ()) in
-  let* changed =
-    execute_changes db
-      ("UPDATE " ^ table
-     ^ " SET deleted_at = ?, updated_at = ? WHERE id = ? AND user_id = ? AND \
-        deleted_at IS NULL")
-      [ current; current; text_value id; owner user ]
-  in
-  if changed = 1 then Ok ()
-  else
-    first_row db
-      ("SELECT 1 FROM " ^ table
-     ^ " WHERE id = ? AND user_id = ? AND deleted_at IS NOT NULL")
-      [ text_value id; owner user ]
-      ~absent:(fun () -> Error Error.Not_found)
-      ~present:(fun _ -> Ok ())

@@ -30,7 +30,12 @@ let create_withings_oauth_state db ~user ~state_hash ~expires_at
       execute db
         "INSERT INTO withings_oauth_states (state_hash, user_id, expires_at, \
          consumed_at, created_at) VALUES (?, ?, ?, NULL, ?)"
-        [ text_value state_hash; owner user; time_value expires_at; current ])
+        [
+          text_value state_hash;
+          Store_rows.owner user;
+          time_value expires_at;
+          current;
+        ])
 
 let consume_withings_oauth_state db ~user ~state_hash ~now:current_time =
   let current = time_value current_time in
@@ -38,7 +43,7 @@ let consume_withings_oauth_state db ~user ~state_hash ~now:current_time =
     execute_changes db
       "UPDATE withings_oauth_states SET consumed_at = ? WHERE state_hash = ? \
        AND user_id = ? AND consumed_at IS NULL AND expires_at > ?"
-      [ current; text_value state_hash; owner user; current ]
+      [ current; text_value state_hash; Store_rows.owner user; current ]
   in
   if changed = 1 then Ok () else Error Error.Not_found
 
@@ -61,7 +66,7 @@ let get_withings_status db ~user =
     "SELECT id, user_id, withings_user_id, token_expires_at, sync_cursor, \
      requires_reauthorization, access_token_encrypted, refresh_token_encrypted \
      FROM withings_connections WHERE user_id = ?"
-    [ owner user ]
+    [ Store_rows.owner user ]
     ~absent:(fun () -> Ok Withings_connection.Disconnected)
     ~present:(fun statement ->
       match withings_connection_of_row statement with
@@ -76,7 +81,8 @@ let get_withings_status db ~user =
       | _ -> Error (Error.Storage_decoding "Withings connection"))
 
 let delete_withings_connection db ~user =
-  execute db "DELETE FROM withings_connections WHERE user_id = ?" [ owner user ]
+  execute db "DELETE FROM withings_connections WHERE user_id = ?"
+    [ Store_rows.owner user ]
 
 (* A connection with its user. A connection without both tokens has no usable
    expiry, so it does not decode. *)
@@ -146,7 +152,7 @@ let replace_withings_connection db ~user ~key credentials =
       [
         text_value
           (Withings_connection_id.to_string (Withings_connection_id.fresh ()));
-        owner user;
+        Store_rows.owner user;
         text_value credentials.withings_user_id;
         text_value (Secret.encrypt ~key credentials.access_token);
         text_value (Secret.encrypt ~key credentials.refresh_token);
@@ -175,7 +181,7 @@ let refresh_withings_credentials db ~user ~connection ~key credentials =
         time_value credentials.expires_at;
         time_value (now ());
         text_value connection.id;
-        owner user;
+        Store_rows.owner user;
         account_value connection;
       ]
       withings_connection_of_row
@@ -187,7 +193,7 @@ let withings_credentials db ~user ~connection ~key =
      AND requires_reauthorization = 0 AND withings_user_id = ?"
     [
       text_value connection.Withings_connection.id;
-      owner user;
+      Store_rows.owner user;
       account_value connection;
     ]
     ~absent:(fun () -> Error Error.Not_found)
@@ -221,7 +227,7 @@ let mark_withings_reauthorization db ~user ~connection =
       [
         time_value (now ());
         text_value connection.Withings_connection.id;
-        owner user;
+        Store_rows.owner user;
         account_value connection;
         time_value connection.token_expires_at;
       ]
@@ -251,7 +257,7 @@ let persist_withings_import db ~user ~connection ~rows ~expected_cursor ~cursor
         ("SELECT " ^ Store_rows.weigh_in_columns
        ^ " FROM weigh_ins WHERE source = 'withings' AND external_id = ? AND \
           user_id = ?")
-        [ text_value row.external_id; owner user ]
+        [ text_value row.external_id; Store_rows.owner user ]
         ~absent:(fun () -> Ok ())
         ~present:(fun statement ->
           match Store_rows.weigh_in_of_row statement with
@@ -268,7 +274,7 @@ let persist_withings_import db ~user ~connection ~rows ~expected_cursor ~cursor
        weigh_ins.deleted_at IS NULL AND weigh_ins.user_id = excluded.user_id"
       [
         text_value (Weigh_in_id.to_string (Weigh_in_id.fresh ()));
-        owner user;
+        Store_rows.owner user;
         time_value row.measured_at;
         float_value row.weight_kg;
         text_value row.external_id;
@@ -282,7 +288,7 @@ let persist_withings_import db ~user ~connection ~rows ~expected_cursor ~cursor
         first_row db
           "SELECT sync_cursor, withings_user_id FROM withings_connections \
            WHERE id = ? AND user_id = ?"
-          [ connection_id; owner user ]
+          [ connection_id; Store_rows.owner user ]
           ~absent:(fun () -> Error Error.Not_found)
           ~present:(fun statement ->
             if
@@ -308,6 +314,6 @@ let persist_withings_import db ~user ~connection ~rows ~expected_cursor ~cursor
             "UPDATE withings_connections SET sync_cursor = CASE WHEN \
              sync_cursor IS NULL OR ? >= sync_cursor THEN ? ELSE sync_cursor \
              END, updated_at = ? WHERE id = ? AND user_id = ?"
-            [ cursor; cursor; current; connection_id; owner user ]
+            [ cursor; cursor; current; connection_id; Store_rows.owner user ]
         in
         if changed = 1 then Ok () else Error Error.Not_found)

@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-11 — Follow-up fixes: outages, races, health, clearing fields
+
+- While the identity provider is down, the "using JWKS that expired" warning is logged once per outage instead of on every request; recovery is logged at info.
+- Bearer tokens are accepted until a minute past `exp`, so a small clock difference with the provider no longer rejects valid tokens.
+- A Withings sync that loses a refresh race (its refresh token was rotated by another sync) reloads the winner's tokens and continues instead of failing with "not found", so a cron run no longer exits 1 for it.
+- The ten-second outbound timeout is tested: OIDC and Withings requests to a local endpoint that accepts and never answers are abandoned at the deadline, on a mock clock.
+- `/health` reads the database and answers `503 {"status":"unavailable"}` when it cannot.
+- `Secret` and `Withings` move from `domain/` to a new `infrastructure/` library between domain and store; the domain no longer depends on crypto, base64 or JSON.
+- `Sqlite_db` no longer knows `User`: `owner` and `soft_delete` move to `Store_rows`.
+- `update_meal_item` and `update_meal` tell absent, null and a value apart: null clears `carbs_g`, `fat_g`, `confidence`, `estimate_source`, `notes` and a meal's `label`, and is refused for required fields. The schema marks those fields nullable. The `Keep | Clear | Set` change type moves from `Goals` to the domain's `Change` module.
+
 ## 2026-11-11 — Review fixes: storage, OIDC, webhook, scopes
 
 - SQLite opens with write-ahead logging, `synchronous = NORMAL` and a five-second busy timeout, so `kcal sync-withings` beside `kcal serve` waits for a lock instead of failing. Back up with `.backup`, not by copying the main file alone.

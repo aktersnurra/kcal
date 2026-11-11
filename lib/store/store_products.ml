@@ -38,7 +38,7 @@ let qualified_product_columns = qualified_columns "products" product_columns
 let get_product db ~user id =
   query_one db
     ("SELECT " ^ product_columns ^ " FROM products WHERE id = ? AND user_id = ?")
-    [ text_value (Product_id.to_string id); owner user ]
+    [ text_value (Product_id.to_string id); Store_rows.owner user ]
     product_of_row
 
 let save_product db ~user ~id input =
@@ -67,7 +67,7 @@ let save_product db ~user ~id input =
              ?, ?, ?, ?, ?, 1) RETURNING " ^ product_columns,
             [
               text_value (Product_id.to_string (Product_id.fresh ()));
-              owner user;
+              Store_rows.owner user;
             ]
             @ fields @ [ current; current ] )
       | Some id ->
@@ -76,7 +76,11 @@ let save_product db ~user ~id input =
              = ?, basis_unit = ?, updated_at = ?, version = version + 1 WHERE \
              id = ? AND user_id = ? RETURNING " ^ product_columns,
             fields
-            @ [ current; text_value (Product_id.to_string id); owner user ] )
+            @ [
+                current;
+                text_value (Product_id.to_string id);
+                Store_rows.owner user;
+              ] )
     in
     query_one db sql values product_of_row
   in
@@ -99,7 +103,12 @@ let recent_products db ~user ~since ~limit =
       meals.deleted_at IS NULL AND meal_items.deleted_at IS NULL AND \
       meals.eaten_at >= ? GROUP BY products.id ORDER BY last_eaten_at DESC, \
       products.id LIMIT ?")
-    [ owner user; owner user; time_value since; int_value limit ]
+    [
+      Store_rows.owner user;
+      Store_rows.owner user;
+      time_value since;
+      int_value limit;
+    ]
     (fun statement ->
       match (product_of_row statement, parse_time (text statement 14)) with
       | Some product, Some last_eaten_at -> Some (product, last_eaten_at)
@@ -114,7 +123,7 @@ let search_products db ~user ~query:search ~limit =
         products_fts.rowid WHERE products.user_id = ? AND products_fts MATCH ? \
         ORDER BY bm25(products_fts), products.name, products.id LIMIT ?")
       [
-        owner user;
+        Store_rows.owner user;
         text_value (Search_query.fts5_match_expression search);
         int_value limit;
       ]

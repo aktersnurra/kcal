@@ -27,14 +27,14 @@ type t = private {
     estimate's provenance. *)
 
 type patch = {
-  description : string option;
+  description : string option;  (** [None] keeps the current value. *)
   calories_kcal : int option;
   protein_g : float option;
-  carbs_g : float option;
-  fat_g : float option;
-  confidence : float option;
-  estimate_source : string option;
-  notes : string option;
+  carbs_g : float Change.t;
+  fat_g : float Change.t;
+  confidence : float Change.t;
+  estimate_source : string Change.t;
+  notes : string Change.t;
 }
 
 type create = {

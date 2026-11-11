@@ -1,12 +1,4 @@
 (library
  (name kcal_domain)
  (wrapped false)
- (libraries
-  kcal_kernel
-  base
-  ptime
-  yojson
-  base64
-  mirage-crypto
-  mirage-crypto-rng
-  mirage-crypto-rng.unix))
+ (libraries kcal_kernel base ptime))

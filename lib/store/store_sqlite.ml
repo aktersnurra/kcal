@@ -11,6 +11,13 @@ let open_database ~path =
   Sqlite_db.open_database ~path ~migrate:Migration.apply_all
 
 let close = Sqlite_db.close
+
+(* [SELECT 1] alone never reads the file; the migrations table does. *)
+let check_readable db =
+  Sqlite_db.first_row db "SELECT 1 FROM schema_migrations LIMIT 1" []
+    ~absent:(fun () -> Error (Sqlite_db.storage_error ()))
+    ~present:(fun _ -> Ok ())
+
 let compile_search_query db = Search_query.of_strings (Sqlite_db.raw db)
 
 module For_testing = struct

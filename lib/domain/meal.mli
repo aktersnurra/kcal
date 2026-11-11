@@ -12,7 +12,10 @@ type t = private {
   deleted_at : Ptime.t option;
 }
 
-type patch = { eaten_at : Ptime.t option; label : string option }
+type patch = {
+  eaten_at : Ptime.t option;  (** [None] keeps the current time. *)
+  label : string Change.t;
+}
 
 module Patch : sig
   type raw = patch

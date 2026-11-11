@@ -3,6 +3,7 @@
  (wrapped false)
  (libraries
   kcal_store
+  kcal_infrastructure
   kcal_domain
   kcal_kernel
   base

@@ -145,7 +145,7 @@ let test_foreign_meal_operations_are_hidden () =
         "foreign meal update" true
         (hidden
            (Result.bind
-              (Meal.Patch.of_raw { eaten_at = None; label = Some "lunch" })
+              (Meal.Patch.of_raw { eaten_at = None; label = Set "lunch" })
               ~f:(Store_sqlite.update_meal store ~user:bob meal.id)));
       Alcotest.(check bool)
         "foreign item delete" true
@@ -212,7 +212,7 @@ let test_partial_update_leaves_omitted_fields_unchanged () =
         Option.value_exn
           (Result.ok
              (Test_support.update_only_item_raw store ~user created
-                Meal_item.{ empty_patch with confidence = Some 0.5 }))
+                Meal_item.{ empty_patch with confidence = Set 0.5 }))
       in
       let meal = Test_support.only_item created
       and updated = Test_support.only_item updated_meal in
@@ -237,6 +237,67 @@ let test_partial_update_leaves_omitted_fields_unchanged () =
         "eaten_at untouched"
         (Time.to_utc_string created.eaten_at)
         (Time.to_utc_string updated_meal.eaten_at))
+
+let test_clearing_optional_fields () =
+  Test_support.with_store (fun store user ->
+      let created = Test_support.create_meal store user in
+      let update patch =
+        Option.value_exn
+          (Result.ok
+             (Test_support.update_only_item_raw store ~user created patch))
+      in
+      let set =
+        Test_support.only_item
+          (update
+             Meal_item.
+               {
+                 empty_patch with
+                 carbs_g = Set 30.0;
+                 fat_g = Set 8.0;
+                 confidence = Set 0.7;
+                 estimate_source = Set "label";
+                 notes = Set "with bread";
+               })
+      in
+      Alcotest.(check (option (float 0.0001)))
+        "carbs set" (Some 30.0) set.carbs_g;
+      Alcotest.(check (option string)) "notes set" (Some "with bread") set.notes;
+      let cleared =
+        Test_support.only_item
+          (update
+             Meal_item.
+               {
+                 empty_patch with
+                 carbs_g = Clear;
+                 fat_g = Clear;
+                 confidence = Clear;
+                 estimate_source = Clear;
+                 notes = Clear;
+               })
+      in
+      Alcotest.(check (option (float 0.0001)))
+        "carbs cleared" None cleared.carbs_g;
+      Alcotest.(check (option (float 0.0001))) "fat cleared" None cleared.fat_g;
+      Alcotest.(check (option (float 0.0001)))
+        "confidence cleared" None cleared.confidence;
+      Alcotest.(check (option string))
+        "estimate source cleared" None cleared.estimate_source;
+      Alcotest.(check (option string)) "notes cleared" None cleared.notes;
+      Alcotest.(check string)
+        "description kept" set.description cleared.description;
+      let update_meal label =
+        Option.value_exn
+          (Result.ok
+             (Result.bind
+                (Meal.Patch.of_raw { eaten_at = None; label })
+                ~f:(Store_sqlite.update_meal store ~user created.id)))
+      in
+      Alcotest.(check (option string))
+        "label set" (Some "lunch") (update_meal (Set "lunch")).label;
+      Alcotest.(check (option string))
+        "label kept" (Some "lunch") (update_meal Keep).label;
+      Alcotest.(check (option string))
+        "label cleared" None (update_meal Clear).label)
 
 let test_locked_meal_get_and_update_are_storage_errors () =
   Test_support.with_exclusive_lock
@@ -559,6 +620,8 @@ let () =
             test_meal_crud_and_soft_delete;
           Alcotest.test_case "partial update leaves omitted fields unchanged"
             `Quick test_partial_update_leaves_omitted_fields_unchanged;
+          Alcotest.test_case "clearing optional fields" `Quick
+            test_clearing_optional_fields;
           Alcotest.test_case "meal patch touches only the included fields"
             `Quick meal_patch_touches_only_the_included_fields;
           Alcotest.test_case "deleted meals are excluded from queries" `Quick
