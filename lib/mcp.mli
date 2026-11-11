@@ -4,7 +4,8 @@ type withings = {
   redirect_uri : string;
 }
 
-val rpc_error : ?id:Yojson.Safe.t -> int -> string -> Yojson.Safe.t
+val rpc_error :
+  ?id:Yojson.Safe.t -> ?data:Yojson.Safe.t -> int -> string -> Yojson.Safe.t
 
 val handle :
   ?withings:withings ->

@@ -4,6 +4,11 @@ module Error = Domain_error
 
 let ( let* ) result f = Result.bind result ~f
 
+let tool_log_src =
+  Logs.Src.create "kcal.mcp.tools" ~doc:"MCP tool calls and their outcomes"
+
+module Tool_log = (val Logs.src_log tool_log_src : Logs.LOG)
+
 type withings = {
   oauth : Withings_oauth.t;
   client_id : string;
@@ -52,14 +57,7 @@ let call_disconnect_withings service withings ~user =
 let meal_result meal =
   Result.map (Mcp_json.meal_json meal) ~f:Mcp_json.text_result
 
-let call ?withings service (identity : Auth.identity) name arguments =
-  let now = Option.value_exn (Ptime.of_float_s (Unix.gettimeofday ())) in
-  let* request =
-    Mcp_arguments.parse ~now
-      ~default_zone:(fun () -> Service.default_zone service ~user:identity.user)
-      ~compile_search:(Service.compile_search_query service)
-      ~name arguments
-  in
+let run ?withings service (identity : Auth.identity) ~now request =
   let user = identity.user in
   let open Mcp_arguments in
   match request with
@@ -162,16 +160,41 @@ let call ?withings service (identity : Auth.identity) name arguments =
       let* summary = Service.summary service ~user ~zone ~range in
       Ok (Mcp_json.text_result (Mcp_json.summary_json zone range summary))
 
+(* Which stage failed: rejected arguments never reach the service. *)
+type stage = Arguments | Service
+
+let call ?withings service (identity : Auth.identity) name arguments =
+  let now = Option.value_exn (Ptime.of_float_s (Unix.gettimeofday ())) in
+  match
+    Mcp_arguments.parse ~now
+      ~default_zone:(fun () -> Service.default_zone service ~user:identity.user)
+      ~compile_search:(Service.compile_search_query service)
+      ~name arguments
+  with
+  | Error error -> Error (Arguments, error)
+  | Ok request ->
+      Result.map_error (run ?withings service identity ~now request)
+        ~f:(fun error -> (Service, error))
+
 let response ?(id = `Null) result =
   `Assoc [ ("jsonrpc", `String "2.0"); ("id", id); ("result", result) ]
 
-let rpc_error ?(id = `Null) code message =
+let rpc_error ?(id = `Null) ?data code message =
   `Assoc
     [
       ("jsonrpc", `String "2.0");
       ("id", id);
-      ("error", `Assoc [ ("code", `Int code); ("message", `String message) ]);
+      ( "error",
+        `Assoc
+          ([ ("code", `Int code); ("message", `String message) ]
+          @ match data with None -> [] | Some data -> [ ("data", data) ]) );
     ]
+
+(* A protocol-level parameter error names the field and what was wrong, so a
+   client never gets a bare "Invalid params". *)
+let invalid_params ~id ~field ~reason =
+  rpc_error ~id (-32602) "Invalid params"
+    ~data:(`Assoc [ ("field", `String field); ("reason", `String reason) ])
 
 let stateless_protocol_version = "2026-07-28"
 let legacy_protocol_version = "2025-03-26"
@@ -203,26 +226,114 @@ let argument_error_message = function
       ^ String.concat ~sep:", " Time.supported_zone_names
   | error -> Error.to_string error
 
+(* A stable code per error kind, for logs; never the message, which can
+   quote argument values. *)
+let error_code = function
+  | Error.Withings_failure _ -> "withings_failure"
+  | Invalid_field _ -> "invalid_field"
+  | Numeric_overflow _ -> "numeric_overflow"
+  | Unrepresentable_result _ -> "unrepresentable_result"
+  | Storage_decoding _ -> "storage_decoding"
+  | Unauthorized -> "unauthorized"
+  | Not_found -> "not_found"
+  | Invalid_input _ -> "invalid_input"
+  | Conflict _ -> "conflict"
+  | Storage_error _ -> "storage_error"
+  | Calendar_date_addition _ | Calendar_day_bounds _ | Calendar_local_date _ ->
+      "calendar_limit"
+  | Invalid_date _ -> "invalid_date"
+  | Unsupported_timezone _ -> "unsupported_timezone"
+  | Reversed_date_range _ -> "reversed_date_range"
+  | Date_range_too_long _ -> "date_range_too_long"
+  | Nonpositive_argument _ -> "nonpositive_argument"
+  | Rejected _ -> "rejected"
+
 let call_response ~request_id = function
   | Ok result -> response ~id:request_id result
-  | Error Error.Not_found ->
+  | Error (_, Error.Not_found) ->
       response ~id:request_id (Mcp_json.tool_error "record not found")
   | Error
-      (( Error.Calendar_date_addition _ | Error.Calendar_day_bounds _
-       | Error.Calendar_local_date _ | Error.Invalid_date _
-       | Error.Unsupported_timezone _ | Error.Reversed_date_range _
-       | Error.Date_range_too_long _ | Error.Nonpositive_argument _
-       | Error.Rejected _ | Error.Conflict _ | Error.Invalid_input _
-       | Error.Invalid_field _ ) as error) ->
+      ( _,
+        (( Error.Calendar_date_addition _ | Error.Calendar_day_bounds _
+         | Error.Calendar_local_date _ | Error.Invalid_date _
+         | Error.Unsupported_timezone _ | Error.Reversed_date_range _
+         | Error.Date_range_too_long _ | Error.Nonpositive_argument _
+         | Error.Rejected _ | Error.Conflict _ | Error.Invalid_input _
+         | Error.Invalid_field _ ) as error) ) ->
       response ~id:request_id
         (Mcp_json.tool_error (argument_error_message error))
-  | Error ((Error.Numeric_overflow _ | Error.Unrepresentable_result _) as error)
+  | Error
+      (_, ((Error.Numeric_overflow _ | Error.Unrepresentable_result _) as error))
     ->
       response ~id:request_id (Mcp_json.tool_error (Error.to_string error))
   | Error
-      ( Error.Unauthorized | Error.Storage_error _ | Error.Storage_decoding _
-      | Error.Withings_failure _ ) ->
+      ( _,
+        ( Error.Unauthorized | Error.Storage_error _ | Error.Storage_decoding _
+        | Error.Withings_failure _ ) ) ->
       rpc_error ~id:request_id (-32603) "Internal error"
+
+(* Bounded and escaped: these strings come from the client. *)
+let truncated text =
+  if String.length text > 64 then String.prefix text 64 ^ "..." else text
+
+let loggable text = Printf.sprintf "%S" (truncated text)
+
+let argument_keys = function
+  | Some (`Assoc fields) ->
+      let keys = List.map fields ~f:fst in
+      let shown = List.take keys 32 |> List.map ~f:loggable in
+      "["
+      ^ String.concat ~sep:"," shown
+      ^ (if List.length keys > 32 then ",..." else "")
+      ^ "]"
+  | None -> "-"
+  | Some _ -> "<not an object>"
+
+(* One line per tools/call, payload values never included: the tool, the
+   request id, the argument keys and the outcome. A call that reaches kcal
+   always leaves this line, even when it is rejected before any business
+   logic runs, so a missing line means the call never got here. *)
+let log_tool_call ~name ~request_id ~arguments outcome =
+  (* The validator's own message, which can quote argument values, only with
+     KCAL_LOG_LEVEL=debug. *)
+  (match outcome with
+  | `Tool_error (Arguments, error) ->
+      Tool_log.debug (fun m ->
+          m "tool=%s rejected arguments: %s"
+            (Option.value_map name ~default:"-" ~f:loggable)
+            (truncated (Error.to_string error)))
+  | _ -> ());
+  let log, outcome =
+    match outcome with
+    | `Ok -> (Tool_log.info, "ok")
+    | `Tool_error (stage, error) ->
+        ( Tool_log.info,
+          Printf.sprintf "tool_error stage=%s error=%s"
+            (match stage with Arguments -> "arguments" | Service -> "service")
+            (error_code error) )
+    | `Rpc_error (code, cause) ->
+        ( Tool_log.warn,
+          Printf.sprintf "rpc_error error=%d%s" code
+            (match cause with None -> "" | Some cause -> " cause=" ^ cause) )
+    | `Forbidden scope ->
+        (Tool_log.warn, Printf.sprintf "forbidden scope=%s" scope)
+  in
+  log (fun m ->
+      m "tool=%s request_id=%s keys=%s outcome=%s"
+        (Option.value_map name ~default:"-" ~f:loggable)
+        (match request_id with
+        | `Null -> "-"
+        | id -> truncated (Yojson.Safe.to_string id))
+        (argument_keys arguments) outcome)
+
+let call_outcome = function
+  | Ok _ -> `Ok
+  | Error
+      ( _,
+        (( Error.Unauthorized | Error.Storage_error _ | Error.Storage_decoding _
+         | Error.Withings_failure _ ) as error) ) ->
+      `Rpc_error (-32603, Some (error_code error))
+  | Error (stage, error) -> `Tool_error (stage, error)
 
 let handle ?withings ~service ~identity request =
   match request with
@@ -259,34 +370,76 @@ let handle ?withings ~service ~identity request =
                               ("version", `String "dev");
                             ] );
                       ]))
-          | _ -> Ok (rpc_error ~id:request_id (-32602) "Invalid params"))
+          | Some (`Assoc _) ->
+              Ok
+                (invalid_params ~id:request_id ~field:"params.protocolVersion"
+                   ~reason:
+                     ("must be \"" ^ legacy_protocol_version
+                    ^ "\" for initialize; newer clients use server/discover \
+                       and protocol version " ^ stateless_protocol_version))
+          | _ ->
+              Ok
+                (invalid_params ~id:request_id ~field:"params"
+                   ~reason:"must be an object with protocolVersion"))
       | Some (`String "tools/list") when valid_request ->
           Ok
             (response ~id:request_id
                (Mcp_json.cacheable [ ("tools", `List Mcp_schema.tools) ]))
       | Some (`String "tools/call") when valid_request -> (
-          match List.Assoc.find fields ~equal:String.equal "params" with
-          | Some (`Assoc params) -> (
-              match
-                ( (match List.Assoc.find params ~equal:String.equal "name" with
-                  | Some (`String name) -> Ok name
-                  | _ -> Error ()),
-                  List.Assoc.find params ~equal:String.equal "arguments" )
-              with
-              | Ok name, arguments -> (
+          let params = List.Assoc.find fields ~equal:String.equal "params" in
+          let find name =
+            match params with
+            | Some (`Assoc params) ->
+                List.Assoc.find params ~equal:String.equal name
+            | _ -> None
+          in
+          let arguments = find "arguments" in
+          let rejected ~name ~field ~reason =
+            log_tool_call ~name ~request_id ~arguments
+              (`Rpc_error (-32602, None));
+            Ok (invalid_params ~id:request_id ~field ~reason)
+          in
+          match (params, find "name") with
+          | Some (`Assoc _), Some (`String name) -> (
+              match required_scope name with
+              | Some scope when not (Auth.has_scope identity scope) ->
+                  log_tool_call ~name:(Some name) ~request_id ~arguments
+                    (`Forbidden scope);
+                  Error `Forbidden
+              | _ ->
                   (* Omitted arguments are an empty object, so the parser
                      explains what is missing. *)
-                  let arguments = Option.value arguments ~default:(`Assoc []) in
-                  match required_scope name with
-                  | Some scope when not (Auth.has_scope identity scope) ->
-                      Error `Forbidden
-                  | _ ->
-                      Ok
-                        (call_response ~request_id
-                           (call ?withings service identity name arguments)))
-              | _ -> Ok (rpc_error ~id:request_id (-32602) "Invalid params"))
-          | _ -> Ok (rpc_error ~id:request_id (-32602) "Invalid params"))
+                  let result =
+                    call ?withings service identity name
+                      (Option.value arguments ~default:(`Assoc []))
+                  in
+                  log_tool_call ~name:(Some name) ~request_id ~arguments
+                    (call_outcome result);
+                  Ok (call_response ~request_id result))
+          | Some (`Assoc _), None ->
+              rejected ~name:None ~field:"params.name"
+                ~reason:"is required: the name of a tool from tools/list"
+          | Some (`Assoc _), Some _ ->
+              rejected ~name:None ~field:"params.name"
+                ~reason:"must be a string: the name of a tool from tools/list"
+          | _ ->
+              rejected ~name:None ~field:"params"
+                ~reason:"must be an object with name and arguments")
       | Some (`String _) when valid_request ->
           Ok (rpc_error ~id:request_id (-32601) "Method not found")
-      | _ -> Ok (rpc_error ~id:request_id (-32600) "Invalid Request"))
+      | method_ ->
+          (match method_ with
+          | Some (`String "tools/call") ->
+              let name =
+                match List.Assoc.find fields ~equal:String.equal "params" with
+                | Some (`Assoc params) -> (
+                    match List.Assoc.find params ~equal:String.equal "name" with
+                    | Some (`String name) -> Some name
+                    | _ -> None)
+                | _ -> None
+              in
+              log_tool_call ~name ~request_id ~arguments:None
+                (`Rpc_error (-32600, None))
+          | _ -> ());
+          Ok (rpc_error ~id:request_id (-32600) "Invalid Request"))
   | _ -> Ok (rpc_error (-32700) "Parse error")

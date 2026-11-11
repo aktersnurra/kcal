@@ -2,6 +2,55 @@ open Base
 
 let json_option f = function None -> `Null | Some value -> f value
 
+(* Grams are stored at full precision, so later sums and rescales do not
+   accumulate rounding, but floating-point arithmetic leaves binary noise in
+   them (two items of 26.1 g and 48.8 g sum to 74.90000000000001; 26.1 g per
+   100 g scaled to 300 g is 78.30000000000001). Responses show grams to 0.1 g.
+   Calories are already whole kcal. *)
+let round_grams value =
+  let tenths = Float.round_nearest (value *. 10.) in
+  if not (Float.is_finite tenths) then value
+  else
+    let rounded = tenths /. 10. in
+    (* No -0.0 for a tiny negative remainder. *)
+    if Float.equal rounded 0. then 0. else rounded
+
+let grams_json value = `Float (round_grams value)
+
+(* Derived kcal, such as an average over days, as whole kcal like every
+   logged value. *)
+let kcal_json value =
+  match Float.iround_nearest value with
+  | Some kcal -> `Int kcal
+  | None -> `Float value
+
+(* Yojson prints a float with 16 significant digits whenever that reads back
+   as the same float, so the 74.9 a client sent comes back as
+   74.90000000000001. Responses use the shortest decimal that reads back as
+   the same float instead: 74.9. *)
+let shortest_float value =
+  let rec digits precision =
+    let text = Printf.sprintf "%.*g" precision value in
+    if precision >= 17 || Float.equal (Float.of_string text) value then text
+    else digits (precision + 1)
+  in
+  (* From 15 digits, which every float with at most 15 significant digits
+     reads back from; fewer would print 80.0 as 8e+01. *)
+  let text = digits 15 in
+  if String.exists text ~f:(fun c -> Char.equal c '.' || Char.equal c 'e') then
+    text
+  else text ^ ".0"
+
+let rec printable = function
+  | `Float value when Float.is_finite value -> `Intlit (shortest_float value)
+  | `Assoc fields ->
+      `Assoc (List.map fields ~f:(fun (name, value) -> (name, printable value)))
+  | `List values -> `List (List.map values ~f:printable)
+  | json -> json
+
+let to_string json = Yojson.Safe.to_string (printable json)
+let optional_grams_json = json_option grams_json
+
 let product_link_json =
   json_option (fun (link : Meal_item.product_link) ->
       `Assoc
@@ -17,9 +66,9 @@ let estimate_fields ~description ~calories_kcal ~protein_g ~carbs_g ~fat_g
   [
     ("description", `String description);
     ("calories_kcal", `Int calories_kcal);
-    ("protein_g", `Float protein_g);
-    ("carbs_g", json_option (fun v -> `Float v) carbs_g);
-    ("fat_g", json_option (fun v -> `Float v) fat_g);
+    ("protein_g", grams_json protein_g);
+    ("carbs_g", optional_grams_json carbs_g);
+    ("fat_g", optional_grams_json fat_g);
     ("confidence", json_option (fun v -> `Float v) confidence);
     ("estimate_source", json_option (fun v -> `String v) estimate_source);
     ("notes", json_option (fun v -> `String v) notes);
@@ -71,9 +120,9 @@ let meal_json_with ~item (meal : Meal.t) =
           ("eaten_at", `String (Time.to_utc_string meal.eaten_at));
           ("label", json_option (fun v -> `String v) meal.label);
           ("calories_kcal", `Int totals.calories_kcal);
-          ("protein_g", `Float totals.protein_g);
-          ("carbs_g", json_option (fun v -> `Float v) totals.carbs_g);
-          ("fat_g", json_option (fun v -> `Float v) totals.fat_g);
+          ("protein_g", grams_json totals.protein_g);
+          ("carbs_g", optional_grams_json totals.carbs_g);
+          ("fat_g", optional_grams_json totals.fat_g);
           ("items", `List (List.map meal.items ~f:item));
           ("created_at", `String (Time.to_utc_string meal.created_at));
           ("updated_at", `String (Time.to_utc_string meal.updated_at));
@@ -135,14 +184,14 @@ let day_json (day : Summary.day) =
           meals );
       ( "protein_g",
         json_option
-          (fun (totals : Meal.totals) -> `Float totals.protein_g)
+          (fun (totals : Meal.totals) -> grams_json totals.protein_g)
           meals );
       ( "carbs_g",
-        json_option float_json
+        optional_grams_json
           (Option.bind meals ~f:(fun (totals : Meal.totals) -> totals.carbs_g))
       );
       ( "fat_g",
-        json_option float_json
+        optional_grams_json
           (Option.bind meals ~f:(fun (totals : Meal.totals) -> totals.fat_g)) );
       ( "weigh_in_count",
         `Int
@@ -232,11 +281,11 @@ let summary_fields (summary : Summary.t) =
            logged) );
     ( "avg_calories_kcal",
       json_option
-        (fun (l : Summary.logged_intake) -> `Float l.avg_calories_kcal)
+        (fun (l : Summary.logged_intake) -> kcal_json l.avg_calories_kcal)
         logged );
     ( "avg_protein_g",
       json_option
-        (fun (l : Summary.logged_intake) -> `Float l.avg_protein_g)
+        (fun (l : Summary.logged_intake) -> grams_json l.avg_protein_g)
         logged );
     ( "calorie_target",
       json_option
@@ -244,7 +293,7 @@ let summary_fields (summary : Summary.t) =
           `Assoc
             [
               ("days_at_or_under", `Int c.days_at_or_under);
-              ("avg_vs_target_kcal", `Float c.avg_vs_target_kcal);
+              ("avg_vs_target_kcal", kcal_json c.avg_vs_target_kcal);
             ])
         summary.calorie_target );
     ( "protein_target",
@@ -342,7 +391,8 @@ let context_json (context : Context.t) =
                    ~f:(fun (t : Meal.totals) -> t.meal_count)) );
             ( "calories_kcal",
               totals (fun (t : Meal.totals) -> `Int t.calories_kcal) );
-            ("protein_g", totals (fun (t : Meal.totals) -> `Float t.protein_g));
+            ( "protein_g",
+              totals (fun (t : Meal.totals) -> grams_json t.protein_g) );
             ( "calorie_target_kcal",
               json_option
                 (fun (t : Goals.Calorie_target.t) -> `Int (t :> int))
@@ -350,7 +400,7 @@ let context_json (context : Context.t) =
             ( "remaining_kcal",
               json_option (fun v -> `Int v) today.remaining_kcal );
             ( "remaining_protein_g",
-              json_option float_json today.remaining_protein_g );
+              optional_grams_json today.remaining_protein_g );
           ] );
       ( "eating_window",
         json_option
@@ -434,8 +484,8 @@ let correction_json (correction : Service.product_correction) =
                        item.product );
                    ("calories_kcal_before", `Int item.calories_kcal);
                    ("calories_kcal_after", `Int portion.calories_kcal);
-                   ("protein_g_before", `Float item.protein_g);
-                   ("protein_g_after", `Float portion.protein_g);
+                   ("protein_g_before", grams_json item.protein_g);
+                   ("protein_g_after", grams_json portion.protein_g);
                  ])) );
       ( "skipped",
         `List
@@ -473,10 +523,7 @@ let text_result value =
         `List
           [
             `Assoc
-              [
-                ("type", `String "text");
-                ("text", `String (Yojson.Safe.to_string value));
-              ];
+              [ ("type", `String "text"); ("text", `String (to_string value)) ];
           ] );
       ("structuredContent", value);
     ]

@@ -35,6 +35,20 @@ module Eating_window : sig
   val status : t -> Time.zone -> now:Ptime.t -> (status, Error.t) result
 end
 
+(** How [set_goals] treats one optional goal: an omitted field is kept, null
+    clears it, and a value sets it. *)
+type 'a change = Keep | Clear | Set of 'a
+
+type patch = {
+  timezone : Time.zone option;  (** [None] keeps the current timezone. *)
+  weekday_calories : Calorie_target.t option;
+  weekend_calories : Calorie_target.t option;
+  protein : Protein_target.t change;
+  eating_window : Eating_window.t change;
+  target_weight_kg : Nutrition.Kilograms.t change;
+  notes : string change;
+}
+
 type t = {
   timezone : Time.zone;
   weekday_calories : Calorie_target.t;  (** Monday through Friday. *)
@@ -49,3 +63,7 @@ type t = {
 
 val max_notes_length : int
 val calorie_target_on : t -> Date.t -> Calorie_target.t
+
+val apply : t option -> patch -> (t, Error.t) result
+(** The current goals (if any) with [patch] applied. Without current goals, the
+    patch must give the timezone and both calorie targets. *)

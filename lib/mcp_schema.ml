@@ -249,6 +249,16 @@ let range_properties =
     timezone_property;
   ]
 
+(* An optional goal also accepts null, which clears it in set_goals. *)
+let nullable = function
+  | `Assoc fields ->
+      `Assoc
+        (List.map fields ~f:(function
+          | "type", `String kind ->
+              ("type", `List [ `String kind; `String "null" ])
+          | field -> field))
+  | other -> other
+
 let goals_properties =
   [
     property "timezone"
@@ -261,24 +271,27 @@ let goals_properties =
       "Daily calorie target Monday through Friday (positive)." integer;
     property "weekend_calorie_target_kcal"
       "Daily calorie target on Saturday and Sunday (positive)." integer;
-    property "protein_target_g" "Daily protein target in grams, if any." number;
+    property "protein_target_g"
+      "Daily protein target in grams; null removes it." (nullable number);
     property "eating_window_start"
       "Local HH:MM the eating window opens, e.g. 12:00 for 16:8. Give with \
-       eating_window_end, or omit both for no window."
-      string;
+       eating_window_end; null for both removes the window."
+      (nullable string);
     property "eating_window_end"
       "Local HH:MM the eating window closes, e.g. 20:00. An end before the \
        start crosses midnight."
-      string;
-    property "target_weight_kg" "Goal body weight in kilograms, if any." number;
+      (nullable string);
+    property "target_weight_kg"
+      "Goal body weight in kilograms; null removes it." (nullable number);
     property "notes"
       (Printf.sprintf
          "The user's own context for these goals, in their words: why, how \
           strict, what matters most (e.g. losing about 0.5 kg a week before \
           summer; weekends are flexible but protein matters every day). Read \
-          it back from get_context before advising. At most %d characters."
+          it back from get_context before advising. At most %d characters; \
+          null removes them."
          Goals.max_notes_length)
-      string;
+      (nullable string);
   ]
 
 let correction_properties =
@@ -330,15 +343,14 @@ let tools =
       (schema [] []);
     tool "set_goals"
       ~description:
-        "Replace the user's goals; omitted optional fields are cleared. \
+        "Update the user's goals and return all of them. Only the fields given \
+         change: an omitted field keeps its current value, and null removes an \
+         optional goal (protein, eating window, target weight, notes). The \
+         first call, before any goals exist, must give timezone, \
+         weekday_calorie_target_kcal and weekend_calorie_target_kcal. \
          get_context, get_summary and the calendar tools judge and bucket days \
-         by them."
-      (schema goals_properties
-         [
-           "timezone";
-           "weekday_calorie_target_kcal";
-           "weekend_calorie_target_kcal";
-         ]);
+         by these goals."
+      (schema goals_properties []);
     tool "save_product"
       ~description:
         "Save reusable nutrition for a basis. Without id, create at version 1; \

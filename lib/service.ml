@@ -153,8 +153,9 @@ let goals service ~user =
   | Error Error.Not_found -> Ok None
   | Error _ as error -> error
 
-let set_goals service ~user goals =
-  Store_sqlite.set_goals service.store ~user goals
+let set_goals service ~user patch =
+  Store_sqlite.update_goals service.store ~user (fun current ->
+      Goals.apply current patch)
 
 let default_zone service ~user =
   Result.map (goals service ~user) ~f:(function

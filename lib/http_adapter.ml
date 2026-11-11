@@ -300,7 +300,7 @@ let handle_withings ~protected_resource ~schedule_sync ~withings ~auth ~service
                           m "method=%s notification=%b outcome=%s" method_name
                             notification outcome);
                       if notification then plain 202 ""
-                      else json 200 (Yojson.Safe.to_string response)
+                      else json 200 (Mcp_json.to_string response)
                   | Error `Forbidden ->
                       Mcp_log.warn (fun m ->
                           m "method=%s notification=%b outcome=forbidden"
@@ -408,6 +408,34 @@ let serve_request ~sw ~protected_resource ~withings ~auth ~service reqd =
   in
   read ()
 
+(* httpun calls this when it cannot hand a request to serve_request: a
+   malformed or truncated request, or an exception while handling one. It used
+   to be ignored, so such a request got no response and left no log line. *)
+let transport_error ?request error start_response =
+  let path =
+    match request with
+    | Some (request : Httpun.Request.t) -> (
+        match String.index request.target '?' with
+        | Some index -> String.sub request.target ~pos:0 ~len:index
+        | None -> request.target)
+    | None -> "-"
+  in
+  let kind =
+    match error with
+    | `Bad_request -> "bad_request"
+    | `Bad_gateway -> "bad_gateway"
+    | `Internal_server_error -> "internal_server_error"
+    | `Exn exn -> "exception " ^ Exn.to_string exn
+  in
+  Http_log.err (fun m ->
+      m "request failed before a response: path=%s error=%s" path kind);
+  let body = start_response Httpun.Headers.empty in
+  Httpun.Body.Writer.write_string body
+    (match error with
+    | `Bad_request -> "Bad Request"
+    | _ -> "Internal Server Error");
+  Httpun.Body.Writer.close body
+
 let run ~withings env ~config ~auth service : unit =
   let protected_resource =
     Some
@@ -431,10 +459,12 @@ let run ~withings env ~config ~auth service : unit =
       ~request_handler:(fun _ reqd ->
         serve_request ~sw ~protected_resource ~withings ~auth ~service
           reqd.Gluten.Reqd.reqd)
-      ~error_handler:(fun _ ?request:_ _ _ -> ())
+      ~error_handler:(fun _ ?request error start_response ->
+        transport_error ?request error start_response)
   in
   Eio.Net.run_server
-    ~on_error:(fun _ -> ())
+    ~on_error:(fun exn ->
+      Http_log.warn (fun m -> m "connection failed: %s" (Exn.to_string exn)))
     listener
     (fun socket address -> handler address socket)
 

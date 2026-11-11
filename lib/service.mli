@@ -115,7 +115,9 @@ val summary :
 
 val context : t -> user:User.t -> now:Ptime.t -> (Context.t, Error.t) result
 val goals : t -> user:User.t -> (Goals.t option, Error.t) result
-val set_goals : t -> user:User.t -> Goals.t -> (Goals.t, Error.t) result
+
+val set_goals : t -> user:User.t -> Goals.patch -> (Goals.t, Error.t) result
+(** Applies [patch] to the current goals: omitted goals are kept. *)
 
 val default_zone : t -> user:User.t -> (Time.zone, Error.t) result
 (** The goals' timezone, or UTC without goals. *)
