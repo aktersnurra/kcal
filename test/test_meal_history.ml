@@ -898,6 +898,49 @@ let test_grams_are_rounded_in_responses () =
       Alcotest.check json "remaining protein" (`Float 14.1)
         (field "remaining_protein_g" today))
 
+(* 10, 10 and 11 g over three days average 10.333333333333334 g; 100, 100 and
+   101 kcal average 100.33333333333333 kcal. *)
+let test_averages_are_rounded () =
+  with_service (fun service user ->
+      ignore
+        (payload service user "set_goals"
+           [
+             ("timezone", `String "UTC");
+             ("weekday_calorie_target_kcal", `Int 100);
+             ("weekend_calorie_target_kcal", `Int 100);
+           ]);
+      List.iter
+        [ ("01", 100, 10.); ("02", 100, 10.); ("03", 101, 11.) ]
+        ~f:(fun (day, kcal, protein) ->
+          ignore
+            (payload service user "record_meal"
+               [
+                 ("eaten_at", `String ("2026-07-" ^ day ^ "T12:00:00Z"));
+                 ( "items",
+                   `List
+                     [
+                       `Assoc
+                         [
+                           ("description", `String "Oats");
+                           ("calories_kcal", `Int kcal);
+                           ("protein_g", `Float protein);
+                         ];
+                     ] );
+               ]));
+      let summary =
+        payload service user "get_summary"
+          [
+            ("from_date", `String "2026-07-01");
+            ("to_date", `String "2026-07-03");
+          ]
+      in
+      Alcotest.check json "average kcal is whole" (`Int 100)
+        (field "avg_calories_kcal" summary);
+      Alcotest.check json "average protein to 0.1 g" (`Float 10.3)
+        (field "avg_protein_g" summary);
+      Alcotest.check json "average kcal against target is whole" (`Int 0)
+        (field "avg_vs_target_kcal" (field "calorie_target" summary)))
+
 let test_recent_products_in_context () =
   with_service (fun service user ->
       let product = payload service user "save_product" shake in
@@ -939,5 +982,7 @@ let () =
             test_set_goals_is_a_partial_update;
           Alcotest.test_case "grams are rounded in responses" `Quick
             test_grams_are_rounded_in_responses;
+          Alcotest.test_case "averages are rounded" `Quick
+            test_averages_are_rounded;
         ] );
     ]

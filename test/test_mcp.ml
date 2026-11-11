@@ -867,14 +867,12 @@ let test_get_summary_reports_averages_targets_and_trend () =
         "logged days" (`Int 1)
         (field "logged_day_count" fields);
       Alcotest.(check json)
-        "average" (`Float 250.0)
+        "average" (`Int 250)
         (field "avg_calories_kcal" fields);
       Alcotest.(check json)
         "weekday target met, 50 kcal under"
         (`Assoc
-           [
-             ("days_at_or_under", `Int 1); ("avg_vs_target_kcal", `Float (-50.));
-           ])
+           [ ("days_at_or_under", `Int 1); ("avg_vs_target_kcal", `Int (-50)) ])
         (field "calorie_target" fields);
       (match field "target_weight" fields with
       | `Assoc target -> (

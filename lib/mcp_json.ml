@@ -17,6 +17,13 @@ let round_grams value =
 
 let grams_json value = `Float (round_grams value)
 
+(* Derived kcal, such as an average over days, as whole kcal like every
+   logged value. *)
+let kcal_json value =
+  match Float.iround_nearest value with
+  | Some kcal -> `Int kcal
+  | None -> `Float value
+
 (* Yojson prints a float with 16 significant digits whenever that reads back
    as the same float, so the 74.9 a client sent comes back as
    74.90000000000001. Responses use the shortest decimal that reads back as
@@ -274,11 +281,11 @@ let summary_fields (summary : Summary.t) =
            logged) );
     ( "avg_calories_kcal",
       json_option
-        (fun (l : Summary.logged_intake) -> `Float l.avg_calories_kcal)
+        (fun (l : Summary.logged_intake) -> kcal_json l.avg_calories_kcal)
         logged );
     ( "avg_protein_g",
       json_option
-        (fun (l : Summary.logged_intake) -> `Float l.avg_protein_g)
+        (fun (l : Summary.logged_intake) -> grams_json l.avg_protein_g)
         logged );
     ( "calorie_target",
       json_option
@@ -286,7 +293,7 @@ let summary_fields (summary : Summary.t) =
           `Assoc
             [
               ("days_at_or_under", `Int c.days_at_or_under);
-              ("avg_vs_target_kcal", `Float c.avg_vs_target_kcal);
+              ("avg_vs_target_kcal", kcal_json c.avg_vs_target_kcal);
             ])
         summary.calorie_target );
     ( "protein_target",
