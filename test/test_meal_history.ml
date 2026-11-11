@@ -853,7 +853,50 @@ let test_grams_are_rounded_in_responses () =
       Alcotest.check json "daily protein" (`Float 173.2) (field "protein_g" day);
       Alcotest.check json "daily fat" (`Float 305.6) (field "fat_g" day);
       Alcotest.check json "daily kcal is an integer" (`Int 2040)
-        (field "calories_kcal" day))
+        (field "calories_kcal" day);
+      (* Two meals on one day: 74.9 + 0.2 is 75.10000000000001. *)
+      List.iter [ 74.9; 0.2 ] ~f:(fun carbs_g ->
+          ignore
+            (payload service user "record_meal"
+               [
+                 ("eaten_at", `String "2026-07-15T12:00:00Z");
+                 ( "items",
+                   `List [ item "Snack" ~protein_g:1. ~carbs_g ~fat_g:1. ] );
+               ]));
+      (match
+         field "days"
+           (payload service user "get_daily_series"
+              [
+                ("from_date", `String "2026-07-15");
+                ("to_date", `String "2026-07-15");
+              ])
+       with
+      | `List [ day ] ->
+          Alcotest.check json "summed daily carbs" (`Float 75.1)
+            (field "carbs_g" day)
+      | _ -> Alcotest.fail "expected one day");
+      (* Today in get_context: 26.1 + 0.1 g eaten is 26.200000000000003, and
+         40.3 g target minus that is 14.099999999999994. *)
+      ignore
+        (payload service user "set_goals"
+           [
+             ("timezone", `String "UTC");
+             ("weekday_calorie_target_kcal", `Int 2000);
+             ("weekend_calorie_target_kcal", `Int 2000);
+             ("protein_target_g", `Float 40.3);
+           ]);
+      List.iter [ 26.1; 0.1 ] ~f:(fun protein_g ->
+          ignore
+            (payload service user "record_meal"
+               [
+                 ( "items",
+                   `List [ item "Today" ~protein_g ~carbs_g:1. ~fat_g:1. ] );
+               ]));
+      let today = field "today" (payload service user "get_context" []) in
+      Alcotest.check json "today's protein" (`Float 26.2)
+        (field "protein_g" today);
+      Alcotest.check json "remaining protein" (`Float 14.1)
+        (field "remaining_protein_g" today))
 
 let test_recent_products_in_context () =
   with_service (fun service user ->

@@ -543,7 +543,15 @@ let test_tool_calls_are_logged () =
                  (`Assoc [ ("items", `List [ item ]); ("kcal", `Int 1) ]));
             handle [ "ledger:read" ]
               (call "record_meal" (`Assoc [ ("items", `List [ item ]) ]));
-            handle [ "ledger:write" ] (envelope "tools/call"))
+            handle [ "ledger:write" ] (envelope "tools/call");
+            handle [ "ledger:write" ]
+              (`Assoc
+                 [
+                   ("jsonrpc", `String "1.0");
+                   ("id", `Int 8);
+                   ("method", `String "tools/call");
+                   ("params", `Assoc [ ("name", `String "record_meal") ]);
+                 ]))
       in
       let lines = String.split_lines logs in
       let logged fragment =
@@ -560,9 +568,41 @@ let test_tool_calls_are_logged () =
       logged
         {|tool="record_meal" request_id=- keys=["items"] outcome=forbidden scope=ledger:write|};
       logged {|tool=- request_id=7 keys=- outcome=rpc_error error=-32602|};
+      logged
+        {|tool="record_meal" request_id=8 keys=- outcome=rpc_error error=-32600|};
       Alcotest.(check bool)
         "argument values are never logged" false
         (String.is_substring logs ~substring:soup))
+
+(* Floats are written in their shortest exact decimal form, never in exponent
+   form for ordinary values. *)
+let test_floats_are_printed_plainly () =
+  List.iter
+    [
+      (80., "80.0");
+      (20., "20.0");
+      (150., "150.0");
+      (74.9, "74.9");
+      (26.1, "26.1");
+      (40.3, "40.3");
+      (33.75, "33.75");
+      (0.5, "0.5");
+      (-0., "-0.0");
+      (-14.1, "-14.1");
+      (26.1 *. 3., "78.30000000000001");
+      (1e21, "1e+21");
+      (1e-7, "1e-07");
+    ]
+    ~f:(fun (value, expected) ->
+      let text = Mcp_json.to_string (`List [ `Float value ]) in
+      Alcotest.(check string) expected ("[" ^ expected ^ "]") text;
+      Alcotest.(check bool)
+        (expected ^ " reads back exactly")
+        true
+        (match Yojson.Safe.from_string text with
+        | `List [ `Float read ] -> Float.equal read value
+        | `List [ `Int read ] -> Float.equal (Float.of_int read) value
+        | _ -> false))
 
 let test_range_tools_explain_a_malformed_date () =
   Test_support.with_store (fun store user ->
@@ -1559,6 +1599,8 @@ let () =
             test_invalid_params_name_the_field;
           Alcotest.test_case "tool calls are logged" `Quick
             test_tool_calls_are_logged;
+          Alcotest.test_case "floats are printed plainly" `Quick
+            test_floats_are_printed_plainly;
           Alcotest.test_case "rejects bad JSON-RPC and provenance" `Quick
             test_mcp_rejects_bad_jsonrpc_and_provenance_fields;
           Alcotest.test_case "read scope permits reads only" `Quick

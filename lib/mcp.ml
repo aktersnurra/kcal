@@ -418,5 +418,19 @@ let handle ?withings ~service ~identity request =
                 ~reason:"must be an object with name and arguments")
       | Some (`String _) when valid_request ->
           Ok (rpc_error ~id:request_id (-32601) "Method not found")
-      | _ -> Ok (rpc_error ~id:request_id (-32600) "Invalid Request"))
+      | method_ ->
+          (match method_ with
+          | Some (`String "tools/call") ->
+              let name =
+                match List.Assoc.find fields ~equal:String.equal "params" with
+                | Some (`Assoc params) -> (
+                    match List.Assoc.find params ~equal:String.equal "name" with
+                    | Some (`String name) -> Some name
+                    | _ -> None)
+                | _ -> None
+              in
+              log_tool_call ~name ~request_id ~arguments:None
+                (`Rpc_error (-32600, None))
+          | _ -> ());
+          Ok (rpc_error ~id:request_id (-32600) "Invalid Request"))
   | _ -> Ok (rpc_error (-32700) "Parse error")

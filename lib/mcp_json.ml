@@ -27,7 +27,9 @@ let shortest_float value =
     if precision >= 17 || Float.equal (Float.of_string text) value then text
     else digits (precision + 1)
   in
-  let text = digits 1 in
+  (* From 15 digits, which every float with at most 15 significant digits
+     reads back from; fewer would print 80.0 as 8e+01. *)
+  let text = digits 15 in
   if String.exists text ~f:(fun c -> Char.equal c '.' || Char.equal c 'e') then
     text
   else text ^ ".0"
