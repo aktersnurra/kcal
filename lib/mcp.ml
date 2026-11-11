@@ -294,6 +294,15 @@ let argument_keys = function
    always leaves this line, even when it is rejected before any business
    logic runs, so a missing line means the call never got here. *)
 let log_tool_call ~name ~request_id ~arguments outcome =
+  (* The validator's own message, which can quote argument values, only with
+     KCAL_LOG_LEVEL=debug. *)
+  (match outcome with
+  | `Tool_error (Arguments, error) ->
+      Tool_log.debug (fun m ->
+          m "tool=%s rejected arguments: %s"
+            (Option.value_map name ~default:"-" ~f:loggable)
+            (truncated (Error.to_string error)))
+  | _ -> ());
   let log, outcome =
     match outcome with
     | `Ok -> (Tool_log.info, "ok")
